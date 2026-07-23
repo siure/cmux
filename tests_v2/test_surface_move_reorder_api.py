@@ -141,8 +141,15 @@ def main() -> int:
         ordered_ws = [wid for _idx, wid, _title, _selected in c.list_workspaces()]
         if not ordered_ws:
             raise cmuxError("workspace.list returned empty after reorder")
-        if ordered_ws[0] != ws2:
-            raise cmuxError(f"Expected ws2 first after reorder (ordered={ordered_ws}, ws2={ws2})")
+        try:
+            ws0_index = ordered_ws.index(ws0)
+        except ValueError as exc:
+            raise cmuxError(f"Expected original workspace in reorder output (ordered={ordered_ws}, ws0={ws0})") from exc
+        if ws0_index == 0 or ordered_ws[ws0_index - 1] != ws2:
+            raise cmuxError(
+                f"Expected ws2 immediately before ws0 after reorder "
+                f"(ordered={ordered_ws}, ws0={ws0}, ws2={ws2})"
+            )
 
         # Keep original workspace selected for better isolation across per-file runs.
         c.select_workspace(ws0)

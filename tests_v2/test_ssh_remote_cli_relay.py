@@ -77,6 +77,16 @@ def _docker_available() -> bool:
     return probe.returncode == 0
 
 
+def _ssh_remote_cli_relay_supported() -> bool:
+    try:
+        with cmux(SOCKET_PATH) as client:
+            capabilities = client._call("system.capabilities", {}) or {}
+    except Exception:
+        return True
+    features = capabilities.get("features") or {}
+    return bool(features.get("ssh_remote_cli_relay", features.get("ssh_remote_full", True)))
+
+
 def _parse_host_port(docker_port_output: str) -> int:
     text = docker_port_output.strip()
     if not text:
@@ -146,6 +156,9 @@ def main() -> int:
     if not _docker_available():
         print("SKIP: docker is not available")
         return 0
+    if not _ssh_remote_cli_relay_supported():
+        print("SKIP: cmux build does not advertise SSH CLI relay support")
+        return 0
 
     cli = _find_cli_binary()
     repo_root = Path(__file__).resolve().parents[1]
@@ -209,7 +222,7 @@ def main() -> int:
             remote_relay_port = int(remote_relay_port)
             _must(1 <= remote_relay_port <= 65535, f"remote_relay_port should be a valid TCP port: {remote_relay_port}")
             remote_socket_addr = f"127.0.0.1:{remote_relay_port}"
-            startup_cmd = str(payload.get("ssh_startup_command") or "")
+            startup_cmd = str(payload.get("ssh_remote_startup_command") or payload.get("ssh_startup_command") or "")
             _must(
                 'PATH="$HOME/.cmux/bin:$PATH"' in startup_cmd,
                 f"ssh startup command should prepend ~/.cmux/bin for remote cmux CLI: {startup_cmd!r}",
@@ -294,7 +307,7 @@ def main() -> int:
                 f"relay ports should differ per workspace: {remote_relay_port_2} vs {remote_relay_port}",
             )
             remote_socket_addr_2 = f"127.0.0.1:{remote_relay_port_2}"
-            startup_cmd_2 = str(payload_2.get("ssh_startup_command") or "")
+            startup_cmd_2 = str(payload_2.get("ssh_remote_startup_command") or payload_2.get("ssh_startup_command") or "")
             _must(
                 f"CMUX_SOCKET_PATH={remote_socket_addr_2}" in startup_cmd_2,
                 f"second ssh startup command should pin CMUX_SOCKET_PATH to second relay: {startup_cmd_2!r}",

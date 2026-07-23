@@ -215,6 +215,15 @@ if test "$_cmux_integration_enabled" != 0
         printf '%s\n' "$CMUX_TAB_ID"
     end
 
+    function _cmux_surface_context_id
+        if test -n "$CMUX_PANEL_ID"
+            printf '%s\n' "$CMUX_PANEL_ID"
+            return 0
+        end
+        test -n "$CMUX_SURFACE_ID"; or return 1
+        printf '%s\n' "$CMUX_SURFACE_ID"
+    end
+
     function _cmux_relay_rpc_bg --argument-names method params
         _cmux_socket_uses_remote_relay; or return 1
         set -l relay_cli (_cmux_relay_cli_path)
@@ -228,8 +237,9 @@ if test "$_cmux_integration_enabled" != 0
         set -l workspace_id (_cmux_relay_workspace_id); or return 1
         set -l tty_name_json (_cmux_json_escape "$_CMUX_TTY_NAME")
         set -l params "{\"workspace_id\":\"$workspace_id\",\"tty_name\":\"$tty_name_json\""
-        if test -n "$CMUX_PANEL_ID"
-            set params "$params,\"surface_id\":\"$CMUX_PANEL_ID\""
+        set -l surface_id (_cmux_surface_context_id)
+        if test -n "$surface_id"
+            set params "$params,\"surface_id\":\"$surface_id\""
         end
         set params "$params}"
         _cmux_relay_rpc_bg surface.report_tty "$params"
@@ -241,8 +251,9 @@ if test "$_cmux_integration_enabled" != 0
         set -l workspace_id (_cmux_relay_workspace_id); or return 1
         set -l pwd_json (_cmux_json_escape "$pwd")
         set -l params "{\"workspace_id\":\"$workspace_id\",\"path\":\"$pwd_json\""
-        if test -n "$CMUX_PANEL_ID"
-            set params "$params,\"surface_id\":\"$CMUX_PANEL_ID\""
+        set -l surface_id (_cmux_surface_context_id)
+        if test -n "$surface_id"
+            set params "$params,\"surface_id\":\"$surface_id\""
         end
         set params "$params}"
         _cmux_relay_rpc_bg surface.report_pwd "$params"
@@ -253,8 +264,9 @@ if test "$_cmux_integration_enabled" != 0
         test -n "$state"; or return 1
         set -l workspace_id (_cmux_relay_workspace_id); or return 1
         set -l params "{\"workspace_id\":\"$workspace_id\",\"state\":\"$state\""
-        if test -n "$CMUX_PANEL_ID"
-            set params "$params,\"surface_id\":\"$CMUX_PANEL_ID\""
+        set -l surface_id (_cmux_surface_context_id)
+        if test -n "$surface_id"
+            set params "$params,\"surface_id\":\"$surface_id\""
         end
         set params "$params}"
         _cmux_relay_rpc_bg surface.report_shell_state "$params"
@@ -265,8 +277,9 @@ if test "$_cmux_integration_enabled" != 0
         set -l workspace_id (_cmux_relay_workspace_id); or return 1
         test -n "$reason"; or set reason command
         set -l params "{\"workspace_id\":\"$workspace_id\",\"reason\":\"$reason\""
-        if test -n "$CMUX_PANEL_ID"
-            set params "$params,\"surface_id\":\"$CMUX_PANEL_ID\""
+        set -l surface_id (_cmux_surface_context_id)
+        if test -n "$surface_id"
+            set params "$params,\"surface_id\":\"$surface_id\""
         end
         set params "$params}"
         _cmux_relay_rpc_bg surface.ports_kick "$params"
@@ -290,6 +303,8 @@ if test "$_cmux_integration_enabled" != 0
         set -l surface_component "$fish_pid"
         if set -q CMUX_SURFACE_ID; and test -n "$CMUX_SURFACE_ID"
             set surface_component "$CMUX_SURFACE_ID"
+        else if set -q CMUX_PANEL_ID; and test -n "$CMUX_PANEL_ID"
+            set surface_component "$CMUX_PANEL_ID"
         end
         set -l shim_root "$tmp_root/cmux-cli-shims/$surface_component"
         set -l shim_path "$shim_root/$command_name"
@@ -388,9 +403,9 @@ if test "$_cmux_integration_enabled" != 0
 
         if _cmux_socket_is_unix
             test -n "$CMUX_TAB_ID"; or return 0
-            test -n "$CMUX_PANEL_ID"; or return 0
+            set -l surface_id (_cmux_surface_context_id); or return 0
             set -g _CMUX_TTY_REPORTED 1
-            _cmux_send_bg "report_tty $_CMUX_TTY_NAME --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+            _cmux_send_bg "report_tty $_CMUX_TTY_NAME --tab=$CMUX_TAB_ID --panel=$surface_id"
         else if _cmux_socket_uses_remote_relay
             set -g _CMUX_TTY_REPORTED 1
             _cmux_report_tty_via_relay
@@ -400,13 +415,14 @@ if test "$_cmux_integration_enabled" != 0
     function _cmux_report_shell_activity_state --argument-names state
         test -n "$state"; or return 0
         test -n "$CMUX_TAB_ID"; or return 0
+        set -l surface_id ""
         if _cmux_socket_is_unix
-            test -n "$CMUX_PANEL_ID"; or return 0
+            set surface_id (_cmux_surface_context_id); or return 0
         end
         test "$_CMUX_SHELL_ACTIVITY_LAST" = "$state"; and return 0
         set -g _CMUX_SHELL_ACTIVITY_LAST "$state"
         if _cmux_socket_is_unix
-            _cmux_send_bg "report_shell_state $state --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+            _cmux_send_bg "report_shell_state $state --tab=$CMUX_TAB_ID --panel=$surface_id"
         else
             _cmux_report_shell_activity_state_via_relay "$state"; or set -g _CMUX_SHELL_ACTIVITY_LAST ""
         end
@@ -422,8 +438,8 @@ if test "$_cmux_integration_enabled" != 0
         test -n "$CMUX_TAB_ID"; or return 0
         set -g _CMUX_PORTS_LAST_RUN (_cmux_now)
         if _cmux_socket_is_unix
-            test -n "$CMUX_PANEL_ID"; or return 0
-            _cmux_send_bg "ports_kick --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID --reason=$reason"
+            set -l surface_id (_cmux_surface_context_id); or return 0
+            _cmux_send_bg "ports_kick --tab=$CMUX_TAB_ID --panel=$surface_id --reason=$reason"
         else
             _cmux_ports_kick_via_relay "$reason"
         end
@@ -444,9 +460,10 @@ if test "$_cmux_integration_enabled" != 0
         set -l pwd "$PWD"
         if test "$pwd" != "$_CMUX_PWD_LAST_PWD"
             if _cmux_socket_is_unix
-                if test -n "$CMUX_TAB_ID"; and test -n "$CMUX_PANEL_ID"
+                set -l surface_id (_cmux_surface_context_id)
+                if test -n "$CMUX_TAB_ID"; and test -n "$surface_id"
                     set -l qpwd (_cmux_json_escape "$pwd")
-                    if _cmux_send_bg "report_pwd \"$qpwd\" --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+                    if _cmux_send_bg "report_pwd \"$qpwd\" --tab=$CMUX_TAB_ID --panel=$surface_id"
                         set -g _CMUX_PWD_LAST_PWD "$pwd"
                     end
                 end

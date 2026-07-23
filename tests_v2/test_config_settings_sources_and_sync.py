@@ -7,6 +7,7 @@ the synced preview with cmux overrides on top of Ghostty base values.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -280,6 +281,9 @@ def test_nightly_app_edits_nightly_config_and_falls_back_to_release_when_missing
 
 
 def main() -> int:
+    if shutil.which("xcrun") is None:
+        print("SKIP: xcrun/swiftc is not available on this platform.")
+        return 0
     repo_root = get_repo_root()
     with tempfile.TemporaryDirectory(prefix="cmux-config-source-probe-") as tmp:
         executable = Path(tmp) / "config_source_probe"

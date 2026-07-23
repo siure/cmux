@@ -26,11 +26,13 @@ The sidebar layout, top to bottom:
 
 ## Creating a group
 
-### From the keyboard (`⌃⌘G` or `⌘⇧G`)
+### From the keyboard (`⌃⌘G`, `⌘⇧G`, or `Super+Shift+G`)
 
 Press `⌃⌘G` to create a new empty workspace group. cmux inserts a fresh anchor workspace as the group header and auto-names it `Group 1`, `Group 2`, … (rename anytime via the header context menu).
 
-Select two or more workspaces in the sidebar, press `⌘⇧G`. A fresh anchor workspace is inserted above the selection; all selected workspaces become children. The group is auto-named `Group 1`, `Group 2`, … (rename anytime via the header context menu). `⌘⇧G` collides with React Grab's default; the group handler only consumes the chord when there is an explicit sidebar multi-selection of at least two workspaces, so React Grab still fires in single-selection and browser/terminal contexts. Rebind in Settings → Keyboard if you'd rather the two not share a key.
+Select two or more workspaces in the sidebar, press `⌘⇧G` on macOS or `Super+Shift+G` on Linux. A fresh anchor workspace is inserted above the selection; all selected workspaces become children. The group is auto-named `Group 1`, `Group 2`, … (rename anytime via the header context menu). `⌘⇧G` collides with React Grab's default; the group handler only consumes the chord when there is an explicit sidebar multi-selection of at least two workspaces, so React Grab still fires in single-selection and browser/terminal contexts. Rebind in Settings → Keyboard if you'd rather the two not share a key.
+
+On Linux, use `Super`-click or `Ctrl`-click to toggle individual workspaces, `Shift`-click to replace the selection with a range, and `Super+Shift`-click or `Ctrl+Shift`-click to extend it with a range. Children hidden inside collapsed groups are excluded from range selection.
 
 Single-tab groups are not created from the shortcut. Use the workspace context menu's **New Group from Workspace** entry for that.
 
@@ -46,7 +48,7 @@ Right-click an existing group's header for: **Rename Group…**, **Pin / Unpin G
 
 Hover over a group header to reveal a trailing `+` button. Click to create a new workspace in the group at the anchor's cwd. Right-click for **New Workspace in Group**, **Edit Group Config…**, and **Open Workspace Groups Docs**.
 
-Pressing `⌘N` while the active workspace is a group anchor or group member also creates the workspace inside that group. The default group placement is **After current**: from a regular group member, the new workspace lands right after the active member; from the anchor/header, it lands at the top of the group.
+Pressing `⌘N` on macOS or `Super+N` on Linux while the active workspace is a group anchor or group member also creates the workspace inside that group. The default group placement is **After current**: from a regular group member, the new workspace lands right after the active member; from the anchor/header, it lands at the top of the group.
 
 ## CLI
 
@@ -102,15 +104,16 @@ Per-group configuration is keyed by the anchor's working directory in `~/.config
 ```jsonc
 {
   "workspaceGroups": {
-    // Global default for Cmd-N inside a group, the group header + button, and
-    // configured group actions. Per-cwd entries below can override it.
+    // Global default for Cmd-N on macOS / Super-N on Linux inside a group,
+    // the group header + button, and configured group actions. Per-cwd
+    // entries below can override it.
     //   "afterCurrent" (default) - after the active in-group workspace; falls
     //                              back to top when there is no member reference
     //   "top"                    - second slot, right after the anchor
     //   "end"                    - after the trailing member
     "newWorkspacePlacement": "afterCurrent",
     "byCwd": {
-      "/Users/you/manaflow/cmux": {
+      "/home/you/manaflow/cmux": {
         "color": "#7A4FD8",
         "icon": "ladybug.fill",
         "newWorkspacePlacement": "top",
@@ -137,7 +140,7 @@ Resolution order for group new-workspace placement:
 2. The per-cwd entry above.
 3. Global default via Settings > App > Group New Workspace Placement or `workspaceGroups.newWorkspacePlacement` in `cmux.json` (defaults to `afterCurrent`).
 
-`Cmd-N` inside a group uses the active group workspace as the placement reference. The group header `+` button and CLI path use the anchor as the reference, so `afterCurrent` behaves like `top` there.
+`Cmd-N` on macOS and `Super-N` on Linux inside a group use the active group workspace as the placement reference. The group header `+` button and CLI path use the anchor as the reference, so `afterCurrent` behaves like `top` there.
 
 ## iMessage mode (planned)
 
@@ -150,4 +153,4 @@ Neither knob is wired up yet. The current build keeps the sidebar's existing iMe
 
 ## Persistence
 
-Groups (name, anchor, pin state, collapse state, color, icon) round-trip through `~/Library/Application Support/cmux/session-<bundle-id>.json` alongside workspaces. Membership lives on `Workspace.groupId`. Writes are atomic via the existing `SessionPersistenceStore` rename-into-place pattern.
+Groups (name, anchor, pin state, collapse state, color, icon) round-trip through the app session snapshot alongside workspaces. macOS stores this under `~/Library/Application Support/cmux/session-<bundle-id>.json`; the Linux port stores versioned snapshots under `$XDG_STATE_HOME/cmux/` or `~/.local/state/cmux/`. Membership lives on `Workspace.groupId`. Writes are atomic via the existing rename-into-place pattern.

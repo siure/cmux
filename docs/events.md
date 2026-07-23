@@ -28,8 +28,9 @@ delivery with bounded replay.
 Lifecycle events with `source: "window.lifecycle"` or
 `source: "workspace.lifecycle"` are emitted from the cmux model, so they cover
 UI actions, CLI/socket commands, shortcuts, startup creation, restore paths, and
-AppKit focus/key transitions. Socket-sourced events are reserved for command
-effects that do not have an authoritative model lifecycle event.
+native focus/key transitions from the active app shell (AppKit on macOS, GTK on
+Linux). Socket-sourced events are reserved for command effects that do not have
+an authoritative model lifecycle event.
 
 ## Stream request
 
@@ -214,9 +215,9 @@ Window:
 | Name | Trigger |
 | --- | --- |
 | `window.created` | A main cmux window is registered in the app model. Covers startup, session restore, shortcuts, menus, and socket commands. |
-| `window.focused` | A cmux window focus request succeeded. This is an app-level focus action, not necessarily a new AppKit key transition. |
-| `window.keyed` | AppKit reported a main cmux window became the key window. Use this to track the window receiving keyboard input. |
-| `window.unkeyed` | AppKit reported a main cmux window resigned key status. |
+| `window.focused` | A cmux window focus request succeeded. This is an app-level focus action, not necessarily a new native key/focus transition. |
+| `window.keyed` | The native app shell reported that a main cmux window became the keyboard-focused window. AppKit emits this as key-window state; Linux GTK emits the same logical event from focus state. |
+| `window.unkeyed` | The native app shell reported that a main cmux window no longer owns keyboard focus. |
 | `window.closed` | A main cmux window was unregistered during close. |
 
 Window lifecycle payloads include `window_id`, `workspace_id`,

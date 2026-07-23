@@ -91,14 +91,14 @@ Support legend: ● supported · ◐ partial · ○ missing. Priority: P0 highes
 
 | Symbol(s) | Support | Pri | Mechanism |
 |---|---|---|---|
-| Re-walk on state change | ○ | P0 | Host-owned observable `StateBag` keyed by `@State` site; writes mark dirty and re-run `evaluate()`. **The gate for this whole tier.** |
-| `@State` / `$value` (projection) / `Binding(get:set:)` / `@Binding` param | ◐/○ | P0/P1 | Seed bag once; `$name` → binding handle (get/set path); bridge → real `Binding<T>`. |
-| Assignment & compound mutation (`=`,`+=`,`.toggle()`,`.append`) | ○ | P0 | Replace `parseAction` 3-case matcher with a statement executor that writes the bag + re-walks. |
-| `TextField` / `SecureField` / `TextEditor` | ○ | P0/P1 | Leaf kinds consuming a string binding. |
-| `Toggle` / `Slider` | ○ | P0 | Bool/Double binding; rich-label children reuse Button pattern; range already in `SwiftValue`. |
-| `Picker` + selection matching against `.tag` | ○ | P0 | Selection binding; options from static rows or `ForEach`; match value against captured tags. |
-| `Stepper` (onIncrement/onDecrement) | ○ | P1 | Value form is leaf; action form needs the statement executor. |
-| `.onSubmit` / `.onChange(of:)` | ○ | P1 | Closure capture + statement executor; `onChange` diffs values across re-walks. |
+| Re-walk on state change | ● | P0 | Linux advances document generation after writes and preserves bounded per-instance identity through `ForEach`, `Reorderable`, ordinary loops, and helper calls. |
+| `@State` / `$value` (projection) / `Binding(get:set:)` / `@Binding` param | ●/◐ | P0/P1 | Linux persists top-level and identity-scoped helper state and lowers `$name` into a typed neutral binding; composed collection/custom-view `@Binding` remains. |
+| Assignment & compound mutation (`=`,`+=`,`.toggle()`,`.append`) | ◐ | P0 | Linux button actions execute `=`, `+=`, `-=`, `.toggle()`, and `.append`; general mutable scopes remain. |
+| `TextField` / `SecureField` / `TextEditor` | ◐/○/○ | P0/P1 | Linux ships native GTK `TextField` for String bindings. |
+| `Toggle` / `Slider` | ●/● | P0 | Linux ships native GTK controls with typed Bool/numeric bindings and bounded ranges. |
+| `Picker` + selection matching against `.tag` | ● | P0 | Native GTK picker options retain typed unique tag values from static rows or `ForEach`. |
+| `Stepper` (value / onIncrement-onDecrement forms) | ●/○ | P1 | The native bound value/range/step form ships; custom increment/decrement closures remain. |
+| `.onSubmit` / `.onChange(of:)` | ●/◐ | P1 | GTK submit handlers inherit through containers; state-key changes run after writes with zero/one/two closure parameters. Derived-expression observation remains. |
 | `DatePicker` / `ColorPicker` | ○ | P2 | Binding engine + `SwiftValue.date` (or hex-string) case. |
 | `ForEach($collection)` (element binding) | ○ | P1 | Synthesize per-index get/set; `$item.field` composes a deeper keypath setter. |
 | `List(selection:)` of `NavigationLink` | ◐ | P0 | Selection cell + route push + lazy detail share one bag. |
@@ -119,11 +119,11 @@ Support legend: ● supported · ◐ partial · ○ missing. Priority: P0 highes
 
 | Symbol(s) | Support | Pri | Mechanism |
 |---|---|---|---|
-| `struct` definition + memberwise init | ○ | P0 | Register `StructDeclSyntax`; tag `.object(typeName,fields)`; synthesize label-matched init. |
-| custom `View` struct + `var body: some View` | ○ | P0 | Bind init args by label into scope + self; `evalItems(body)`. |
+| `struct` definition + memberwise init | ◐ | P0 | Linux registers `struct: View`, binds stored fields by synthesized labels, applies defaults, and rejects missing required values; general value structs and custom initializers remain. |
+| custom `View` struct + `var body: some View` | ◐ | P0 | Linux evaluates computed `body` with direct/`self` field reads and identity-scoped nested `@State`; methods, generics, stored view closures, and composed `@Binding` remain. |
 | `@ViewBuilder` (param + func) | ○ | P0 | Store as `.closure(params,body,capturedScope)`; expand `content` later via `evalItems`. |
-| `enum` (raw + associated values) | ○ | P0 | `.enumCase(typeName,case,payload)`; `.rawValue`/`init?(rawValue:)`. |
-| `switch`/`case` (+where, value/enum/tuple/range patterns, let-binding) | ○ | P0 | Pattern matcher in `evalItems` (view) and `evalBlockValue` (value); bind let names in child scope. |
+| `enum` (raw + associated values) | ◐ | P0 | Linux tags simple/comma-separated and associated-value cases, persists them, supports String raw values and labeled payload members; methods and `init?(rawValue:)` remain. |
+| `switch`/`case` (+where, value/enum/tuple/range patterns, let-binding) | ◐ | P0 | Linux evaluates scalar/range and enum/associated patterns with bindings, multiple cases, `where`, and `default` in views, value helpers, and actions; tuple/optional/nested patterns and exhaustiveness diagnostics remain. |
 | `if let` / `guard let` / `?.` / `??` | ○ | P0 | `SwiftValue.optional`; `evalIf` reads `OptionalBindingCondition`; member/subscript propagate `nil`. |
 | `guard` statement | ○ | P0 | Control-flow signal: else block must emit `.return/.break/.continue`. |
 | computed property `var x: T { ... }` | ○ | P0/P1 | Detect getter accessor; evaluate block with self-members bound. |
@@ -175,7 +175,7 @@ Support legend: ● supported · ◐ partial · ○ missing. Priority: P0 highes
 
 ### Phase 2 — state engine (`@State`/`@Binding`/`$` + input controls)
 
-**Interpreter changes.** Lift a host-owned observable `StateBag` (`[siteKey: SwiftValue]`) into the model, seeded once from `@State` decls and surviving re-walks. Add a binding handle (`SwiftValue.binding(get,set)` produced by `$name`/`$obj.field`/`$arr[i]`). Replace `parseAction`'s three-call matcher with a statement executor (`=`,`+=`,`-=`,`.toggle()`,`.append`, multi-statement) that writes the bag and schedules a re-walk; keep `cmux`/`log`/`openURL` as terminal side effects. Add value-diffing across re-walks (for `onChange`) and stable identity stamping on `RenderNode` (for transitions/diffing). Add a deferred fire-time action variant (store unevaluated arg exprs + callback param name) for gesture/drop payloads.
+**Interpreter changes.** Lift a host-owned observable `StateBag` (`[siteKey: SwiftValue]`) into the model, seeded once from `@State` decls and surviving re-walks. Add a binding handle (`SwiftValue.binding(get,set)` produced by `$name`/`$obj.field`/`$arr[i]`). Replace `parseAction`'s three-call matcher with a statement executor (`=`,`+=`,`-=`,`.toggle()`,`.append`, multi-statement) that writes the bag and schedules a re-walk; keep `cmux`/`log`/`openURL` as terminal side effects. Linux now re-evaluates state-key `onChange` actions after writes with old/new values and stamps stable bounded identity through dynamic rows and helper calls. Derived-expression observation remains. Add a deferred fire-time action variant (store unevaluated arg exprs + callback param name) for gesture/drop payloads.
 
 **Unlocks.** `TextField`/`SecureField`/`TextEditor`/`Toggle`/`Picker`(+`.tag`)/`Slider`/`Stepper`/`DatePicker`/`ColorPicker`; `ForEach($collection)`; `.onSubmit`/`.onChange`; `withAnimation`/`.animation(value:)`/`.transition`/`.contentTransition`/`.symbolEffect(value:)`/`matchedGeometryEffect`/`@Namespace`; author-controllable `TimelineView`/`.phaseAnimator`; live gestures (`onHover`, `DragGesture`, drop highlight, gesture `.value`); `.onAppear`/`.onDisappear` drivers. `@FocusState` rides here but stays runtime-limited (bridge owns the real focus state).
 

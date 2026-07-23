@@ -47,6 +47,13 @@ That writes `.opencode/plugins/cmux-feed.js` in the current directory.
 
 Session hooks write `~/.cmuxterm/<agent>-hook-sessions.json`. Each entry stores the agent session ID, cmux workspace ID, surface ID, cwd, process ID when available, current lifecycle (`running`, `idle`, `needsInput`, or `unknown`), and a sanitized launch command. On app relaunch, cmux rebuilds each workspace and runs the agent's native resume command with the saved session ID.
 
+Turn-start hooks also write `~/.cmuxterm/agent-turn-diff-baselines.json`
+or `$CMUX_AGENT_HOOK_STATE_DIR/agent-turn-diff-baselines.json`. The baseline
+captures tracked Git state plus a bounded snapshot of untracked files for the
+current workspace/surface, so `cmux diff --last-turn` can show changes made by
+the latest agent turn. `UserPromptSubmit` replaces the current turn baseline;
+`PreToolUse` only creates a fallback baseline when one was not already recorded.
+
 The sanitizer preserves model, sandbox, config, and cwd-related flags. It drops prompts, credentials, old session selectors, and noninteractive commands so relaunch resumes the session instead of starting a new task or leaking secrets.
 
 Claude Code's `PushNotification` tool (model-initiated "notify the user now" pushes) is bridged through a `PostToolUse` hook into cmux notifications. The tool normally delivers via a raw OSC desktop notification, which cmux suppresses on surfaces running a hook-integrated agent, so the bridge is what makes those pushes visible inside cmux. It mirrors the tool's own outcome: a push the tool reports as skipped (user active, channel disabled) is not duplicated.
@@ -83,7 +90,7 @@ cmux sends `SIGTERM` to the agent's process group (scoped to that workspace and 
 
 ### Enable and configure
 
-Enable from the command palette (`⌘⇧P` -> **Enable Agent Hibernation**), from **Settings > Terminal > Agent Hibernation**, or from the CLI:
+Enable from the command palette (`⌘⇧P` on macOS or `Super+Shift+P` on Linux -> **Enable Agent Hibernation**), from **Settings > Terminal > Agent Hibernation**, or from the CLI:
 
 ```bash
 cmux agent-hibernation on
@@ -109,9 +116,14 @@ Tune the idle window and live-terminal limit from Settings, or set them in `~/.c
 
 ## Custom surface resume commands
 
-Use `cmux surface resume set --shell <command>` to attach a resume command to the current terminal surface. Public CLI and socket-created commands are kept for inspection and manual restore by default. To auto-run one on restore, approve the prompt or change its signed command prefix in **Settings > Terminal > Resume Commands**.
+Use `cmux surface resume set --shell <command>` to attach a resume command to the current terminal surface. Public CLI and socket-created commands are kept for inspection and manual restore by default. Choose a signed policy with `cmux surface resume approve --policy manual|prompt|auto`, approve the GTK prompt, or edit the prefix in **Settings > Terminal > Resume Commands**.
 
 Approvals are prefix-based and signed by cmux. They also bind the working directory and exact environment values when present. A process can propose a command, but it cannot make that command sticky without the user choosing Auto-Restore or Ask Each Time in cmux.
+
+On Linux, a `prompt` approval is represented in the restored surface until the
+GTK dialog calls `surface.resume.run`; display-free clients can run or skip the
+same pending command explicitly. An unsigned original terminal startup command
+is not treated as a resume command and is not repeated on relaunch.
 
 ## Disable automatic resume
 
@@ -168,6 +180,6 @@ Kimi Code reads its main config from `${KIMI_SHARE_DIR:-~/.kimi}/config.toml`. D
 
 Run `cmux hooks <agent> install --yes` to reinstall one integration. Run `cmux hooks <agent> uninstall --yes` before editing generated files by hand.
 
-If Feed shows nothing, confirm the terminal has `CMUX_SURFACE_ID` and the hook file contains a `cmux hooks feed --source <agent>` command, generated extension bridge, or OpenCode feed plugin. Pi reports non-blocking tool execution telemetry through its generated extension. OMP, Campfire, and Rovo Dev currently provide lifecycle and restore hooks only, so they do not create Feed approval cards. Amp's bundled plugin reports live tab-status updates (idle / thinking / running / reading / done / error / interrupted) and lifecycle restore but does not create Feed approval cards.
+If Feed shows nothing, confirm the terminal has `CMUX_SURFACE_ID` or the Linux compatibility alias `CMUX_PANEL_ID`, and the hook file contains a `cmux hooks feed --source <agent>` command, generated extension bridge, or OpenCode feed plugin. Pi reports non-blocking tool execution telemetry through its generated extension. OMP, Campfire, and Rovo Dev currently provide lifecycle and restore hooks only, so they do not create Feed approval cards. Amp's bundled plugin reports live tab-status updates (idle / thinking / running / reading / done / error / interrupted) and lifecycle restore but does not create Feed approval cards.
 
 If relaunch does not resume an agent, check `~/.cmuxterm/<agent>-hook-sessions.json` for the saved session and verify the agent's resume command still works outside cmux.

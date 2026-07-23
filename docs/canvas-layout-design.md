@@ -108,6 +108,22 @@ reveal focused pane, overview (fit all), zoom to 100%, align
 lefts/rights/tops/bottoms, equalize widths/heights, distribute
 horizontally/vertically, tidy canvas.
 
+The Linux state engine uses the same `CanvasSpatialNavigator` scoring for the
+four directional focus shortcuts, raises the chosen pane, and minimally
+reveals it in the current viewport. Split mode uses the same rendered-frame
+geometry instead of falling back to workspace pane-list order. Next/previous
+surface shortcuts (`Cmd+Shift+]` / `Cmd+Shift+[`) wrap through the ordered tabs
+inside the focused pane in both Canvas and split layouts. Focus-history
+shortcuts (`Cmd+[` / `Cmd+]`) navigate across workspaces and panes; restoring a
+Canvas entry raises it and minimally reveals it without rewriting the forward
+history branch. Linux routes the default toggle, reveal, overview, zoom
+in/out/reset, and tidy shortcuts through the same user-action dispatcher as its
+executable command-palette rows. The unbound alignment, equalization, and
+distribution actions are executable palette rows through that dispatcher too
+and accept runtime shortcut bindings even though they have no default keys;
+Canvas-only actions are no-ops in split mode, matching `CanvasActionExecutor`,
+while direct `canvas.*` RPCs remain strict.
+
 All new shortcuts are registered in `KeyboardShortcutSettings`, editable in
 Settings, configurable in `~/.config/cmux/cmux.json`, and documented in the
 web docs. Settings: `canvas.paneGap` (points), `canvas.snapping` (bool).
@@ -117,4 +133,7 @@ All user-facing strings localized (en + ja).
 
 `SessionWorkspaceSnapshot` gains `layoutMode` and an optional encoded
 `CanvasLayout`. Restore rebuilds the canvas exactly; panes keep their frames
-across restarts.
+across restarts. The Linux session snapshot also stores pane z-order by pane
+index, then remaps those indices to regenerated pane IDs during restore.
+Focusing a Canvas pane raises it above overlapping neighbors in both the core
+socket model and GTK child stacking order.

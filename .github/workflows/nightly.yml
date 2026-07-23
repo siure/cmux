@@ -15,6 +15,10 @@ on:
         required: false
         default: false
         type: boolean
+      linux_ghostty_ref:
+        description: Published 40-character manaflow-ai/ghostty commit for the Linux bundle
+        required: false
+        type: string
 
 concurrency:
   group: nightly-build-${{ github.ref_name }}
@@ -200,6 +204,17 @@ jobs:
             rm -rf "$cache_path"
           fi
 
+  build-linux-desktop-nightly:
+    needs: decide
+    if: needs.decide.outputs.should_build == 'true' && (github.event_name != 'schedule' || github.event.schedule == '47 8 * * *')
+    uses: ./.github/workflows/build-linux-app.yml
+    with:
+      cmux_ref: ${{ needs.decide.outputs.head_sha }}
+      ghostty_ref: ${{ inputs.linux_ghostty_ref || vars.CMUX_LINUX_GHOSTTY_REF }}
+      bundle_version: nightly-${{ needs.decide.outputs.short_sha }}
+    permissions:
+      contents: read
+
   build-nightly-ghostty-cli-helper:
     needs: decide
     if: needs.decide.outputs.should_build == 'true' && (github.event_name != 'schedule' || github.event.schedule == '47 8 * * *')
@@ -377,7 +392,11 @@ jobs:
             build-universal/Build/Products/Release/
 
   build-sign-notarize-nightly:
-    needs: [decide, build-nightly-ghostty-cli-helper, build-nightly-app]
+    needs:
+      - decide
+      - build-linux-desktop-nightly
+      - build-nightly-ghostty-cli-helper
+      - build-nightly-app
     if: needs.decide.outputs.should_build == 'true' && (github.event_name != 'schedule' || github.event.schedule == '47 8 * * *')
     # Sign and notarize on the same macOS 26 lane proven by stable releases.
     runs-on: ${{ vars.MACOS_RUNNER_26 || 'blacksmith-6vcpu-macos-26' }}
@@ -419,6 +438,12 @@ jobs:
         with:
           name: cmux-nightly-ghostty-cli-helper
           path: nightly-inputs/ghostty
+
+      - name: Download Linux desktop bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: cmux-linux-desktop-${{ github.run_id }}
+          path: linux-desktop
 
       - name: Restore unsigned nightly products
         run: |
@@ -755,6 +780,25 @@ jobs:
             remote-daemon-assets/cmuxd-remote-checksums-${{ env.NIGHTLY_BUILD }}.txt
             remote-daemon-assets/cmuxd-remote-manifest-${{ env.NIGHTLY_BUILD }}.json
 
+      - name: Attest Linux desktop nightly assets
+        id: attest-linux-desktop-nightly-assets
+        continue-on-error: true
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
+
+      - name: Retry Linux desktop nightly asset attestation
+        if: steps.attest-linux-desktop-nightly-assets.outcome == 'failure'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
+
       - name: Upload branch nightly artifacts
         if: needs.decide.outputs.should_publish != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -765,6 +809,9 @@ jobs:
             appcast.xml
             remote-daemon-assets/cmuxd-remote-*
             appcast-universal.xml
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
           if-no-files-found: error
 
       - name: Prune old nightly release assets
@@ -796,12 +843,16 @@ jobs:
             - compatibility feed `appcast-universal.xml` for older universal nightlies
 
             [Download cmux-nightly-macos.dmg](https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-nightly-macos.dmg)
+            [Download cmux Linux x86_64](https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-linux-x86_64.tar.gz)
           files: |
             cmux-nightly-macos-${{ github.run_id }}*.dmg
             cmux-nightly-macos.dmg
             appcast.xml
             remote-daemon-assets/cmuxd-remote-*
             appcast-universal.xml
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
           overwrite_files: true
 
       - name: Upload nightly appcast to R2

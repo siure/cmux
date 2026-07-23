@@ -98,6 +98,12 @@ jobs:
       - name: Validate docs deployment authentication guard
         run: python3 tests/test_docs_deploy_auth_guard.py
 
+      - name: Validate Linux desktop bundle workflow
+        run: ./tests/test_ci_linux_app_bundle_workflow.sh
+
+      - name: Validate Linux desktop release wiring
+        run: ./tests/test_ci_linux_desktop_release_wiring.sh
+
       - name: Validate Python test harness syntax
         run: git ls-files 'tests/*.py' 'tests_v2/*.py' 'scripts/*.py' | xargs python3 -m py_compile
 
@@ -219,6 +225,9 @@ jobs:
       - name: Validate current GhosttyKit checksum pin
         run: ./tests/test_ci_ghosttykit_checksum_present.sh
 
+      - name: Validate Linux port CI lane
+        run: ./tests/test_ci_linux_port_lane.sh
+
       - name: Validate Swift warning budget guard
         run: ./tests/test_ci_swift_warning_budget.sh
 
@@ -251,6 +260,100 @@ jobs:
 
       - name: Validate test determinism gate
         run: python3 scripts/check-test-determinism.py --strict
+
+  linux-port-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUST_VERSION: "1.92.0"
+    defaults:
+      run:
+        working-directory: linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install GTK development files
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libgtk-4-dev libwebkitgtk-6.0-dev pkg-config xauth xvfb dbus-x11
+
+      - name: Configure Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+          rustup default "$RUST_VERSION"
+          rustc --version
+          cargo --version
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test display-free Linux core
+        run: cargo test --locked
+
+      - name: Test GTK Linux app
+        run: cargo test --locked --features gtk
+
+      - name: Smoke native WebKit runtime
+        run: |
+          timeout 30s dbus-run-session -- xvfb-run -a cargo run --locked --features gtk --example webkit-cookie-smoke
+          timeout 30s dbus-run-session -- xvfb-run -a cargo run --locked --features gtk --example webkit-runtime-smoke
+
+      - name: Smoke GTK app lifecycle
+        run: |
+          set -euo pipefail
+          cargo build --locked --features gtk
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          mkdir -p "$smoke_root/home" "$smoke_root/config" "$smoke_root/state"
+          export HOME="$smoke_root/home"
+          export XDG_CONFIG_HOME="$smoke_root/config"
+          export XDG_STATE_HOME="$smoke_root/state"
+          timeout 30s xvfb-run -a target/debug/cmux app --renderer gtk \
+            --script $'status\nsplit right\nstatus\nquit' > "$smoke_root/output.log"
+          grep -Fx 'window=window:1 workspace=workspace:1 pane=pane:1 surface=surface:1' "$smoke_root/output.log"
+          grep -Fx 'surface=surface:2 workspace=workspace:1 pane=pane:2' "$smoke_root/output.log"
+          grep -Fx 'window=window:1 workspace=workspace:1 pane=pane:2 surface=surface:2' "$smoke_root/output.log"
+          grep -Fx 'bye' "$smoke_root/output.log"
+
+          timeout 30s xvfb-run -a sh -ceu '
+            cmux="$1"
+            socket="$2"
+            app_log="$3"
+            quit_output="$4"
+            "$cmux" app --renderer gtk --socket "$socket" >"$app_log" 2>&1 &
+            app_pid=$!
+            trap '\''kill "$app_pid" 2>/dev/null || true'\'' EXIT INT TERM
+
+            attempt=0
+            until "$cmux" --socket "$socket" ping >/dev/null 2>&1; do
+              kill -0 "$app_pid"
+              attempt=$((attempt + 1))
+              [ "$attempt" -lt 200 ]
+              sleep 0.05
+            done
+
+            "$cmux" --socket "$socket" rpc app.quit.request "{}" >"$quit_output"
+            grep -Eq '\''"quit"[[:space:]]*:[[:space:]]*true'\'' "$quit_output"
+            attempt=0
+            while kill -0 "$app_pid" 2>/dev/null; do
+              attempt=$((attempt + 1))
+              [ "$attempt" -lt 100 ]
+              sleep 0.05
+            done
+            wait "$app_pid"
+            trap - EXIT INT TERM
+          ' sh target/debug/cmux "$smoke_root/cmux.sock" \
+            "$smoke_root/app.log" "$smoke_root/quit.json"
+
+      - name: Validate Linux distribution bundle
+        working-directory: .
+        run: |
+          bash -n linux/scripts/install-dev.sh
+          bash -n linux/scripts/build-bundle.sh
+          sh -n linux/dist/cmux-linux-app
+          sh -n linux/dist/install-bundle.sh
+          ./tests/test_linux_bundle.sh
 
   remote-daemon-tests:
     needs: changes

@@ -79,6 +79,16 @@ def _docker_available() -> bool:
     return probe.returncode == 0
 
 
+def _ssh_remote_reconnect_supported() -> bool:
+    try:
+        with cmux(SOCKET_PATH) as client:
+            capabilities = client._call("system.capabilities", {}) or {}
+    except Exception:
+        return True
+    features = capabilities.get("features") or {}
+    return bool(features.get("ssh_remote_reconnect", features.get("ssh_remote_full", True)))
+
+
 def _curl_via_socks(proxy_port: int, target_url: str) -> str:
     if shutil.which("curl") is None:
         raise cmuxError("curl is required for SOCKS proxy verification")
@@ -437,6 +447,9 @@ def _wait_remote_degraded(client: cmux, workspace_id: str, timeout: float) -> di
 def main() -> int:
     if not _docker_available():
         print("SKIP: docker is not available")
+        return 0
+    if not _ssh_remote_reconnect_supported():
+        print("SKIP: cmux build does not advertise SSH remote reconnect support")
         return 0
 
     cli = _find_cli_binary()

@@ -23,7 +23,7 @@ As of February 12, 2026:
 
 ## Concepts (Canonical Terms)
 
-1. `window`: native macOS window.
+1. `window`: native app window.
 2. `workspace`: sidebar entry within a window (often called "tab" in UI).
 3. `pane`: split region inside a workspace.
 4. `surface`: tab within a pane (terminal or browser). This is the primary automation target.
@@ -110,18 +110,22 @@ Recommended extension for browser workflows:
 2. `is`: `visible|enabled|checked`
 3. `find`: `role|text|label|placeholder|alt|title|testid|first|last|nth`
 4. `mouse`: `move|down|up|wheel`
-5. `set`: `viewport|device|geo|geolocation|offline|headers|credentials|auth|media`
-6. `network`: `route|unroute|requests`
-7. `storage`: `local|session` + `get|set|clear`
-8. `cookies`: default get, plus `set|clear`
-9. `tab`: default list, plus `new|list|close|<index>`
-10. `window`: `new`
-11. `frame`: `<selector>|main`
-12. `dialog`: `accept|dismiss`
-13. `trace`: `start|stop`
-14. `record`: `start|stop|restart`
-15. `state`: `save|load`
-16. `device`: `list`
+5. `content|setcontent|innertext`
+6. `setvalue|inserttext|selectall|clear|clipboard`
+7. `bringtofront|multiselect|keyboard|pause`
+8. `video`: `start|stop`
+9. `set`: `viewport|device|geo|geolocation|offline|headers|credentials|auth|media`
+10. `network`: `route|unroute|requests`
+11. `storage`: `local|session` + `get|set|clear`
+12. `cookies`: default get, plus `set|clear`
+13. `tab`: default list, plus `new|list|close|<index>`
+14. `window`: `new`
+15. `frame`: `<selector>|main`
+16. `dialog`: `accept|dismiss|respond`
+17. `trace`: `start|stop`
+18. `record`: `start|stop|restart`
+19. `state`: `save|load`
+20. `device`: `list`
 
 ### Global Flags
 
@@ -149,42 +153,28 @@ Recommended extension for browser workflows:
 
 Counts:
 1. total actions: 125
-2. directly emitted by CLI parser: 93
-3. protocol-only (not directly emitted by CLI parser): 32
+2. directly emitted by CLI parser: 107
+3. protocol-only (not directly emitted by CLI parser): 18
 
 Protocol-only action names:
 1. `addinitscript`
 2. `addscript`
 3. `addstyle`
-4. `bringtofront`
-5. `clear`
-6. `clipboard`
-7. `content`
-8. `dispatch`
-9. `evalhandle`
-10. `expose`
-11. `har_start`
-12. `har_stop`
-13. `innertext`
-14. `input_keyboard`
-15. `input_mouse`
-16. `input_touch`
-17. `inserttext`
-18. `keyboard`
-19. `locale`
-20. `multiselect`
-21. `pause`
-22. `permissions`
-23. `responsebody`
-24. `screencast_start`
-25. `screencast_stop`
-26. `selectall`
-27. `setcontent`
-28. `setvalue`
-29. `timezone`
-30. `useragent`
-31. `video_start`
-32. `video_stop`
+4. `dispatch`
+5. `evalhandle`
+6. `expose`
+7. `har_start`
+8. `har_stop`
+9. `input_keyboard`
+10. `input_mouse`
+11. `input_touch`
+12. `locale`
+13. `permissions`
+14. `responsebody`
+15. `screencast_start`
+16. `screencast_stop`
+17. `timezone`
+18. `useragent`
 
 ## cmux Target API (v2)
 
@@ -197,7 +187,7 @@ Protocol-only action names:
 5. `workspace.list|create|select|current|close|move_to_window`
 6. `pane.list|focus|surfaces|create`
 7. `surface.list|focus|split|create|close|drag_to_split|refresh|health|send_text|send_key|trigger_flash`
-8. `browser.open_split|navigate|back|forward|reload|url.get|focus_webview|is_webview_focused`
+8. `browser.open_split|connect|window.new|window.create|navigate|back|forward|reload|url.get|focus_webview|is_webview_focused`
 9. notification methods and debug/test methods
 
 ### New Browser Parity Method Families (Proposed)
@@ -215,16 +205,18 @@ P0 (core parity for daily automation):
 10. `browser.check|uncheck`
 11. `browser.select`
 12. `browser.scroll|scroll_into_view`
-13. `browser.get.*` (`url|title|text|html|value|attr|count|box|styles`)
-14. `browser.is.*` (`visible|enabled|checked`)
-15. `browser.screenshot`
-16. `browser.focus_webview` and `browser.is_webview_focused` (already present, keep)
+13. `browser.drag|upload`
+14. `browser.connect`
+15. `browser.get.*` (`url|title|text|html|value|attr|count|box|styles`)
+16. `browser.is.*` (`visible|enabled|checked`)
+17. `browser.screenshot`
+18. `browser.focus_webview` and `browser.is_webview_focused` (already present, keep)
 
 P1 (important but not blocking initial parity):
 1. `browser.find.*` locators (`role|text|label|placeholder|alt|title|testid|nth|first|last`)
 2. `browser.frame.select`
 3. `browser.frame.main`
-4. `browser.dialog.respond`
+4. `browser.dialog.accept|dismiss|respond`
 5. `browser.download.wait`
 6. `browser.tab.*` compatibility aliases mapped to cmux surfaces
 7. `browser.console.list`
@@ -233,11 +225,12 @@ P1 (important but not blocking initial parity):
 10. `browser.state.save|load` (browser state in cmux context)
 
 P2 (advanced parity / optional):
-1. network interception/mocking equivalents (`route|unroute|requests|responsebody`)
-2. emulation/settings (`viewport|media|offline|geolocation|permissions|headers|credentials|useragent|locale|timezone|device`)
-3. trace/video/screencast/har equivalents
-4. script injection utilities (`addinitscript|addscript|addstyle|dispatch|expose|evalhandle`)
+1. network interception/mocking equivalents (`route|unroute|requests|responsebody`; Linux currently stores full response bodies for browser-captured document requests and previews proxy-observed traffic)
+2. emulation/settings (`offline|geolocation|useragent|locale|timezone|media|device|permissions` persist into the live WebKit document; mounted WebKit surfaces enforce offline mode with isolated network sessions and apply configured headers and Basic credentials to native document and subresource requests; `viewport` remains in the Linux state subset)
+3. trace/screencast/HAR/recording equivalents (`browser.trace.*`, `browser.screencast.*`, HAR-style network capture, and frame-based `browser.video_*` / `browser.record_*` artifacts implemented in Linux; mounted GTK browser surfaces use periodic native WebKit snapshots with generation-safe model fallback)
+4. script injection utilities (`addinitscript|addscript|addstyle|dispatch|expose` synchronize the Linux model and live document; `evalhandle` stores the mounted WebKitGTK result with model fallback)
 5. raw input device injection (`input_mouse|input_keyboard|input_touch`)
+6. content/editing utilities (`content|innertext|setcontent|setvalue|inserttext|selectall|clear|clipboard` implemented in the Linux fake DOM and clipboard subset)
 
 ### Object/Handle Semantics
 
@@ -264,6 +257,11 @@ cmux identify
 cmux capabilities
 cmux browser identify --surface <surface-id>   # wrapper over system.identify + browser fields
 ```
+Linux `system.capabilities` advertises the deterministic browser model with
+`browser_model` and `browser_automation`; the legacy `browser_stub` flag is
+kept only as a deprecated false value. In the GTK renderer, successful DOM,
+input, scroll, script, and style actions are forwarded in sequence to the live
+WebKit document and held until an in-progress navigation completes.
 
 Flash:
 ```bash
@@ -309,15 +307,29 @@ Hard invariant:
 ### Phase 1: Core Browser Parity (P0)
 
 - [x] Implement `browser.snapshot` (with refs).
+  - Mounted WebKitGTK pages are traversed live into accessibility-oriented
+    snapshot lines. The returned ephemeral `eN` refs are persisted into the
+    surface selector table for subsequent actions; display-free runs retain
+    deterministic model snapshots.
 - [x] Implement `browser.eval`.
+  - Linux socket calls release the app-state lock while GTK evaluates the
+    source once in the mounted WebKit document, await returned promises, and
+    return the resulting JSON-compatible value. Display-free runs retain the
+    deterministic browser-model result.
 - [x] Implement `browser.wait` variants: selector, timeout, URL pattern, load state, function, text.
 - [x] Implement click family: `click`, `dblclick`, `hover`, `focus`.
 - [x] Implement input family: `type`, `fill`, `press`, `keydown`, `keyup`.
 - [x] Implement checkbox/select family: `check`, `uncheck`, `select`.
+- [x] Implement drag/drop in the live WebKit document and native file-input selection through WebKitGTK's chooser request, with deterministic model fallback.
+- [x] Implement `browser.connect` and `browser set <family>` compatibility routing.
 - [x] Implement scrolling family: `scroll`, `scroll_into_view`.
 - [x] Implement getters: text/html/value/attr/url/title/count/box/styles.
 - [x] Implement state checks: visible/enabled/checked.
-- [x] Implement screenshots (surface/full-page where feasible).
+- [x] Implement screenshot and PDF artifacts.
+  - Mounted WebKitGTK views produce native visible-region PNGs, with
+    full-document capture through `--full-page`; display-free runs retain the
+    deterministic model screenshot. Mounted views also print native PDFs;
+    display-free runs retain the model-generated PDF.
 
 ### Phase 2: Locator + Session Parity (P1)
 
@@ -342,6 +354,7 @@ Hard invariant:
 - [x] Implement `surface.reorder` within pane.
 - [x] Implement cross-workspace surface moves.
 - [x] Implement cross-window surface moves.
+- [x] Implement `browser.window.new|create` as a browser-backed new-window alias.
 - [x] Implement `workspace.reorder`.
 - [x] Add CLI commands for tab/surface reordering and moving (`move-surface`, `reorder-surface`, `reorder-workspace`, `reorder-workspaces`).
 - [x] Add response payloads that confirm final `window_id/workspace_id/pane_id/surface_id`.
@@ -350,8 +363,33 @@ Hard invariant:
 ### Phase 4: Advanced/Optional Parity (P2)
 
 - [ ] Evaluate feasibility of request interception/mocking in `WKWebView`; implement supported subset.
+  - Linux WebKitGTK implements route/unroute by URL pattern, synthetic response
+    bodies, request log inspection, HAR-style entries, and response-body reads.
+  - Linux coverage: `browser_network_routes_and_request_log_are_observable`.
 - [x] Add exact 1...4096 CSS-pixel viewport emulation for `WKWebView`; aspect-fit the page without changing pane layout, preserve focus, and restore native sizing with `browser viewport reset`.
 - [ ] Add trace/recording equivalents where practical.
+  - Linux implements trace start/stop JSON artifacts, HAR artifacts, periodic
+    native WebKit screencast/video frames with deterministic model fallback,
+    and `browser record` start/stop/restart compatibility aliases.
+  - Linux coverage: `browser_trace_screencast_and_raw_input_are_observable`
+    and `browser_legacy_aliases_cover_extended_agent_browser_surface`, plus the
+    native-frame replacement and stale-generation AppState unit test.
+- [x] Add Linux WebKitGTK emulation settings.
+  - Supported subset: viewport, device presets, geolocation, offline/online,
+    user agent, locale, timezone, media/color-scheme/reduced-motion, headers,
+    credentials, and permissions.
+  - Linux model coverage: `browser_offline_and_geolocation_are_observable`.
+  - Linux live coverage: `webkit-runtime-smoke` verifies initial, immediate,
+    and post-navigation locale, timezone, media, touch/DPR, online,
+    geolocation, and permission overrides in WebKitGTK. It verifies configured
+    headers on documents and subresources plus Basic HTTP authentication
+    challenges through the embedded web-process extension. It also verifies that
+    live `browser.eval` values resolve promises and execute the source once,
+    and that DOM-backed reads and snapshots observe elements created only in
+    the live document. Native snapshot refs use real CSS selectors for
+    subsequent actions. `browser.evalhandle` uses the same native evaluation
+    bridge while preserving stable handle identity and deterministic model
+    fallback.
 - [x] Add script/style injection helpers.
 - [x] Document unsupported commands with explicit error `not_supported`.
 
@@ -359,15 +397,23 @@ Hard invariant:
 
 - [x] Add v1-to-v2 shim for migrated command families.
 - [x] Keep existing v1 behavior unchanged while shim is active.
-- [ ] Document v1/v2 mapping table for all browser/topology commands.
-- [ ] Add deprecation warnings only after parity + test completion.
+- [x] Document v1/v2 mapping table for all browser/topology commands.
+  - See `docs/v2-api-migration.md` under "Browser/topology compatibility mapping".
+- [x] Add deprecation warnings only after parity + test completion.
+  - Linux emits stderr warnings for legacy browser CLI aliases outside JSON
+    mode. The v1 line socket protocol remains unchanged while the shim is
+    active.
 
 ### Phase 6: Docs + Examples
 
 - [x] Update `docs/v2-api-migration.md` with browser parity status.
-- [ ] Add dedicated browser automation doc in `docs-site`.
-- [ ] Add examples for LLM workflow: identify -> choose surface -> snapshot -> act -> verify.
-- [ ] Add explicit "surface vs pane vs workspace vs window" section to CLI docs.
+- [x] Add dedicated browser automation doc in `docs-site`.
+  - Implemented at `web/app/[locale]/docs/browser-automation/page.tsx` and
+    linked from `web/app/[locale]/components/docs-nav-items.ts`.
+- [x] Add examples for LLM workflow: identify -> choose surface -> snapshot -> act -> verify.
+  - See `docs/cli-contract.md` under "Browser automation workflow".
+- [x] Add explicit "surface vs pane vs workspace vs window" section to CLI docs.
+  - See `docs/cli-contract.md` under "Window, workspace, pane, and surface handles".
 
 ## Test Port Plan (Comprehensive)
 

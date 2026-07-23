@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      linux_ghostty_ref:
+        description: Published 40-character manaflow-ai/ghostty commit for the Linux bundle
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -15,6 +20,15 @@ env:
   CREATE_DMG_VERSION: 8.0.0
 
 jobs:
+  build-linux-desktop:
+    uses: ./.github/workflows/build-linux-app.yml
+    with:
+      cmux_ref: ${{ github.sha }}
+      ghostty_ref: ${{ inputs.linux_ghostty_ref || vars.CMUX_LINUX_GHOSTTY_REF }}
+      bundle_version: ${{ github.ref_name }}
+    permissions:
+      contents: read
+
   build-ghostty-cli-helper:
     runs-on: ${{ vars.MACOS_RUNNER_15 || 'blacksmith-6vcpu-macos-15' }}
     timeout-minutes: 20
@@ -61,7 +75,9 @@ jobs:
           if-no-files-found: error
 
   build-sign-notarize:
-    needs: build-ghostty-cli-helper
+    needs:
+      - build-ghostty-cli-helper
+      - build-linux-desktop
     # Build the app on macOS 26 so SDK-gated SwiftUI Liquid Glass code compiles
     # into stable releases. The real universal Ghostty CLI helper is built on
     # macOS 15 above because Zig 0.15.2 cannot link it on macOS 26.
@@ -88,6 +104,12 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
+
+      - name: Download Linux desktop bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: cmux-linux-desktop-${{ github.run_id }}
+          path: linux-desktop
 
       - name: Validate Sparkle build number is monotonic
         run: ./tests/test_ci_sparkle_build_monotonic.sh
@@ -513,6 +535,26 @@ jobs:
             remote-daemon-assets/cmuxd-remote-checksums.txt
             remote-daemon-assets/cmuxd-remote-manifest.json
 
+      - name: Attest Linux desktop release assets
+        id: attest-linux-desktop-release-assets
+        if: steps.guard_release_assets.outputs.skip_all != 'true'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
+
+      - name: Retry Linux desktop release asset attestation
+        if: steps.guard_release_assets.outputs.skip_all != 'true' && steps.attest-linux-desktop-release-assets.outcome == 'failure'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
+
       - name: Upload build artifacts (dry-run)
         if: steps.guard_release_assets.outputs.skip_upload != 'true' && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -522,6 +564,9 @@ jobs:
             cmux-macos.dmg
             appcast.xml
             remote-daemon-assets/cmuxd-remote-*
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
           if-no-files-found: error
 
       - name: Upload release asset
@@ -537,6 +582,9 @@ jobs:
             remote-daemon-assets/cmuxd-remote-linux-amd64
             remote-daemon-assets/cmuxd-remote-checksums.txt
             remote-daemon-assets/cmuxd-remote-manifest.json
+            linux-desktop/cmux-linux-x86_64.tar.gz
+            linux-desktop/cmux-linux-x86_64.tar.gz.sha256
+            linux-desktop/cmux-linux-build.json
           generate_release_notes: true
           overwrite_files: false
 

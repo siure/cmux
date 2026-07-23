@@ -1,5 +1,5 @@
 <h1 align="center">cmux</h1>
-<p align="center">A Ghostty-based macOS terminal with vertical tabs and notifications for AI coding agents</p>
+<p align="center">A Ghostty-based terminal with vertical tabs and notifications for AI coding agents</p>
 
 <p align="center">
   <a href="https://github.com/manaflow-ai/cmux/releases/latest/download/cmux-macos.dmg">
@@ -87,7 +87,7 @@ Sidebar shows git branch, linked PR status/number, working directory, listening 
 - **Browser import** — Import cookies, history, and sessions from Chrome, Firefox, Arc, and 20+ browsers so browser panes start authenticated
 - **Custom commands** — Define project-specific actions in [`cmux.json`](https://cmux.com/docs/custom-commands) that launch from the command palette
 - **Programmable** — CLI and socket API to create workspaces, split panes, send keystrokes, and automate the browser
-- **Native macOS app** — Built with Swift and AppKit, not Electron. Fast startup, low memory.
+- **Native app** — Built with Swift/AppKit on macOS, with an in-tree Rust/GTK Linux source port that shares the terminal, browser, notification, and socket model.
 - **Ghostty compatible** — Reads your existing `~/.config/ghostty/config` for themes, fonts, and colors
 - **GPU-accelerated** — Powered by libghostty for smooth rendering
 - **Keyboard shortcuts** — [Extensive shortcuts](https://cmux.com/docs/keyboard-shortcuts) for workspaces, splits, browser, and more
@@ -118,13 +118,97 @@ brew upgrade --cask cmux
 
 On first launch, macOS may ask you to confirm opening an app from an identified developer. Click **Open** to proceed.
 
+### Linux bundle and source port
+
+The Linux port lives in [`linux/`](linux/README.md). It currently provides the
+Rust app core, CLI/socket contract, a display-free app shell, optional GTK4 UI,
+Ghostty VT integration, and a local Ghostty full-embedding path backed by the
+sibling `ghostty/` checkout.
+
+Build a relocatable archive containing cmux, `cmuxd-remote`, the Linux
+libghostty embedding, Ghostty runtime resources, and desktop integration files:
+
+```bash
+./linux/scripts/build-bundle.sh
+mkdir -p /tmp/cmux-linux
+tar -xzf dist/cmux-linux-$(uname -m).tar.gz -C /tmp/cmux-linux
+/tmp/cmux-linux/cmux-linux-$(uname -m)/bin/cmux-linux-app
+```
+
+Run `install.sh` from the extracted directory to install under `~/.local`, or
+set `PREFIX` to choose another location. The archive requires the GTK 4 runtime;
+WebKitGTK 6 remains optional for native browser surfaces. The builder itself
+requires the development dependencies described below plus Zig and Rust.
+
+For development directly from the source tree:
+
+```bash
+cargo run --manifest-path linux/Cargo.toml -- app
+cargo run --manifest-path linux/Cargo.toml -- app --script $'status\nsplit right\npanes\nquit'
+cargo test --manifest-path linux/Cargo.toml
+```
+
+The display-free core and tests do not require GTK. The GTK and full Ghostty
+renderer paths require GTK 4 and WebKitGTK 6 development files so Cargo can
+compile the embedded browser request extension (`libgtk-4-dev` and
+`libwebkitgtk-6.0-dev` on Debian/Ubuntu). Native browser surfaces dynamically
+load the WebKitGTK 6 runtime when available and retain the model preview as a
+fallback when it is not installed. Browser DOM, input, script, and style
+automation side effects are mirrored into the live WebKit document in command
+order, including commands queued while a navigation is loading. Socket
+`browser.eval` and `browser.evalhandle` calls return values produced by the live
+document (including resolved promises) when that native view is mounted.
+DOM-backed `browser.get` reads and visibility, enabled, and checked predicates
+likewise report the native document instead of stale model state. Browser
+headers and Basic credentials are applied to every native document and
+subresource request, including HTTP authentication challenges. Browser
+snapshots traverse that document and register their ephemeral `eN` refs for
+subsequent selector-based actions. Screenshots capture the mounted WebKit view
+as a native PNG, including full-document capture with `--full-page`, and PDF
+exports print the live document through WebKitGTK. These operations use the
+deterministic browser model when no native runtime is available.
+
+Renderer choices are `core`, `gtk`, `ghostty-vt`, and `ghostty`. When
+`--renderer` is omitted, `cmux app` reads `CMUX_LINUX_RENDERER` and falls back
+to `core`. `core` is display-free, `ghostty-vt` uses the portable Ghostty VT
+snapshot library when available, and `gtk`/`ghostty` require building with
+`--features gtk`.
+
+For the full Ghostty renderer path, first build the local Ghostty checkout:
+
+```bash
+(cd ../ghostty && zig build -Dapp-runtime=none)
+cargo run --manifest-path linux/Cargo.toml --features gtk -- app --renderer ghostty
+```
+
+Linux feedback uses the production `/api/feedback` endpoint and stages every
+report in a private offline queue before delivery. Run `cmux feedback retry`
+against the running app to retry reports retained after a timeout, rate limit,
+or service outage. The GTK shell presents a native feedback form with image
+attachments and submits it in the background.
+
+Linux renders declarative JSON and a bounded interpreted SwiftUI-style custom
+sidebar subset from `~/.config/cmux/sidebars`. Use `cmux sidebar validate`,
+`cmux sidebar select <name>`, and `cmux sidebar select workspaces`; the GTK
+sidebar header includes the same provider picker. Selection persists under XDG
+state and malformed edits retain the last good render. Swift files bind to live
+workspace state, run parameterized cmux actions, and can use either in-process
+evaluation or the isolated worker selected by `customSidebars.renderer`.
+
+To build and install a user-local GTK desktop launcher directly from source:
+
+```bash
+./linux/scripts/install-dev.sh
+gtk-launch ai.manaflow.cmux
+```
+
 ## Why cmux?
 
 I run a lot of Claude Code and Codex sessions in parallel. I was using Ghostty with a bunch of split panes, and relying on native macOS notifications to know when an agent needed me. But Claude Code's notification body is always just "Claude is waiting for your input" with no context, and with enough tabs open I couldn't even read the titles anymore.
 
-I tried a few coding orchestrators but most of them were Electron/Tauri apps and the performance bugged me. I also just prefer the terminal since GUI orchestrators lock you into their workflow. So I built cmux as a native macOS app in Swift/AppKit. It uses libghostty for terminal rendering and reads your existing Ghostty config for themes, fonts, and colors.
+I tried a few coding orchestrators but most of them were Electron/Tauri apps and the performance bugged me. I also just prefer the terminal since GUI orchestrators lock you into their workflow. So I built cmux first as a native macOS app in Swift/AppKit. The Linux port keeps the same terminal/browser/socket model in the Rust `linux/` tree, with GTK and local Ghostty embedding replacing the AppKit shell. Both paths use Ghostty for terminal rendering and read your existing Ghostty config for themes, fonts, and colors.
 
-The main additions are the sidebar and notification system. The sidebar has vertical tabs that show git branch, linked PR status/number, working directory, listening ports, and the latest notification text for each workspace. The notification system picks up terminal sequences (OSC 9/99/777) and has a CLI (`cmux notify`) you can wire into agent hooks for Claude Code, OpenCode, etc. When an agent is waiting, its pane gets a blue ring and the tab lights up in the sidebar, so I can tell which one needs me across splits and tabs. Cmd+Shift+U jumps to the most recent unread.
+The main additions are the sidebar and notification system. The sidebar has vertical tabs that show git branch, linked PR status/number, working directory, listening ports, and the latest notification text for each workspace. The notification system picks up terminal sequences (OSC 9/99/777) and has a CLI (`cmux notify`) you can wire into agent hooks for Claude Code, OpenCode, etc. When an agent is waiting, its pane gets a blue ring and the tab lights up in the sidebar, so I can tell which one needs me across splits and tabs. Cmd+Shift+U jumps to the most recent unread on macOS; the Linux port uses Super+Shift+U for the same action.
 
 The in-app browser has a scriptable API ported from [agent-browser](https://github.com/vercel-labs/agent-browser). Agents can snapshot the accessibility tree, get element refs, click, fill forms, and evaluate JS. You can split a browser pane next to your terminal and have Claude Code interact with your dev server directly.
 
@@ -146,16 +230,32 @@ For more info on how to configure cmux, [head over to our docs](https://cmux.com
 
 ## Keyboard Shortcuts
 
+The table below shows the macOS defaults. The Linux source port keeps the same
+logical bindings and renders them with Linux modifier names: Super/Meta replaces
+Command, Alt replaces Option, and Ctrl/Shift keep their normal names. For
+example, New surface is Super+T and Jump to latest unread is Super+Shift+U on
+Linux.
+
+### Application
+
+| Shortcut | Action |
+|----------|--------|
+| ⌃ ⌘ F | Toggle full screen |
+| ⌘ Q | Quit cmux |
+| ⌃ N / ⌃ P | Command palette next / previous |
+
 ### Workspaces
 
 | Shortcut | Action |
 |----------|--------|
 | ⌘ N | New workspace |
+| ⌥ ⌘ N | New browser workspace |
 | ⌘ 1–8 | Jump to workspace 1–8 |
 | ⌘ 9 | Jump to last workspace |
 | ⌃ ⌘ ] | Next workspace |
 | ⌃ ⌘ [ | Previous workspace |
 | ⌘ ⇧ W | Close workspace |
+| ⌃ ⌘ . | Toggle focused workspace group collapse |
 | ⌘ ⇧ R | Rename workspace |
 | ⌥ ⌘ E | Edit workspace description |
 | ⌘ B | Toggle sidebar |
@@ -174,6 +274,8 @@ For more info on how to configure cmux, [head over to our docs](https://cmux.com
 | ⌃ 1–8 | Jump to surface 1–8 |
 | ⌃ 9 | Jump to last surface |
 | ⌘ W | Close surface |
+| ⌥ ⌘ T | Close other tabs in pane |
+| ⌘ ⇧ K | Clear screen, keep scrollback |
 
 ### Split Panes
 
@@ -181,6 +283,8 @@ For more info on how to configure cmux, [head over to our docs](https://cmux.com
 |----------|--------|
 | ⌘ D | Split right |
 | ⌘ ⇧ D | Split down |
+| ⌥ ⌘ D | Split browser right |
+| ⌥ ⌘ ⇧ D | Split browser down |
 | ⌥ ⌘ ← → ↑ ↓ | Focus pane directionally |
 | ⌘ ⇧ H | Flash focused panel |
 
@@ -309,13 +413,19 @@ working directories, scrollback, and browser history.
 
 If you need to reapply the last saved snapshot manually, use:
 - `File > Reopen Previous Session`
-- `⌘ ⇧ O`
+- `⌘ ⇧ O` on macOS, or `Super+Shift+O` in the Linux source port
 - `cmux restore-session`
 
-Under the hood, cmux writes a versioned snapshot under
+Under the hood, the macOS app writes a versioned snapshot under
 `~/Library/Application Support/cmux/` and agent hooks write session mappings
-under `~/.cmuxterm/`. On restore, cmux rebuilds the layout first, then runs the
-supported agent's native resume command when automatic agent resume is enabled.
+under `~/.cmuxterm/`. The Linux source port exposes the same
+`cmux restore-session` and surface resume commands against the running app
+state, stores a versioned app snapshot under `$XDG_STATE_HOME/cmux/` or
+`~/.local/state/cmux/`, stores cmux configuration under
+`~/.config/cmux/cmux.json`, and continues to use `~/.cmuxterm/` for agent hook
+mappings. On restore, cmux rebuilds the layout first, then runs
+the supported agent's native resume command when automatic agent resume is
+enabled.
 
 Read the full guide at <https://cmux.com/docs/session-restore>.
 

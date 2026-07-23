@@ -77,6 +77,16 @@ def _docker_available() -> bool:
     return _run(["docker", "info"], check=False).returncode == 0
 
 
+def _ssh_remote_image_drop_supported() -> bool:
+    try:
+        with cmux(SOCKET_PATH) as client:
+            capabilities = client._call("system.capabilities", {}) or {}
+    except Exception:
+        return True
+    features = capabilities.get("features") or {}
+    return bool(features.get("ssh_remote_image_drop", features.get("ssh_remote_full", True)))
+
+
 def _shell_single_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -205,6 +215,9 @@ def _wait_for_remote_drop_paths(client: cmux, surface_id: str, expected_count: i
 def main() -> int:
     if not _docker_available():
         print("SKIP: docker is not available")
+        return 0
+    if not _ssh_remote_image_drop_supported():
+        print("SKIP: cmux build does not advertise SSH remote image drop support")
         return 0
 
     cli = _find_cli_binary()

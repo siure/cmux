@@ -80,6 +80,16 @@ def _docker_available() -> bool:
     return probe.returncode == 0
 
 
+def _ssh_remote_port_detection_supported() -> bool:
+    try:
+        with cmux(SOCKET_PATH) as client:
+            capabilities = client._call("system.capabilities", {}) or {}
+    except Exception:
+        return True
+    features = capabilities.get("features") or {}
+    return bool(features.get("ssh_remote_port_detection", features.get("ssh_remote_full", True)))
+
+
 def _parse_host_port(docker_port_output: str) -> int:
     text = docker_port_output.strip()
     if not text:
@@ -275,6 +285,9 @@ def _wait_for_remote_port(client: cmux, workspace_id: str, port: int, timeout: f
 def main() -> int:
     if not _docker_available():
         print("SKIP: docker is not available")
+        return 0
+    if not _ssh_remote_port_detection_supported():
+        print("SKIP: cmux build does not advertise SSH remote port detection support")
         return 0
 
     cli = _find_cli_binary()

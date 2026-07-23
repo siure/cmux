@@ -1,6 +1,6 @@
 # Notifications
 
-cmux provides a notification panel for AI agents like Claude Code, Codex, and OpenCode. Notifications appear in a dedicated panel and trigger macOS system notifications.
+cmux provides a notification panel for AI agents like Claude Code, Codex, and OpenCode. Notifications appear in the app notification panel and can also drive platform desktop notification policy through notification hooks.
 
 > For inline permission / plan / question approvals directly from the sidebar (Vibe Island-style), see **[Feed](feed.md)**. `cmux hooks setup` installs the Feed bridge alongside the notification hooks covered below.
 
@@ -10,8 +10,14 @@ cmux provides a notification panel for AI agents like Claude Code, Codex, and Op
 # Send a notification (if cmux is available)
 command -v cmux &>/dev/null && cmux notify --title "Done" --body "Task complete"
 
-# With fallback to macOS notifications
-command -v cmux &>/dev/null && cmux notify --title "Done" --body "Task complete" || osascript -e 'display notification "Task complete" with title "Done"'
+# With a desktop fallback when cmux is unavailable
+if command -v cmux &>/dev/null; then
+  cmux notify --title "Done" --body "Task complete"
+elif command -v notify-send &>/dev/null; then
+  notify-send "Done" "Task complete"
+elif command -v osascript &>/dev/null; then
+  osascript -e 'display notification "Task complete" with title "Done"'
+fi
 ```
 
 ## Detection
@@ -24,8 +30,8 @@ if command -v cmux &>/dev/null; then
     cmux notify --title "Hello"
 fi
 
-# One-liner with fallback
-command -v cmux &>/dev/null && cmux notify --title "Hello" || osascript -e 'display notification "" with title "Hello"'
+# One-liner with Linux/macOS desktop fallback
+command -v cmux &>/dev/null && cmux notify --title "Hello" || { command -v notify-send &>/dev/null && notify-send "Hello" || command -v osascript &>/dev/null && osascript -e 'display notification "" with title "Hello"'; }
 ```
 
 ```python
@@ -36,8 +42,9 @@ import subprocess
 def notify(title: str, body: str = ""):
     if shutil.which("cmux"):
         subprocess.run(["cmux", "notify", "--title", title, "--body", body])
-    else:
-        # Fallback to macOS
+    elif shutil.which("notify-send"):
+        subprocess.run(["notify-send", title, body])
+    elif shutil.which("osascript"):
         subprocess.run(["osascript", "-e", f'display notification "{body}" with title "{title}"'])
 ```
 
@@ -56,7 +63,14 @@ cmux notify --title "Done" --tab 0 --panel 1
 
 ## Navigation
 
-Use `Cmd+Shift+U` to jump to the latest unread notification. Use `Ctrl+Cmd+U` to mark the current item as oldest unread and jump to the next latest unread. Both shortcuts are configurable in Settings > Keyboard Shortcuts and in `~/.config/cmux/cmux.json`.
+Use `Cmd+Shift+U` on macOS or `Super+Shift+U` on Linux to jump to the latest
+unread notification or manually marked workspace/surface. Use `Cmd+Option+U`
+or `Super+Alt+U` to toggle the focused surface's unread state. Use
+`Ctrl+Cmd+U` or `Ctrl+Super+U` to move the focused target's latest notification
+to the oldest unread position and jump to the next latest unread; when the
+focused target has no notification, its surface is marked unread instead. All
+three shortcuts are configurable in **Settings > Keyboard Shortcuts** and in
+`~/.config/cmux/cmux.json`.
 
 ## Suppress only the focused surface
 
@@ -146,14 +160,14 @@ Copilot CLI supports [hooks](https://docs.github.com/en/copilot/how-tos/use-copi
     "agentStop": [
       {
         "type": "command",
-        "bash": "if command -v cmux &>/dev/null; then cmux notify --title 'Copilot CLI' --body 'Done'; cmux set-status copilot_cli Idle; else osascript -e 'display notification \"Done\" with title \"Copilot CLI\"'; fi",
+        "bash": "if command -v cmux &>/dev/null; then cmux notify --title 'Copilot CLI' --body 'Done'; cmux set-status copilot_cli Idle; elif command -v notify-send &>/dev/null; then notify-send 'Copilot CLI' 'Done'; else osascript -e 'display notification \"Done\" with title \"Copilot CLI\"'; fi",
         "timeoutSec": 5
       }
     ],
     "errorOccurred": [
       {
         "type": "command",
-        "bash": "if command -v cmux &>/dev/null; then cmux notify --title 'Copilot CLI' --subtitle 'Error' --body \"$(cat | jq -r '.errorMessage // \"An error occurred\"' 2>/dev/null | head -c 100)\"; cmux set-status copilot_cli Error; else osascript -e 'display notification \"An error occurred\" with title \"Copilot CLI\"'; fi",
+        "bash": "if command -v cmux &>/dev/null; then cmux notify --title 'Copilot CLI' --subtitle 'Error' --body \"$(cat | jq -r '.errorMessage // \"An error occurred\"' 2>/dev/null | head -c 100)\"; cmux set-status copilot_cli Error; elif command -v notify-send &>/dev/null; then notify-send 'Copilot CLI' 'An error occurred'; else osascript -e 'display notification \"An error occurred\" with title \"Copilot CLI\"'; fi",
         "timeoutSec": 5
       }
     ],
@@ -185,7 +199,7 @@ Or for repo-level hooks, create `.github/hooks/notify.json`:
 Add to `~/.codex/config.toml`:
 
 ```toml
-notify = ["bash", "-c", "command -v cmux &>/dev/null && cmux notify --title Codex --body \"$(echo $1 | jq -r '.\"last-assistant-message\" // \"Turn complete\"' 2>/dev/null | head -c 100)\" || osascript -e 'display notification \"Turn complete\" with title \"Codex\"'", "--"]
+notify = ["bash", "-c", "MSG=$(echo $1 | jq -r '.\"last-assistant-message\" // \"Turn complete\"' 2>/dev/null | head -c 100); command -v cmux &>/dev/null && cmux notify --title Codex --body \"$MSG\" || { command -v notify-send &>/dev/null && notify-send Codex \"$MSG\" || command -v osascript &>/dev/null && osascript -e 'display notification \"Turn complete\" with title \"Codex\"'; }", "--"]
 ```
 
 Or create a simple script `~/.local/bin/codex-notify.sh`:
@@ -193,7 +207,7 @@ Or create a simple script `~/.local/bin/codex-notify.sh`:
 ```bash
 #!/bin/bash
 MSG=$(echo "$1" | jq -r '."last-assistant-message" // "Turn complete"' 2>/dev/null | head -c 100)
-command -v cmux &>/dev/null && cmux notify --title "Codex" --body "$MSG" || osascript -e "display notification \"$MSG\" with title \"Codex\""
+command -v cmux &>/dev/null && cmux notify --title "Codex" --body "$MSG" || { command -v notify-send &>/dev/null && notify-send "Codex" "$MSG" || command -v osascript &>/dev/null && osascript -e "display notification \"$MSG\" with title \"Codex\""; }
 ```
 
 Then use:
@@ -211,7 +225,7 @@ export const CmuxNotificationPlugin = async ({ $, }) => {
     try {
       await $`command -v cmux && cmux notify --title ${title} --body ${body}`;
     } catch {
-      await $`osascript -e ${"display notification \"" + body + "\" with title \"" + title + "\""}`;
+      await $`if command -v notify-send >/dev/null; then notify-send ${title} ${body}; elif command -v osascript >/dev/null; then osascript -e ${"display notification \"" + body + "\" with title \"" + title + "\""}; fi`;
     }
   };
 
@@ -232,8 +246,11 @@ cmux sets these in child shells:
 | Variable | Description |
 |----------|-------------|
 | `CMUX_SOCKET_PATH` | Path to control socket |
-| `CMUX_TAB_ID` | UUID of the current tab |
-| `CMUX_PANEL_ID` | UUID of the current panel |
+| `CMUX_WORKSPACE_ID` | UUID of the current workspace |
+| `CMUX_PANE_ID` | UUID of the current pane |
+| `CMUX_SURFACE_ID` | UUID of the current surface |
+| `CMUX_TAB_ID` | Compatibility alias for the current surface UUID |
+| `CMUX_PANEL_ID` | Compatibility alias for the current surface UUID |
 
 ## CLI Commands
 
@@ -253,5 +270,5 @@ cmux ping
 ## Best Practices
 
 1. **Always check availability first** - Use `command -v cmux` before calling
-2. **Provide fallbacks** - Use `|| osascript` for macOS fallback
+2. **Provide fallbacks** - Use `notify-send` on Linux or `osascript` on macOS when cmux is unavailable
 3. **Keep notifications concise** - Title should be brief, use body for details

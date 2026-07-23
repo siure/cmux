@@ -428,7 +428,26 @@ class cmux:
         wsid = res.get("workspace_id")
         if not wsid:
             raise cmuxError(f"workspace.create returned no workspace_id: {res}")
-        return str(wsid)
+        wsid = str(wsid)
+
+        target_window = str(window_id) if window_id is not None else None
+        if target_window is None:
+            try:
+                target_window = self.current_window()
+            except Exception:
+                target_window = None
+
+        palette_visible = False
+        if target_window:
+            try:
+                payload = self._call("debug.command_palette.visible", {"window_id": target_window}) or {}
+                palette_visible = bool(payload.get("visible"))
+            except Exception:
+                palette_visible = False
+
+        if not palette_visible:
+            self._call("workspace.select", {"workspace_id": wsid})
+        return wsid
 
     def select_workspace(self, workspace: Union[str, int]) -> None:
         wsid = self._resolve_workspace_id(workspace)
