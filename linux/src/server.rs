@@ -1,5 +1,7 @@
 use crate::{
-    app::{feed_wait_timeout, AppError, AppState},
+    app::{
+        feed_wait_timeout, retry_feedback_requests, submit_feedback_request, AppError, AppState,
+    },
     browser_runtime::{
         self, BrowserEvaluationAttempt, BrowserPdfAttempt, BrowserScreenshotAttempt,
     },
@@ -263,6 +265,9 @@ fn dispatch_request(request: &Value, state: &Arc<Mutex<AppState>>) -> Value {
             }
         }
     }
+    if matches!(method, "feedback.submit" | "feedback.retry") {
+        return dispatch_feedback_effect_request(id, method, params, state);
+    }
     if method == "browser.screenshot" {
         return dispatch_live_browser_screenshot_request(id, params, state);
     }
@@ -292,6 +297,26 @@ fn dispatch_request(request: &Value, state: &Arc<Mutex<AppState>>) -> Value {
             "error": {"code": err.code, "message": err.message}
         }),
     }
+}
+
+fn dispatch_feedback_effect_request(
+    id: Value,
+    method: &str,
+    params: Value,
+    state: &Arc<Mutex<AppState>>,
+) -> Value {
+    let result = match method {
+        "feedback.submit" => submit_feedback_request(&params),
+        "feedback.retry" => retry_feedback_requests(&params),
+        _ => Err(AppError::method_not_found(method)),
+    };
+
+    if let Ok(value) = &result {
+        if let Ok(mut app) = state.lock() {
+            app.record_socket_event(method, &params, value);
+        }
+    }
+    rpc_result_response(id, result)
 }
 
 fn dispatch_live_browser_screenshot_request(

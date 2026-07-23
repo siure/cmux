@@ -3,10 +3,14 @@
 cmux exposes a reconnectable event stream for local tools that need to observe
 workspace, pane, surface, notification, browser, Feed, and agent-hook activity.
 
-The same events are appended to `~/.cmuxterm/events.jsonl` as newline-delimited
-JSON. The live stream is delivered over the existing cmux socket. Clients call
-the v2 method `events.stream`, then keep reading newline-delimited JSON frames
-from the same connection.
+The same events are appended as newline-delimited JSON. macOS uses
+`~/.cmuxterm/events.jsonl`; Linux uses `$XDG_STATE_HOME/cmux/events.jsonl` or
+`~/.local/state/cmux/events.jsonl`. During migration, Linux also writes an
+existing `~/.cmuxterm/events.jsonl` so current audit and tailing tools keep
+working. `CMUX_EVENTS_LOG_PATH` selects one explicit destination. The live
+stream is delivered over the existing cmux socket. Clients call the v2 method
+`events.stream`, then keep reading newline-delimited JSON frames from the same
+connection.
 
 ## Quick start
 
@@ -180,15 +184,15 @@ client stops reading and falls behind that queue, cmux closes that subscription
 with a `slow_consumer` error. The client should reconnect with the last `seq` it
 successfully processed.
 
-The durable event log is bounded too. cmux writes current events to
-`~/.cmuxterm/events.jsonl`, rotates the previous file to
-`~/.cmuxterm/events.jsonl.1`, and caps each file at 16 MiB. Disk writes are
-batched behind a bounded 1,024-line queue. Under sustained disk backpressure,
-cmux drops the oldest pending disk-only lines and keeps the live socket stream
-and in-memory replay buffer moving. Clients can read those files for recent
+The durable event log is bounded too. cmux rotates the active path to the same
+name with a `.1` suffix and caps each file at 16 MiB. Disk writes are batched
+behind a bounded 1,024-line queue. Under sustained disk backpressure, cmux drops
+the oldest pending disk-only lines and keeps the live socket stream and
+in-memory replay buffer moving. Clients can read those files for recent
 auditing, but should treat the socket `ack.resume.gap` contract plus snapshot
-commands as the source of truth for catch-up after long outages. Feed still
-writes its specialized long-term audit log to `~/.cmuxterm/workstream.jsonl`.
+commands as the source of truth for catch-up after long outages. Feed uses the
+matching platform state directory for its specialized `workstream.jsonl` audit
+log.
 
 ## CLI
 

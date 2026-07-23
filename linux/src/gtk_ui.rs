@@ -771,6 +771,7 @@ fn gtk_application_flags(single_instance: bool) -> gio::ApplicationFlags {
 
 struct GtkWindowHost {
     window: gtk::ApplicationWindow,
+    snapshot_view: GtkSnapshotView,
     pane_allocations: PaneAllocations,
     ghostty_widgets: GhosttySurfaceWidgets,
     browser_controls: BrowserSurfaceControlsCache,
@@ -782,9 +783,18 @@ struct GtkWindowHost {
     canvas_occlusion_states: GtkCanvasOcclusionStates,
     presented_resume_prompts: HashSet<String>,
     presented_close_confirmations: HashSet<String>,
-    last_rebuild_key: Value,
-    last_non_tab_rebuild_key: Value,
+    last_left_rebuild_key: Value,
+    last_main_rebuild_key: Value,
+    last_main_non_tab_rebuild_key: Value,
+    last_right_rebuild_key: Value,
     last_right_sidebar_focus_generation: u64,
+}
+
+struct GtkSnapshotView {
+    root: gtk::Box,
+    left_slot: gtk::Box,
+    main_slot: gtk::Box,
+    right_slot: gtk::Box,
 }
 
 type GtkWindowHosts = Rc<RefCell<HashMap<String, GtkWindowHost>>>;
@@ -1119,7 +1129,7 @@ fn create_gtk_window_host(
         &diff_controls,
         &pending_browser_shortcut_actions,
     );
-    window.set_child(Some(&build_snapshot_view(
+    let snapshot_view = build_snapshot_view(
         snapshot,
         app_state,
         &pane_allocations,
@@ -1131,7 +1141,8 @@ fn create_gtk_window_host(
         &canvas_minimap_states,
         &canvas_occlusion_states,
         renderer_mode,
-    )));
+    );
+    window.set_child(Some(&snapshot_view.root));
 
     let focus_app_state = Arc::clone(app_state);
     let focus_application = application.clone();
@@ -1192,8 +1203,10 @@ fn create_gtk_window_host(
         glib::Propagation::Proceed
     });
 
+    let rebuild_keys = snapshot_region_rebuild_keys(snapshot);
     let mut host = GtkWindowHost {
         window,
+        snapshot_view,
         pane_allocations,
         ghostty_widgets,
         browser_controls,
@@ -1205,8 +1218,10 @@ fn create_gtk_window_host(
         canvas_occlusion_states,
         presented_resume_prompts: HashSet::new(),
         presented_close_confirmations: HashSet::new(),
-        last_rebuild_key: snapshot_rebuild_key(snapshot),
-        last_non_tab_rebuild_key: snapshot_rebuild_key_without_tabs(snapshot),
+        last_left_rebuild_key: rebuild_keys.left,
+        last_main_rebuild_key: rebuild_keys.main,
+        last_main_non_tab_rebuild_key: rebuild_keys.main_without_tabs,
+        last_right_rebuild_key: rebuild_keys.right,
         last_right_sidebar_focus_generation: 0,
     };
     sync_resume_command_prompts(&mut host, snapshot, app_state);
@@ -1232,69 +1247,92 @@ fn refresh_gtk_window_host(
     let focus_generation = right_sidebar_focus_generation(snapshot);
     let focus_right_sidebar =
         focus_generation != host.last_right_sidebar_focus_generation && focus_generation > 0;
-    let rebuild_key = snapshot_rebuild_key(snapshot);
-    let non_tab_rebuild_key = snapshot_rebuild_key_without_tabs(snapshot);
-    if host.last_rebuild_key == rebuild_key {
-        sync_ghostty_surface_widgets(
-            snapshot,
-            app_state,
-            &host.ghostty_widgets,
-            &host.canvas_occlusion_states,
-            renderer_mode,
+    let rebuild_keys = snapshot_region_rebuild_keys(snapshot);
+    let focused = gtk::prelude::GtkWindowExt::focus(&host.window);
+    let left_rebuild_suppressed =
+        widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-custom-sidebar-input");
+    let main_rebuild_suppressed =
+        widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-browser-location")
+            || widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-terminal-search");
+    let right_structure_changed = host.last_right_rebuild_key.pointer("/state/visible")
+        != rebuild_keys.right.pointer("/state/visible")
+        || host.last_right_rebuild_key.pointer("/state/mode")
+            != rebuild_keys.right.pointer("/state/mode");
+    let right_rebuild_suppressed =
+        widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-right-sidebar-input")
+            && !focus_right_sidebar
+            && !right_structure_changed;
+
+    if host.last_left_rebuild_key != rebuild_keys.left && !left_rebuild_suppressed {
+        replace_snapshot_slot_child(
+            &host.snapshot_view.left_slot,
+            Some(workspace_sidebar(snapshot, app_state).upcast()),
         );
-        if focus_right_sidebar {
-            focus_right_sidebar_widget(&host.window);
-        }
-        host.last_right_sidebar_focus_generation = focus_generation;
-        return;
+        host.last_left_rebuild_key = rebuild_keys.left;
     }
-    if host.last_non_tab_rebuild_key == non_tab_rebuild_key {
+
+    let main_changed = host.last_main_rebuild_key != rebuild_keys.main;
+    if main_changed && host.last_main_non_tab_rebuild_key == rebuild_keys.main_without_tabs {
         sync_pane_tab_strips(&host.window, snapshot, app_state);
-        sync_ghostty_surface_widgets(
-            snapshot,
-            app_state,
-            &host.ghostty_widgets,
-            &host.canvas_occlusion_states,
-            renderer_mode,
+        host.last_main_rebuild_key = rebuild_keys.main;
+        host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
+    } else if main_changed && !main_rebuild_suppressed {
+        replace_snapshot_slot_child(
+            &host.snapshot_view.main_slot,
+            Some(
+                surface_area(
+                    snapshot,
+                    app_state,
+                    &host.pane_allocations,
+                    &host.ghostty_widgets,
+                    &host.browser_controls,
+                    &host.diff_controls,
+                    &host.terminal_search_controls,
+                    &host.terminal_text_box_controls,
+                    &host.canvas_minimap_states,
+                    &host.canvas_occlusion_states,
+                    renderer_mode,
+                )
+                .upcast(),
+            ),
         );
-        host.last_rebuild_key = rebuild_key;
-        if focus_right_sidebar {
-            focus_right_sidebar_widget(&host.window);
-        }
-        host.last_right_sidebar_focus_generation = focus_generation;
-        return;
+        flush_pending_browser_shortcut_actions(
+            &host.browser_controls,
+            &host.pending_browser_shortcut_actions,
+        );
+        host.last_main_rebuild_key = rebuild_keys.main;
+        host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
     }
-    if gtk::prelude::GtkWindowExt::focus(&host.window).is_some_and(|widget| {
-        widget.has_css_class("cmux-browser-location")
-            || widget.has_css_class("cmux-terminal-search")
-            || widget.has_css_class("cmux-custom-sidebar-input")
-    }) && !focus_right_sidebar
-    {
-        return;
+
+    if host.last_right_rebuild_key != rebuild_keys.right && !right_rebuild_suppressed {
+        let sidebar = right_sidebar_visible(snapshot)
+            .then(|| app_chrome_sidebar(snapshot, app_state).upcast());
+        replace_snapshot_slot_child(&host.snapshot_view.right_slot, sidebar);
+        host.last_right_rebuild_key = rebuild_keys.right;
     }
-    host.window.set_child(Some(&build_snapshot_view(
+
+    sync_ghostty_surface_widgets(
         snapshot,
         app_state,
-        &host.pane_allocations,
         &host.ghostty_widgets,
-        &host.browser_controls,
-        &host.diff_controls,
-        &host.terminal_search_controls,
-        &host.terminal_text_box_controls,
-        &host.canvas_minimap_states,
         &host.canvas_occlusion_states,
         renderer_mode,
-    )));
-    flush_pending_browser_shortcut_actions(
-        &host.browser_controls,
-        &host.pending_browser_shortcut_actions,
     );
-    host.last_rebuild_key = rebuild_key;
-    host.last_non_tab_rebuild_key = non_tab_rebuild_key;
     if focus_right_sidebar {
         focus_right_sidebar_widget(&host.window);
     }
     host.last_right_sidebar_focus_generation = focus_generation;
+}
+
+fn replace_snapshot_slot_child(slot: &gtk::Box, child: Option<gtk::Widget>) {
+    let visible = child.is_some();
+    while let Some(current) = slot.first_child() {
+        slot.remove(&current);
+    }
+    if let Some(child) = child {
+        slot.append(&child);
+    }
+    slot.set_visible(visible);
 }
 
 fn sync_resume_command_prompts(
@@ -2194,11 +2232,20 @@ fn build_snapshot_view(
     canvas_minimap_states: &GtkCanvasMinimapStates,
     canvas_occlusion_states: &GtkCanvasOcclusionStates,
     renderer_mode: GtkRendererMode,
-) -> gtk::Box {
+) -> GtkSnapshotView {
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     root.add_css_class("cmux-root");
-    root.append(&workspace_sidebar(snapshot, app_state));
-    root.append(&surface_area(
+
+    let left_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    left_slot.add_css_class("cmux-left-slot");
+    left_slot.append(&workspace_sidebar(snapshot, app_state));
+    root.append(&left_slot);
+
+    let main_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    main_slot.add_css_class("cmux-main-slot");
+    main_slot.set_hexpand(true);
+    main_slot.set_vexpand(true);
+    main_slot.append(&surface_area(
         snapshot,
         app_state,
         pane_allocations,
@@ -2211,10 +2258,22 @@ fn build_snapshot_view(
         canvas_occlusion_states,
         renderer_mode,
     ));
+    root.append(&main_slot);
+
+    let right_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    right_slot.add_css_class("cmux-right-slot");
     if right_sidebar_visible(snapshot) {
-        root.append(&app_chrome_sidebar(snapshot, app_state));
+        right_slot.append(&app_chrome_sidebar(snapshot, app_state));
     }
-    root
+    right_slot.set_visible(right_sidebar_visible(snapshot));
+    root.append(&right_slot);
+
+    GtkSnapshotView {
+        root,
+        left_slot,
+        main_slot,
+        right_slot,
+    }
 }
 
 fn snapshot_or_error(
@@ -2233,15 +2292,53 @@ fn snapshot_or_error(
     })
 }
 
+#[cfg(test)]
 fn snapshot_rebuild_key(snapshot: &Value) -> Value {
-    snapshot_rebuild_key_with_tabs(snapshot, true)
+    let keys = snapshot_region_rebuild_keys(snapshot);
+    json!({
+        "left": keys.left,
+        "main": keys.main,
+        "right": keys.right
+    })
 }
 
+#[cfg(test)]
 fn snapshot_rebuild_key_without_tabs(snapshot: &Value) -> Value {
-    snapshot_rebuild_key_with_tabs(snapshot, false)
+    let keys = snapshot_region_rebuild_keys(snapshot);
+    json!({
+        "left": keys.left,
+        "main": keys.main_without_tabs,
+        "right": keys.right
+    })
 }
 
-fn snapshot_rebuild_key_with_tabs(snapshot: &Value, include_tabs: bool) -> Value {
+#[derive(Debug, Clone, PartialEq)]
+struct GtkSnapshotRegionRebuildKeys {
+    left: Value,
+    main: Value,
+    main_without_tabs: Value,
+    right: Value,
+}
+
+fn snapshot_region_rebuild_keys(snapshot: &Value) -> GtkSnapshotRegionRebuildKeys {
+    GtkSnapshotRegionRebuildKeys {
+        left: snapshot_left_rebuild_key(snapshot),
+        main: snapshot_main_rebuild_key(snapshot, true),
+        main_without_tabs: snapshot_main_rebuild_key(snapshot, false),
+        right: snapshot_right_rebuild_key(snapshot),
+    }
+}
+
+fn snapshot_left_rebuild_key(snapshot: &Value) -> Value {
+    json!({
+        "workspaces": snapshot.get("workspaces"),
+        "workspace_groups": snapshot.get("workspace_groups"),
+        "custom_sidebar": snapshot.get("custom_sidebar"),
+        "config_reload_generation": snapshot.pointer("/config/reload_generation")
+    })
+}
+
+fn snapshot_main_rebuild_key(snapshot: &Value, include_tabs: bool) -> Value {
     let workspaces = snapshot
         .get("workspaces")
         .and_then(Value::as_array)
@@ -2328,12 +2425,65 @@ fn snapshot_rebuild_key_with_tabs(snapshot: &Value, include_tabs: bool) -> Value
         "surfaces": surfaces,
         "command_palette": snapshot.get("command_palette"),
         "shortcut_help": snapshot.get("shortcut_help"),
-        "notifications": snapshot.get("notifications"),
-        "sidebar": snapshot.get("sidebar"),
-        "custom_sidebar": snapshot.get("custom_sidebar"),
-        "right_sidebar": snapshot.get("right_sidebar"),
         "canvas": canvas,
-        "app_config": snapshot.pointer("/config/app")
+        "app_config": snapshot.pointer("/config/app"),
+        "config_reload_generation": snapshot.pointer("/config/reload_generation")
+    })
+}
+
+fn snapshot_right_rebuild_key(snapshot: &Value) -> Value {
+    let visible = right_sidebar_visible(snapshot);
+    let mode = right_sidebar_mode(snapshot);
+    let mut state = snapshot
+        .get("right_sidebar")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let feed_items = state
+        .as_object_mut()
+        .and_then(|state| state.remove("feed_items"))
+        .unwrap_or(Value::Null);
+    let content = if !visible {
+        Value::Null
+    } else {
+        match mode.as_str() {
+            "files" | "find" => json!({
+                "cwd": snapshot.pointer("/sidebar/cwd")
+            }),
+            "sessions" | "dock" => {
+                let surfaces = snapshot
+                    .get("surfaces")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|surface| {
+                        json!({
+                            "id": surface.get("id"),
+                            "surface_id": surface.get("surface_id"),
+                            "surface_ref": surface.get("surface_ref"),
+                            "type": surface.get("type"),
+                            "title": surface.get("title"),
+                            "has_resume_binding": surface
+                                .get("resume_binding")
+                                .is_some_and(Value::is_object)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({"surfaces": surfaces})
+            }
+            "feed" => json!({
+                "progress": snapshot.pointer("/sidebar/progress"),
+                "statuses": snapshot.pointer("/sidebar/statuses"),
+                "logs": snapshot.pointer("/sidebar/logs"),
+                "feed_items": feed_items,
+                "notifications": snapshot.get("notifications")
+            }),
+            _ => Value::Null,
+        }
+    };
+    json!({
+        "state": state,
+        "content": content,
+        "config_reload_generation": snapshot.pointer("/config/reload_generation")
     })
 }
 
@@ -8836,6 +8986,7 @@ fn append_right_sidebar_files(
 
     if searchable {
         let search = gtk::SearchEntry::new();
+        search.add_css_class("cmux-right-sidebar-input");
         search.set_placeholder_text(Some("Find files"));
         let rows_for_search = rows.clone();
         let entries_for_search = Rc::clone(&entries);
@@ -16837,6 +16988,122 @@ mod tests {
             snapshot_rebuild_key(&base),
             snapshot_rebuild_key(&changed_provider)
         );
+    }
+
+    #[test]
+    fn gtk_snapshot_region_keys_isolate_independent_updates() {
+        let base = json!({
+            "workspaces": [{
+                "workspace_id": "w1",
+                "workspace_ref": "workspace:1",
+                "title": "Workspace",
+                "selected": true,
+                "pinned": false
+            }],
+            "workspace_groups": [],
+            "custom_sidebar": {"selected_provider_id": "cmux.sidebar.workspaces"},
+            "surface_views": [{
+                "surface_id": "s1",
+                "pane_id": "p1",
+                "workspace_id": "w1",
+                "kind": "browser",
+                "visible": true,
+                "browser": {"url": "https://one.test"},
+                "tabs": [{"surface_id": "s1", "selected": true}]
+            }],
+            "surfaces": [{
+                "id": "s1",
+                "surface_ref": "surface:1",
+                "type": "browser",
+                "title": "Browser"
+            }],
+            "sidebar": {
+                "cwd": "/tmp/project",
+                "progress": "none",
+                "statuses": [],
+                "logs": []
+            },
+            "right_sidebar": {
+                "visible": true,
+                "mode": "files",
+                "feed_items": [{"id": "feed-1"}]
+            },
+            "notifications": [{"id": "notification-1"}],
+            "canvas": {"mode": "splits", "panes": []},
+            "config": {"reload_generation": 1, "app": {}}
+        });
+        let keys = snapshot_region_rebuild_keys(&base);
+
+        let mut inactive_feed_changed = base.clone();
+        inactive_feed_changed["right_sidebar"]["feed_items"] =
+            json!([{"id": "feed-1"}, {"id": "feed-2"}]);
+        inactive_feed_changed["notifications"] =
+            json!([{"id": "notification-1"}, {"id": "notification-2"}]);
+        assert_eq!(
+            keys,
+            snapshot_region_rebuild_keys(&inactive_feed_changed),
+            "inactive feed data must not rebuild any GTK region"
+        );
+
+        let mut feed_base = base.clone();
+        feed_base["right_sidebar"]["mode"] = json!("feed");
+        let feed_keys = snapshot_region_rebuild_keys(&feed_base);
+        let mut feed_changed = feed_base.clone();
+        feed_changed["right_sidebar"]["feed_items"] = json!([{"id": "feed-1"}, {"id": "feed-2"}]);
+        let changed_feed_keys = snapshot_region_rebuild_keys(&feed_changed);
+        assert_eq!(feed_keys.left, changed_feed_keys.left);
+        assert_eq!(feed_keys.main, changed_feed_keys.main);
+        assert_ne!(feed_keys.right, changed_feed_keys.right);
+
+        let mut workspace_changed = base.clone();
+        workspace_changed["workspaces"][0]["selected"] = json!(false);
+        let changed_workspace_keys = snapshot_region_rebuild_keys(&workspace_changed);
+        assert_ne!(keys.left, changed_workspace_keys.left);
+        assert_ne!(keys.main, changed_workspace_keys.main);
+        assert_eq!(keys.right, changed_workspace_keys.right);
+
+        let mut browser_changed = base.clone();
+        browser_changed["surface_views"][0]["browser"]["url"] = json!("https://two.test");
+        let changed_browser_keys = snapshot_region_rebuild_keys(&browser_changed);
+        assert_eq!(keys.left, changed_browser_keys.left);
+        assert_ne!(keys.main, changed_browser_keys.main);
+        assert_eq!(keys.right, changed_browser_keys.right);
+    }
+
+    #[test]
+    fn gtk_snapshot_region_main_key_retains_tab_only_fast_path() {
+        let base = json!({
+            "surface_views": [{
+                "surface_id": "s1",
+                "pane_id": "p1",
+                "kind": "terminal",
+                "visible": true,
+                "tabs": [{"surface_id": "s1", "selected": true}]
+            }],
+            "canvas": {
+                "mode": "splits",
+                "panes": [{
+                    "pane_id": "p1",
+                    "surface_ids": ["s1"],
+                    "surface_refs": ["surface:1"],
+                    "width": 800.0
+                }]
+            }
+        });
+        let keys = snapshot_region_rebuild_keys(&base);
+        let mut tabs_changed = base.clone();
+        tabs_changed["surface_views"][0]["tabs"] = json!([
+            {"surface_id": "s1", "selected": true},
+            {"surface_id": "s2", "selected": false}
+        ]);
+        tabs_changed["canvas"]["panes"][0]["surface_ids"] = json!(["s1", "s2"]);
+        tabs_changed["canvas"]["panes"][0]["surface_refs"] = json!(["surface:1", "surface:2"]);
+        let changed = snapshot_region_rebuild_keys(&tabs_changed);
+
+        assert_ne!(keys.main, changed.main);
+        assert_eq!(keys.main_without_tabs, changed.main_without_tabs);
+        assert_eq!(keys.left, changed.left);
+        assert_eq!(keys.right, changed.right);
     }
 
     #[test]

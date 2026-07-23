@@ -5361,64 +5361,7 @@ impl AppState {
     }
 
     fn feedback_retry(&self, params: &Value) -> AppResult<Value> {
-        let limit = params
-            .get("limit")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_FEEDBACK_RETRY_LIMIT as u64);
-        if limit == 0 || limit > MAX_FEEDBACK_RETRY_LIMIT as u64 {
-            return Err(AppError::invalid_params(format!(
-                "feedback retry limit must be between 1 and {MAX_FEEDBACK_RETRY_LIMIT}"
-            )));
-        }
-        if feedback_delivery_mode()? == "local" {
-            return Ok(json!({
-                "retried": 0,
-                "delivered": 0,
-                "pending": feedback_pending_record_paths(&feedback_store_dir()?)?.len(),
-                "rejected": 0,
-                "delivery_mode": "local"
-            }));
-        }
-
-        let mut paths = feedback_pending_record_paths(&feedback_store_dir()?)?;
-        paths.truncate(limit as usize);
-        let mut delivered = 0_u64;
-        let mut rejected = 0_u64;
-        let mut results = Vec::new();
-        for path in paths {
-            let mut record = load_feedback_queue_record(&path)?;
-            let outcome = deliver_feedback_record(&path, &record);
-            update_feedback_record_after_delivery(&mut record, &outcome);
-            save_private_json(&path, &record, "feedback queue record")?;
-            finish_feedback_record_attempt(&path, &record);
-            let state = match outcome {
-                FeedbackDeliveryOutcome::Delivered => {
-                    delivered += 1;
-                    "sent"
-                }
-                FeedbackDeliveryOutcome::Transient { .. } => "pending",
-                FeedbackDeliveryOutcome::Rejected { .. } => {
-                    rejected += 1;
-                    "rejected"
-                }
-            };
-            results.push(json!({
-                "id": record.id,
-                "state": state,
-                "attempt_count": record.attempt_count,
-                "path": path.to_string_lossy()
-            }));
-        }
-        let pending = feedback_pending_record_paths(&feedback_store_dir()?)?.len();
-
-        Ok(json!({
-            "retried": results.len(),
-            "delivered": delivered,
-            "pending": pending,
-            "rejected": rejected,
-            "results": results,
-            "delivery_mode": "network"
-        }))
+        retry_feedback_requests(params)
     }
 
     fn dogfood_feedback_submit(&self, params: &Value) -> AppResult<Value> {
@@ -6695,7 +6638,7 @@ impl AppState {
             .get("pending_only")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let items = self
+        let matching = self
             .feed_items
             .iter()
             .filter(|item| {
@@ -6705,6 +6648,16 @@ impl AppState {
                         .and_then(Value::as_str)
                         .is_some_and(|status| status == "pending")
             })
+            .collect::<Vec<_>>();
+        let limit = params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .and_then(|limit| usize::try_from(limit).ok())
+            .unwrap_or(matching.len());
+        let start = matching.len().saturating_sub(limit);
+        let items = matching
+            .into_iter()
+            .skip(start)
             .cloned()
             .collect::<Vec<_>>();
         json!({"items": items})
@@ -23131,7 +23084,9 @@ impl AppState {
             .map(format_progress)
             .unwrap_or_else(|| "none".to_string());
         let cwd = workspace.cwd.clone().unwrap_or_default();
-        let git_branch = git_branch_for_cwd(workspace.cwd.as_deref()).unwrap_or_default();
+        let git_branch = git_branch_state_for_cwd(workspace.cwd.as_deref())
+            .map(|(branch, _)| branch)
+            .unwrap_or_default();
         let mut lines = vec![
             format!("workspace_id={workspace_id}"),
             format!("workspace_ref={}", self.workspace_ref(&workspace_id)),
@@ -23738,6 +23693,11 @@ impl AppState {
                     .ok_or_else(|| {
                         AppError::invalid_params("cmux event action method is required")
                     })?;
+                if !custom_sidebar_nested_cmux_method_allowed(method) {
+                    return Err(AppError::unavailable(
+                        "custom sidebar actions cannot perform feedback delivery",
+                    ));
+                }
                 let params = serde_json::to_value(&command.params).map_err(|error| {
                     AppError::internal(format!(
                         "failed to encode custom sidebar event params: {error}"
@@ -50583,12 +50543,15 @@ fn event_frame_encoded_len(event: &Value) -> usize {
 }
 
 fn persist_event_frame(event: &Value) {
-    append_jsonl_record(&event_log_path(), EVENT_LOG_MAX_BYTES, event);
+    for path in event_log_paths_for_write() {
+        append_jsonl_record(&path, EVENT_LOG_MAX_BYTES, event);
+    }
 }
 
 fn persist_feed_audit_record(name: &str, payload: Value) {
+    let path = feed_audit_log_path();
     append_jsonl_record(
-        &feed_audit_log_path(),
+        &path,
         FEED_AUDIT_LOG_MAX_BYTES,
         &json!({
             "type": "feed_audit",
@@ -50598,6 +50561,9 @@ fn persist_feed_audit_record(name: &str, payload: Value) {
             "payload": payload
         }),
     );
+    if name == "feed.cleared" {
+        persist_feed_legacy_clear_marker(&path);
+    }
 }
 
 fn append_jsonl_record(path: &Path, max_bytes: u64, record: &Value) {
@@ -50639,50 +50605,182 @@ fn jsonl_log_archive_path(path: &Path) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{file_name}.1")))
 }
 
-fn event_log_path() -> PathBuf {
-    if let Some(path) = normalized_env("CMUX_EVENTS_LOG_PATH") {
-        return PathBuf::from(path);
-    }
-    if let Some(home) = normalized_env("HOME") {
-        return PathBuf::from(home).join(".cmuxterm/events.jsonl");
-    }
-    state_dir().join("events.jsonl")
+fn event_log_paths_for_write() -> Vec<PathBuf> {
+    event_log_paths_for_write_from_env(
+        normalized_env("CMUX_EVENTS_LOG_PATH").as_deref(),
+        normalized_env("XDG_STATE_HOME").as_deref(),
+        normalized_env("HOME").as_deref(),
+        &std::env::temp_dir(),
+    )
 }
 
 fn feed_audit_log_path() -> PathBuf {
-    if let Some(path) = normalized_env("CMUX_FEED_LOG_PATH") {
-        return PathBuf::from(path);
-    }
-    if let Some(home) = normalized_env("HOME") {
-        return PathBuf::from(home).join(".cmuxterm/workstream.jsonl");
-    }
-    state_dir().join("workstream.jsonl")
+    feed_audit_log_paths_from_env(
+        normalized_env("CMUX_FEED_LOG_PATH").as_deref(),
+        normalized_env("XDG_STATE_HOME").as_deref(),
+        normalized_env("HOME").as_deref(),
+        &std::env::temp_dir(),
+    )
+    .pop()
+    .unwrap_or_else(|| state_dir().join("workstream.jsonl"))
 }
 
 fn load_recent_feed_items() -> Vec<Value> {
-    let Ok(log_text) = fs::read_to_string(feed_audit_log_path()) else {
-        return Vec::new();
-    };
     let mut items = Vec::new();
-    for line in log_text.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
+    for path in feed_audit_log_paths_for_load_from_env(
+        normalized_env("CMUX_FEED_LOG_PATH").as_deref(),
+        normalized_env("XDG_STATE_HOME").as_deref(),
+        normalized_env("HOME").as_deref(),
+        &std::env::temp_dir(),
+    ) {
+        let Ok(log_text) = fs::read_to_string(path) else {
             continue;
         };
-        match record.get("name").and_then(Value::as_str) {
-            Some("feed.cleared") => items.clear(),
-            Some("feed.item.received" | "feed.item.completed" | "feed.item.resolved") => {
-                if let Some(item) = record
-                    .get("payload")
-                    .and_then(|payload| payload.get("item"))
-                    .filter(|item| item.is_object())
-                {
-                    upsert_loaded_feed_item(&mut items, item.clone());
+        for line in log_text.lines() {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            match record.get("name").and_then(Value::as_str) {
+                Some("feed.cleared") => items.clear(),
+                Some("feed.item.received" | "feed.item.completed" | "feed.item.resolved") => {
+                    if let Some(item) = record
+                        .get("payload")
+                        .and_then(|payload| payload.get("item"))
+                        .filter(|item| item.is_object())
+                    {
+                        upsert_loaded_feed_item(&mut items, item.clone());
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
     items
+}
+
+fn event_log_path_from_env(
+    explicit_path: Option<&str>,
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+    temp_dir: &Path,
+) -> PathBuf {
+    explicit_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_dir_from_env(xdg_state_home, home, temp_dir).join("events.jsonl"))
+}
+
+fn event_log_paths_for_write_from_env(
+    explicit_path: Option<&str>,
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+    temp_dir: &Path,
+) -> Vec<PathBuf> {
+    if let Some(path) = explicit_path {
+        return vec![PathBuf::from(path)];
+    }
+    let current = event_log_path_from_env(None, xdg_state_home, home, temp_dir);
+    let legacy = home.map(|home| PathBuf::from(home).join(".cmuxterm/events.jsonl"));
+    match legacy {
+        Some(legacy)
+            if legacy != current
+                && (legacy.exists()
+                    || jsonl_log_archive_path(&legacy).is_some_and(|path| path.exists())) =>
+        {
+            vec![current, legacy]
+        }
+        _ => vec![current],
+    }
+}
+
+fn feed_audit_log_paths_from_env(
+    explicit_path: Option<&str>,
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+    temp_dir: &Path,
+) -> Vec<PathBuf> {
+    if let Some(path) = explicit_path {
+        return vec![PathBuf::from(path)];
+    }
+    let current = state_dir_from_env(xdg_state_home, home, temp_dir).join("workstream.jsonl");
+    let legacy = home.map(|home| PathBuf::from(home).join(".cmuxterm/workstream.jsonl"));
+    match legacy {
+        Some(legacy) if legacy != current => vec![legacy, current],
+        _ => vec![current],
+    }
+}
+
+fn feed_audit_log_paths_for_load_from_env(
+    explicit_path: Option<&str>,
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+    temp_dir: &Path,
+) -> Vec<PathBuf> {
+    let paths = feed_audit_log_paths_from_env(explicit_path, xdg_state_home, home, temp_dir);
+    if paths.len() != 2 {
+        return paths;
+    }
+    let current = paths.last().expect("two feed audit paths");
+    let legacy_clear_marker =
+        feed_legacy_clear_marker_path(current).is_some_and(|path| path.exists());
+    let current_records_clear = [Some(current.clone()), jsonl_log_archive_path(current)]
+        .into_iter()
+        .flatten()
+        .any(|path| jsonl_log_contains_named_record(&path, "feed.cleared"));
+    if legacy_clear_marker || current_records_clear {
+        if current_records_clear {
+            persist_feed_legacy_clear_marker(current);
+        }
+        vec![current.clone()]
+    } else {
+        paths
+    }
+}
+
+fn feed_legacy_clear_marker_path(feed_log_path: &Path) -> Option<PathBuf> {
+    let file_name = feed_log_path.file_name()?.to_string_lossy();
+    Some(feed_log_path.with_file_name(format!("{file_name}.legacy-cleared")))
+}
+
+fn persist_feed_legacy_clear_marker(feed_log_path: &Path) {
+    let Some(path) = feed_legacy_clear_marker_path(feed_log_path) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+    let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+    else {
+        return;
+    };
+    if file.write_all(b"cleared\n").is_ok() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+}
+
+fn jsonl_log_contains_named_record(path: &Path, name: &str) -> bool {
+    let Ok(log_text) = fs::read_to_string(path) else {
+        return false;
+    };
+    log_text.lines().any(|line| {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|record| {
+                record
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|record_name| record_name == name)
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn upsert_loaded_feed_item(items: &mut Vec<Value>, item: Value) {
@@ -50707,6 +50805,10 @@ fn cap_loaded_feed_items(items: &mut Vec<Value>) {
         let overflow = items.len() - FEED_RETAINED_LIMIT;
         items.drain(0..overflow);
     }
+}
+
+fn custom_sidebar_nested_cmux_method_allowed(method: &str) -> bool {
+    !matches!(method, "feedback.submit" | "feedback.retry")
 }
 
 fn event_timestamp_millis() -> u128 {
@@ -51485,7 +51587,20 @@ fn mobile_chat_state_value(surface: &Surface, since: &str) -> Value {
     }
 }
 
-pub(crate) fn submit_feedback_request(params: &Value) -> std::result::Result<Value, AppError> {
+fn with_feedback_effect_lane<T>(effect: impl FnOnce() -> AppResult<T>) -> AppResult<T> {
+    static FEEDBACK_EFFECT_LANE: OnceLock<Mutex<()>> = OnceLock::new();
+    let lane = FEEDBACK_EFFECT_LANE.get_or_init(|| Mutex::new(()));
+    let _guard = lane
+        .lock()
+        .map_err(|_| AppError::internal("feedback effect lane lock poisoned"))?;
+    effect()
+}
+
+pub(crate) fn submit_feedback_request(params: &Value) -> AppResult<Value> {
+    with_feedback_effect_lane(|| submit_feedback_request_inner(params))
+}
+
+fn submit_feedback_request_inner(params: &Value) -> AppResult<Value> {
     let email = validate_feedback_email(
         &string_param(params, "email").ok_or_else(|| AppError::invalid_params("Missing email"))?,
     )?;
@@ -51537,6 +51652,71 @@ pub(crate) fn submit_feedback_request(params: &Value) -> std::result::Result<Val
             }
         }
     }
+}
+
+pub(crate) fn retry_feedback_requests(params: &Value) -> AppResult<Value> {
+    with_feedback_effect_lane(|| retry_feedback_requests_inner(params))
+}
+
+fn retry_feedback_requests_inner(params: &Value) -> AppResult<Value> {
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_FEEDBACK_RETRY_LIMIT as u64);
+    if limit == 0 || limit > MAX_FEEDBACK_RETRY_LIMIT as u64 {
+        return Err(AppError::invalid_params(format!(
+            "feedback retry limit must be between 1 and {MAX_FEEDBACK_RETRY_LIMIT}"
+        )));
+    }
+    if feedback_delivery_mode()? == "local" {
+        return Ok(json!({
+            "retried": 0,
+            "delivered": 0,
+            "pending": feedback_pending_record_paths(&feedback_store_dir()?)?.len(),
+            "rejected": 0,
+            "delivery_mode": "local"
+        }));
+    }
+
+    let mut paths = feedback_pending_record_paths(&feedback_store_dir()?)?;
+    paths.truncate(limit as usize);
+    let mut delivered = 0_u64;
+    let mut rejected = 0_u64;
+    let mut results = Vec::new();
+    for path in paths {
+        let mut record = load_feedback_queue_record(&path)?;
+        let outcome = deliver_feedback_record(&path, &record);
+        update_feedback_record_after_delivery(&mut record, &outcome);
+        save_private_json(&path, &record, "feedback queue record")?;
+        finish_feedback_record_attempt(&path, &record);
+        let state = match outcome {
+            FeedbackDeliveryOutcome::Delivered => {
+                delivered += 1;
+                "sent"
+            }
+            FeedbackDeliveryOutcome::Transient { .. } => "pending",
+            FeedbackDeliveryOutcome::Rejected { .. } => {
+                rejected += 1;
+                "rejected"
+            }
+        };
+        results.push(json!({
+            "id": record.id,
+            "state": state,
+            "attempt_count": record.attempt_count,
+            "path": path.to_string_lossy()
+        }));
+    }
+    let pending = feedback_pending_record_paths(&feedback_store_dir()?)?.len();
+
+    Ok(json!({
+        "retried": results.len(),
+        "delivered": delivered,
+        "pending": pending,
+        "rejected": rejected,
+        "results": results,
+        "delivery_mode": "network"
+    }))
 }
 
 fn validate_feedback_email(raw: &str) -> AppResult<String> {
@@ -52924,13 +53104,25 @@ fn registered_remote_device_id(name: &str) -> String {
 }
 
 fn state_dir() -> PathBuf {
-    if let Some(path) = normalized_env("XDG_STATE_HOME") {
+    state_dir_from_env(
+        normalized_env("XDG_STATE_HOME").as_deref(),
+        normalized_env("HOME").as_deref(),
+        &std::env::temp_dir(),
+    )
+}
+
+fn state_dir_from_env(
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+    temp_dir: &Path,
+) -> PathBuf {
+    if let Some(path) = xdg_state_home {
         return PathBuf::from(path).join("cmux");
     }
-    if let Some(home) = normalized_env("HOME") {
+    if let Some(home) = home {
         return PathBuf::from(home).join(".local/state/cmux");
     }
-    std::env::temp_dir().join("cmux")
+    temp_dir.join("cmux")
 }
 
 fn browser_profiles_path() -> PathBuf {
@@ -56656,7 +56848,9 @@ fn csi_position(value: Option<usize>) -> usize {
 #[cfg(test)]
 mod xdg_path_tests {
     use super::{
-        cache_dir_from_env, cleanup_browser_webkit_storage_root, mobile_image_dir_in_cache_dir,
+        cache_dir_from_env, cleanup_browser_webkit_storage_root, event_log_path_from_env,
+        event_log_paths_for_write_from_env, feed_audit_log_paths_for_load_from_env,
+        feed_audit_log_paths_from_env, mobile_image_dir_in_cache_dir, state_dir_from_env,
     };
     use std::collections::HashMap;
     use std::fs;
@@ -56688,6 +56882,135 @@ mod xdg_path_tests {
             mobile_image_dir_in_cache_dir(Path::new("/home/me/.cache/cmux")),
             PathBuf::from("/home/me/.cache/cmux/mobile-images")
         );
+    }
+
+    #[test]
+    fn app_state_and_event_logs_prefer_xdg_state_home() {
+        let temp = Path::new("/tmp/codex");
+        assert_eq!(
+            state_dir_from_env(Some("/run/user/1000/state"), Some("/home/me"), temp),
+            PathBuf::from("/run/user/1000/state/cmux")
+        );
+        assert_eq!(
+            event_log_path_from_env(None, Some("/run/user/1000/state"), Some("/home/me"), temp),
+            PathBuf::from("/run/user/1000/state/cmux/events.jsonl")
+        );
+        assert_eq!(
+            event_log_path_from_env(
+                Some("/explicit/events.jsonl"),
+                Some("/run/user/1000/state"),
+                Some("/home/me"),
+                temp
+            ),
+            PathBuf::from("/explicit/events.jsonl")
+        );
+    }
+
+    #[test]
+    fn event_log_keeps_existing_legacy_consumers_alive_during_xdg_migration() {
+        let tmp = tempfile::tempdir().expect("event migration tempdir");
+        let home = tmp.path().join("home");
+        let xdg = tmp.path().join("state");
+        fs::create_dir_all(home.join(".cmuxterm")).expect("legacy event directory");
+
+        assert_eq!(
+            event_log_paths_for_write_from_env(None, xdg.to_str(), home.to_str(), tmp.path()),
+            vec![xdg.join("cmux/events.jsonl")]
+        );
+
+        fs::write(home.join(".cmuxterm/events.jsonl"), "{}\n").expect("legacy event log");
+        assert_eq!(
+            event_log_paths_for_write_from_env(None, xdg.to_str(), home.to_str(), tmp.path()),
+            vec![
+                xdg.join("cmux/events.jsonl"),
+                home.join(".cmuxterm/events.jsonl")
+            ]
+        );
+        assert_eq!(
+            event_log_paths_for_write_from_env(
+                Some("/explicit/events.jsonl"),
+                xdg.to_str(),
+                home.to_str(),
+                tmp.path()
+            ),
+            vec![PathBuf::from("/explicit/events.jsonl")]
+        );
+    }
+
+    #[test]
+    fn feed_loads_legacy_history_before_the_xdg_log() {
+        assert_eq!(
+            feed_audit_log_paths_from_env(
+                None,
+                Some("/run/user/1000/state"),
+                Some("/home/me"),
+                Path::new("/tmp")
+            ),
+            vec![
+                PathBuf::from("/home/me/.cmuxterm/workstream.jsonl"),
+                PathBuf::from("/run/user/1000/state/cmux/workstream.jsonl")
+            ]
+        );
+        assert_eq!(
+            feed_audit_log_paths_from_env(
+                Some("/explicit/feed.jsonl"),
+                Some("/run/user/1000/state"),
+                Some("/home/me"),
+                Path::new("/tmp")
+            ),
+            vec![PathBuf::from("/explicit/feed.jsonl")]
+        );
+    }
+
+    #[test]
+    fn feed_migration_keeps_legacy_history_until_a_durable_clear() {
+        let tmp = tempfile::tempdir().expect("feed migration tempdir");
+        let home = tmp.path().join("home");
+        let xdg = tmp.path().join("state");
+        fs::create_dir_all(home.join(".cmuxterm")).expect("legacy directory");
+        fs::create_dir_all(xdg.join("cmux")).expect("xdg directory");
+        fs::write(
+            home.join(".cmuxterm/workstream.jsonl"),
+            "{\"name\":\"feed.item.received\"}\n",
+        )
+        .expect("legacy log");
+        fs::write(
+            xdg.join("cmux/workstream.jsonl"),
+            "{\"name\":\"feed.item.received\"}\n",
+        )
+        .expect("current log");
+
+        assert_eq!(
+            feed_audit_log_paths_for_load_from_env(None, xdg.to_str(), home.to_str(), tmp.path()),
+            vec![
+                home.join(".cmuxterm/workstream.jsonl"),
+                xdg.join("cmux/workstream.jsonl")
+            ]
+        );
+
+        fs::write(
+            xdg.join("cmux/workstream.jsonl"),
+            "{\"name\":\"feed.cleared\"}\n",
+        )
+        .expect("current clear");
+        assert_eq!(
+            feed_audit_log_paths_for_load_from_env(None, xdg.to_str(), home.to_str(), tmp.path()),
+            vec![xdg.join("cmux/workstream.jsonl")]
+        );
+        let marker = xdg.join("cmux/workstream.jsonl.legacy-cleared");
+        assert!(marker.is_file(), "clear marker was not persisted");
+
+        fs::remove_file(&marker).expect("remove marker to test archived clear");
+        fs::rename(
+            xdg.join("cmux/workstream.jsonl"),
+            xdg.join("cmux/workstream.jsonl.1"),
+        )
+        .expect("rotate current log");
+        assert_eq!(
+            feed_audit_log_paths_for_load_from_env(None, xdg.to_str(), home.to_str(), tmp.path()),
+            vec![xdg.join("cmux/workstream.jsonl")]
+        );
+        assert!(marker.is_file(), "archived clear did not restore marker");
     }
 
     #[test]
@@ -56885,10 +57208,11 @@ mod remote_ssh_command_tests {
 mod embedded_terminal_action_tests {
     use super::{
         browser_import_bookmarks_from_value, browser_import_settings_from_value,
-        browser_surface_preview_value, debug_container_frame, default_browser_profiles,
-        file_url_for_path, global_search_query_tokens, global_search_result_digit,
-        global_search_text_matches, load_browser_profiles, merge_browser_history_entries,
-        session_terminal_env, workspace_placement_insertion_index, AppState, BrowserHistoryEntry,
+        browser_surface_preview_value, custom_sidebar_nested_cmux_method_allowed,
+        debug_container_frame, default_browser_profiles, file_url_for_path,
+        global_search_query_tokens, global_search_result_digit, global_search_text_matches,
+        load_browser_profiles, merge_browser_history_entries, session_terminal_env,
+        workspace_placement_insertion_index, AppState, BrowserHistoryEntry,
         BrowserImportHistoryEntry, EmbeddedTerminalActionRecord, EmbeddedTerminalColorChange,
         EmbeddedTerminalCommandFinished, EmbeddedTerminalInput, EmbeddedTerminalKeySequence,
         EmbeddedTerminalPixelSize, EmbeddedTerminalProgress, EmbeddedTerminalScrollbar,
@@ -56912,6 +57236,18 @@ mod embedded_terminal_action_tests {
         let surface_ref = app.surface_ref(&surface_id);
         let workspace_id = app.surface_workspace_id(&surface_id).expect("workspace");
         (app, surface_id, surface_ref, workspace_id)
+    }
+
+    #[test]
+    fn custom_sidebar_nested_actions_cannot_reenter_feedback_delivery() {
+        assert!(!custom_sidebar_nested_cmux_method_allowed(
+            "feedback.submit"
+        ));
+        assert!(!custom_sidebar_nested_cmux_method_allowed("feedback.retry"));
+        assert!(custom_sidebar_nested_cmux_method_allowed("feedback.open"));
+        assert!(custom_sidebar_nested_cmux_method_allowed(
+            "model.workspace.list"
+        ));
     }
 
     fn configure_hibernation_candidate(
@@ -57654,6 +57990,34 @@ mod embedded_terminal_action_tests {
             .expect("legacy reload");
         assert_eq!(legacy, "OK Reloaded config");
         assert_eq!(app.config_reload_generation(), 2);
+    }
+
+    #[test]
+    fn feed_list_limit_returns_latest_filtered_items_in_chronological_order() {
+        let (mut app, _surface_id, _surface_ref, _workspace_id) = app_with_current_surface();
+        app.feed_items = vec![
+            json!({"id": "one", "status": "pending"}),
+            json!({"id": "two", "status": "resolved"}),
+            json!({"id": "three", "status": "pending"}),
+            json!({"id": "four", "status": "pending"}),
+        ];
+
+        let latest = app
+            .handle("feed.list", &json!({"limit": 2}))
+            .expect("latest feed items");
+        assert_eq!(latest["items"][0]["id"], "three");
+        assert_eq!(latest["items"][1]["id"], "four");
+
+        let latest_pending = app
+            .handle("feed.list", &json!({"pending_only": true, "limit": 2}))
+            .expect("latest pending feed items");
+        assert_eq!(latest_pending["items"][0]["id"], "three");
+        assert_eq!(latest_pending["items"][1]["id"], "four");
+
+        let empty = app
+            .handle("feed.list", &json!({"limit": 0}))
+            .expect("empty feed limit");
+        assert_eq!(empty["items"], json!([]));
     }
 
     #[test]
@@ -63163,24 +63527,6 @@ fn format_log_entry(entry: &SidebarLogEntry) -> String {
             format!("[{}] {}: {}", entry.level, source.trim(), entry.message)
         }
         _ => format!("[{}] {}", entry.level, entry.message),
-    }
-}
-
-fn git_branch_for_cwd(cwd: Option<&str>) -> Option<String> {
-    let cwd = cwd?;
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
     }
 }
 

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 const GHOSTTY_VT_DEBUG_CELL_WIDTH: f64 = 10.0;
 const GHOSTTY_VT_DEBUG_CELL_HEIGHT: f64 = 20.0;
@@ -369,7 +370,7 @@ fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<V
     if backend == "ghostty-vt" {
         attach_ghostty_vt_render_states(app, &mut views)?;
     }
-    let diagnostics = diagnostics_value_for_backend(&backend)?;
+    let diagnostics = cached_diagnostics_value_for_backend(&backend)?;
 
     Ok(json!({
         "renderer": {
@@ -446,6 +447,19 @@ fn diagnostics_value_for_backend(backend: &str) -> Result<Value, AppError> {
         .map_err(|err| AppError::internal(err.to_string()))
 }
 
+fn cached_diagnostics_value_for_backend(backend: &str) -> Result<Value, AppError> {
+    static PROBES: OnceLock<(GtkProbe, GhosttyProbe, DisplayProbe)> = OnceLock::new();
+    let (gtk4, ghostty, display) =
+        PROBES.get_or_init(|| (probe_gtk4(), probe_ghostty(), probe_display()));
+    serde_json::to_value(diagnostics_from_probes(
+        backend,
+        gtk4.clone(),
+        ghostty.clone(),
+        display.clone(),
+    ))
+    .map_err(|err| AppError::internal(err.to_string()))
+}
+
 fn sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
     let mut state = app.handle("sidebar.state", &json!({}))?;
     let statuses = app.handle("sidebar.status.list", &json!({}))?;
@@ -470,20 +484,32 @@ fn sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
 
 fn right_sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
     let mut state = app.handle("sidebar.right", &json!({"action": "mode"}))?;
-    let feed = app.handle("feed.list", &json!({}))?;
+    let include_feed = state.get("visible").and_then(Value::as_bool) == Some(true)
+        && state.get("mode").and_then(Value::as_str) == Some("feed");
+    let feed_items = if include_feed {
+        app.handle("feed.list", &json!({"limit": 20}))?
+            .get("items")
+            .cloned()
+            .unwrap_or_else(|| json!([]))
+    } else {
+        json!([])
+    };
     if let Some(object) = state.as_object_mut() {
-        object.insert(
-            "feed_items".to_string(),
-            feed.get("items").cloned().unwrap_or_else(|| json!([])),
-        );
+        object.insert("feed_items".to_string(), feed_items);
     }
     Ok(state)
 }
 
 fn diagnostics_for_backend(backend: &str) -> RendererDiagnostics {
-    let gtk4 = probe_gtk4();
-    let ghostty = probe_ghostty();
-    let display = probe_display();
+    diagnostics_from_probes(backend, probe_gtk4(), probe_ghostty(), probe_display())
+}
+
+fn diagnostics_from_probes(
+    backend: &str,
+    gtk4: GtkProbe,
+    ghostty: GhosttyProbe,
+    display: DisplayProbe,
+) -> RendererDiagnostics {
     let ghostty_available = ghostty_backend_available(
         ghostty.linux_embedding_supported,
         ghostty.runtime_resources_present,
@@ -3634,20 +3660,28 @@ mod tests {
             json!(["files", "find", "sessions"])
         );
         assert_eq!(snapshot["right_sidebar"]["focus_generation"], 0);
-        assert_eq!(
-            snapshot["right_sidebar"]["feed_items"][0]["source"],
-            "codex"
-        );
+        assert_eq!(snapshot["right_sidebar"]["feed_items"], json!([]));
 
         app.handle("sidebar.right", &json!({"action": "hide"}))
             .expect("hide right sidebar");
         let hidden = snapshot_value(&mut app, &json!({})).expect("hidden snapshot");
         assert_eq!(hidden["right_sidebar"]["visible"], false);
+        assert_eq!(hidden["right_sidebar"]["feed_items"], json!([]));
 
         app.handle("sidebar.right", &json!({"action": "focus"}))
             .expect("focus right sidebar");
         let focused = snapshot_value(&mut app, &json!({})).expect("focused snapshot");
         assert_eq!(focused["right_sidebar"]["focus_generation"], 1);
+
+        app.set_beta_feature_settings_for_test(crate::config::BetaFeatureSettings {
+            right_sidebar_feed: true,
+            ..crate::config::BetaFeatureSettings::default()
+        });
+        app.handle("sidebar.right", &json!({"action": "set", "mode": "feed"}))
+            .expect("show feed sidebar");
+        let feed = snapshot_value(&mut app, &json!({})).expect("feed snapshot");
+        assert_eq!(feed["right_sidebar"]["mode"], "feed");
+        assert_eq!(feed["right_sidebar"]["feed_items"][0]["source"], "codex");
     }
 
     #[test]

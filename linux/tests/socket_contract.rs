@@ -81,6 +81,13 @@ impl Drop for FakeFeedbackApi {
 }
 
 fn fake_feedback_api(failures_before_success: usize) -> FakeFeedbackApi {
+    fake_feedback_api_with_delay(failures_before_success, Duration::ZERO)
+}
+
+fn fake_feedback_api_with_delay(
+    failures_before_success: usize,
+    response_delay: Duration,
+) -> FakeFeedbackApi {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake feedback API");
     listener
         .set_nonblocking(true)
@@ -112,6 +119,7 @@ fn fake_feedback_api(failures_before_success: usize) -> FakeFeedbackApi {
                 .lock()
                 .expect("feedback requests")
                 .push(request);
+            thread::sleep(response_delay);
             if reject {
                 write_fake_http_json(
                     &mut stream,
@@ -13666,6 +13674,53 @@ fn feedback_submit_delivers_server_compatible_multipart() {
             .exists(),
         "delivered attachment copies should be removed"
     );
+}
+
+#[test]
+fn delayed_feedback_delivery_does_not_block_app_state_requests() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let feedback_dir = tmp.path().join("feedback-store");
+    let feedback_dir_text = feedback_dir.display().to_string();
+    let api = fake_feedback_api_with_delay(0, Duration::from_millis(750));
+    let server = start_server_with_env(&[
+        ("CMUX_FEEDBACK_DIR", feedback_dir_text.as_str()),
+        ("CMUX_FEEDBACK_API_URL", api.endpoint.as_str()),
+        ("CMUX_FEEDBACK_DELIVERY", "network"),
+    ]);
+
+    let feedback_socket = server.socket.clone();
+    let feedback = thread::spawn(move || {
+        rpc_response(
+            &feedback_socket,
+            "feedback.submit",
+            json!({
+                "email": "responsive@example.test",
+                "body": "Keep the app responsive while this request is delayed"
+            }),
+        )
+    });
+
+    let request_deadline = Instant::now() + Duration::from_secs(2);
+    while api.requests.lock().expect("feedback requests").is_empty() {
+        assert!(
+            Instant::now() < request_deadline,
+            "feedback request never reached the fake API"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let ping_started = Instant::now();
+    let ping = rpc(&server.socket, "system.ping", json!({}));
+    let ping_elapsed = ping_started.elapsed();
+    assert_eq!(ping["pong"], true);
+    assert!(
+        ping_elapsed < Duration::from_millis(300),
+        "system.ping waited {ping_elapsed:?} behind feedback delivery"
+    );
+
+    let submitted = feedback.join().expect("feedback request thread");
+    assert_eq!(submitted["ok"], true, "response was {submitted}");
+    assert_eq!(submitted["result"]["delivered"], true);
 }
 
 #[test]
