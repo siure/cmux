@@ -1,0 +1,53 @@
+[package]
+name = "cmux-linux"
+version = "0.1.0"
+edition = "2021"
+default-run = "cmux"
+build = "build.rs"
+
+[features]
+default = []
+gtk = ["dep:ashpd", "dep:futures-util", "dep:gtk4", "dep:tokio"]
+
+[[bin]]
+name = "cmux"
+path = "src/main.rs"
+
+[[bin]]
+name = "cmuxd-remote"
+path = "src/bin/cmuxd-remote.rs"
+
+[[example]]
+name = "webkit-cookie-smoke"
+path = "examples/webkit_cookie_smoke.rs"
+required-features = ["gtk"]
+
+[[example]]
+name = "webkit-runtime-smoke"
+path = "examples/webkit_runtime_smoke.rs"
+required-features = ["gtk"]
+
+[dependencies]
+anyhow = "1.0"
+ashpd = { version = "0.13.12", optional = true, default-features = false, features = ["global_shortcuts", "tokio"] }
+base64 = "0.22"
+futures-util = { version = "0.3", optional = true }
+flate2 = "1.1"
+gtk4 = { version = "0.11.3", optional = true }
+portable-pty = "0.9"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+shell-words = "1.1"
+tar = "0.4"
+tokio = { version = "1.48", optional = true, features = ["rt", "time"] }
+tree-sitter = "0.26"
+tree-sitter-swift = "=0.7.3"
+uuid = { version = "1.9", features = ["v4", "serde"] }
+url = "2.5"
+
+[dev-dependencies]
+tempfile = "3.10"

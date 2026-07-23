@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "root": {
+    "type": "vstack",
+    "alignment": "leading",
+    "spacing": 8,
+    "children": [
+      {
+        "type": "text",
+        "text": "Linux status",
+        "font": "headline",
+        "weight": "semibold"
+      },
+      {
+        "type": "text",
+        "text": "A declarative custom sidebar rendered by GTK.",
+        "font": "caption",
+        "color": "secondary"
+      },
+      {
+        "type": "divider"
+      },
+      {
+        "type": "button",
+        "title": "Next workspace",
+        "action": {
+          "type": "workspace.next"
+        }
+      },
+      {
+        "type": "button",
+        "title": "Open cmux.com",
+        "action": {
+          "type": "openURL",
+          "message": "https://cmux.com"
+        }
+      }
+    ]
+  }
+}

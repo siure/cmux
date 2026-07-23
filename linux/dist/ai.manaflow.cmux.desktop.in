@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=cmux
+GenericName=Agent Terminal
+Comment=Ghostty-based terminal workspace for coding agents
+Exec=@CMUX_APP_WRAPPER@ %U
+Icon=@APP_ID@
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupNotify=true
+StartupWMClass=@APP_ID@
+MimeType=inode/directory;text/plain;text/markdown;text/x-patch;text/x-diff;x-scheme-handler/cmux;x-scheme-handler/http;x-scheme-handler/https;
+Keywords=terminal;agent;claude;codex;ghostty;workspace;

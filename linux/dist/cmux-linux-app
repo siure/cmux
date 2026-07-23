@@ -1,0 +1,122 @@
+#!/usr/bin/env sh
+set -eu
+
+runtime_socket_override=0
+if [ "${CMUX_SOCKET_PATH+x}" = x ] || [ "${CMUX_SOCKET+x}" = x ]; then
+    runtime_socket_override=1
+fi
+
+bin_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+bundle_root=$(CDPATH='' cd -- "$bin_dir/.." && pwd)
+cmux_bin=${CMUX_BIN:-"$bin_dir/cmux"}
+data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+user_config_file="$data_home/cmux/linux-app.env"
+bundle_config_file="$bundle_root/share/cmux/linux-app.env"
+bundle_version_file="$bundle_root/share/cmux/bundle-version"
+installed_version_file="$data_home/cmux/bundle-version"
+config_file=${CMUX_LINUX_APP_CONFIG:-}
+if [ -z "$config_file" ]; then
+    if [ -f "$user_config_file" ]; then
+        config_file=$user_config_file
+    else
+        config_file=$bundle_config_file
+    fi
+fi
+default_ghostty_root="$data_home/cmux/ghostty"
+bundle_ghostty_root="$bundle_root/share/cmux/ghostty"
+if [ -f "$bundle_ghostty_root/lib/libghostty-internal.so" ]; then
+    default_ghostty_root=$bundle_ghostty_root
+    export CMUX_LINUX_BUNDLE_ROOT="$bundle_root"
+fi
+default_ghostty_library="$default_ghostty_root/lib/libghostty-internal.so"
+legacy_ghostty_library="$default_ghostty_root/lib/ghostty-internal.so"
+default_ghostty_vt_library="$default_ghostty_root/lib/libghostty-vt.so"
+
+if [ -f "$config_file" ]; then
+    # shellcheck source=/dev/null
+    . "$config_file"
+fi
+
+# Older/manual linux-app.env files may contain plain assignments instead of
+# export statements. Preserve those values for the final cmux process.
+[ "${CMUX_LINUX_RENDERER+x}" = x ] && export CMUX_LINUX_RENDERER
+[ "${CMUX_GHOSTTY_LIBRARY+x}" = x ] && export CMUX_GHOSTTY_LIBRARY
+[ "${CMUX_GHOSTTY_VT_LIBRARY+x}" = x ] && export CMUX_GHOSTTY_VT_LIBRARY
+[ "${CMUX_GHOSTTY_ROOT+x}" = x ] && export CMUX_GHOSTTY_ROOT
+[ "${CMUX_SOCKET_PATH+x}" = x ] && export CMUX_SOCKET_PATH
+[ "${CMUX_SOCKET+x}" = x ] && export CMUX_SOCKET
+if [ -z "${CMUX_LINUX_GTK_SINGLE_INSTANCE+x}" ]; then
+    if [ "$runtime_socket_override" = 1 ]; then
+        CMUX_LINUX_GTK_SINGLE_INSTANCE=0
+    else
+        CMUX_LINUX_GTK_SINGLE_INSTANCE=1
+    fi
+fi
+export CMUX_LINUX_GTK_SINGLE_INSTANCE
+
+if [ -z "${CMUX_LINUX_BUNDLE_VERSION:-}" ]; then
+    for version_file in "$bundle_version_file" "$installed_version_file"; do
+        if [ -f "$version_file" ]; then
+            IFS= read -r CMUX_LINUX_BUNDLE_VERSION < "$version_file" || true
+            if [ -n "$CMUX_LINUX_BUNDLE_VERSION" ]; then
+                export CMUX_LINUX_BUNDLE_VERSION
+                break
+            fi
+        fi
+    done
+fi
+
+if [ -z "${CMUX_GHOSTTY_LIBRARY:-}" ]; then
+    if [ -f "$default_ghostty_library" ]; then
+        export CMUX_GHOSTTY_LIBRARY="$default_ghostty_library"
+    elif [ -f "$legacy_ghostty_library" ]; then
+        export CMUX_GHOSTTY_LIBRARY="$legacy_ghostty_library"
+    fi
+fi
+
+if [ -z "${CMUX_GHOSTTY_VT_LIBRARY:-}" ]; then
+    if [ -f "$default_ghostty_vt_library" ]; then
+        export CMUX_GHOSTTY_VT_LIBRARY="$default_ghostty_vt_library"
+    else
+        versioned_ghostty_vt_library=$(find "$default_ghostty_root/lib" -maxdepth 1 -type f -name 'libghostty-vt.so.*' 2>/dev/null | sort -V | tail -n 1)
+        if [ -n "$versioned_ghostty_vt_library" ]; then
+            export CMUX_GHOSTTY_VT_LIBRARY="$versioned_ghostty_vt_library"
+        fi
+    fi
+fi
+
+if [ -z "${CMUX_GHOSTTY_ROOT:-}" ] && { [ -f "$default_ghostty_root/include/ghostty.h" ] || [ -f "$default_ghostty_root/include/ghostty/vt.h" ]; }; then
+    export CMUX_GHOSTTY_ROOT="$default_ghostty_root"
+fi
+
+state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
+socket_path=${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-"$state_home/cmux/cmux.sock"}}
+socket_parent=$(dirname -- "$socket_path")
+
+export CMUX_SOCKET_PATH="$socket_path"
+if [ -n "${CMUX_SOCKET:-}" ] && [ "$CMUX_SOCKET" != "$socket_path" ]; then
+    unset CMUX_SOCKET
+fi
+
+if "$cmux_bin" --socket "$socket_path" ping >/dev/null 2>&1; then
+    if [ "$#" -gt 0 ]; then
+        exec "$cmux_bin" --socket "$socket_path" open "$@"
+    fi
+    exec "$cmux_bin" --socket "$socket_path" rpc debug.app.activate '{}'
+fi
+
+renderer=${CMUX_LINUX_RENDERER:-ghostty}
+case "$renderer" in
+    gtk4) renderer=gtk ;;
+    vt|libghostty-vt) renderer=ghostty-vt ;;
+esac
+case "$renderer" in
+    core|gtk|ghostty|ghostty-vt) ;;
+    *)
+        printf 'error: CMUX_LINUX_RENDERER must be one of: core, gtk, ghostty, ghostty-vt (got: %s)\n' "$renderer" >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p "$socket_parent"
+exec "$cmux_bin" app --renderer "$renderer" --socket "$socket_path" "$@"

@@ -1,0 +1,17 @@
+{
+  "id": "dev.cmux.linux.workspace-list",
+  "displayName": "Linux Workspace List",
+  "minimumApiVersion": {
+    "major": 2,
+    "minor": 0
+  },
+  "readScopes": [
+    "workspaceMetadata",
+    "notifications"
+  ],
+  "actionScopes": [
+    "selectWorkspace",
+    "navigateWorkspace"
+  ],
+  "entrypoint": "extension.py"
+}
