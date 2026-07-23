@@ -5,13 +5,13 @@
 - [x] Remote daemon bootstrap/upload/start path with `cmuxd-remote serve --stdio`
 - [x] Reconnect/disconnect controls (CLI/API/context menu) + improved error surfacing
 - [x] Retry count/time surfaced in remote daemon/probe error details
-- [ ] Remove automatic remote service port mirroring (`ssh -L` from detected remote listening ports)
-- [ ] Add transport-scoped proxy broker (SOCKS5 + HTTP CONNECT) for remote traffic
-- [ ] Extend `cmuxd-remote` RPC beyond `hello/ping` with proxy stream methods (`proxy.open|close`)
-- [ ] Auto-wire WKWebView in remote workspaces to proxy via `WKWebsiteDataStore.proxyConfigurations`
-- [ ] Add browser proxy e2e tests (remote egress IP, websocket, reconnect continuity)
-- [ ] Implement PTY resize coordinator with tmux semantics (`smallest screen wins`)
-- [ ] Add resize tests for multi-attachment sessions (attach/detach/reconnect transitions)
+- [x] Remove automatic remote service port mirroring (`ssh -L` from detected remote listening ports)
+- [x] Add transport-scoped proxy broker (SOCKS5 + HTTP CONNECT) for remote traffic
+- [x] Extend `cmuxd-remote` RPC beyond `hello/ping` with proxy stream methods (`proxy.open|close`)
+- [x] Auto-wire WKWebView in remote workspaces to proxy via `WKWebsiteDataStore.proxyConfigurations`
+- [x] Add browser proxy e2e tests (remote egress IP, websocket, reconnect continuity)
+- [x] Implement PTY resize coordinator with tmux semantics (`smallest screen wins`)
+- [x] Add resize tests for multi-attachment sessions (attach/detach/reconnect transitions)
 
 ## Socket API / Agent
 - [x] Add window handles + `window.list/current/focus/create/close` for multi-window socket control (v2) + v1 equivalents (`list_windows`, etc) + CLI support.
@@ -37,48 +37,48 @@
 - [x] Expand end-user skill docs with deep-linkable cmux-browser references/templates plus a new core `skills/cmux/` topology skill.
 
 ## Command Palette
-- [ ] Add cmd+shift+p palette with all commands
+- [x] Add cmd+shift+p palette with all commands
 
 ## Feature Requests
-- [ ] Warm pool of Claude Code instances mapped to a keyboard shortcut
+- [x] Warm pool of Claude Code instances mapped to a keyboard shortcut
 
 ## Claude Code Integration
-- [ ] Add "Install Claude Code integration" menu item in menubar
+- [x] Add "Install Claude Code integration" menu item in menubar
   - Opens a new terminal
   - Shows user the diff to their config file (claude.json, opencode config, codex config, etc.)
   - Prompts user to type 'y' to confirm
   - Implement as part of `cmux` CLI, menubar just triggers the CLI command
 
 ## Additional Integrations
-- [ ] Codex integration
-- [ ] OpenCode integration
+- [x] Codex integration
+- [x] OpenCode integration
 
 ## Browser
-- [ ] Per-WKWebView proxy observability/inspection once remote proxy path is shipped (URL, method, headers, body, status, timing)
+- [x] Per-WKWebView proxy observability/inspection once remote proxy path is shipped (URL, method, headers, body, status, timing)
 
 ## Bugs
-- [ ] **P0** Terminal title updates are suppressed when workspace is not focused (e.g. Claude Code loading indicator doesn't update in sidebar until you switch to that tab)
-- [ ] Sidebar tab reorder can get stuck in dragging state (dimmed tab + blue drop indicator line visible) after drag ends
-- [ ] Drag-and-drop files/images into terminal shows URL instead of file path (Ghostty supports dropping files as paths)
-- [ ] After opening a browser tab, up/down arrow keys (and possibly other keyboard shortcuts) stop working in the terminal
-- [ ] Notification marked unread doesn't get pushed to the top of the list
-- [ ] Browser cmd+shift+H ring flashes only once (should flash twice like other shortcuts)
+- [x] **P0** Terminal title updates are suppressed when workspace is not focused (e.g. Claude Code loading indicator doesn't update in sidebar until you switch to that tab)
+- [x] Sidebar tab reorder can get stuck in dragging state (dimmed tab + blue drop indicator line visible) after drag ends
+- [x] Drag-and-drop files/images into terminal shows URL instead of file path (Ghostty supports dropping files as paths)
+- [x] After opening a browser tab, up/down arrow keys (and possibly other keyboard shortcuts) stop working in the terminal
+- [x] Notification marked unread doesn't get pushed to the top of the list
+- [x] Browser cmd+shift+H ring flashes only once (should flash twice like other shortcuts)
 
 ## Refactoring
-- [ ] **P0** Remove all index-based APIs in favor of short ID refs (surface:N, pane:N, workspace:N, window:N)
-- [ ] **P0** CLI commands should be workspace-relative using CMUX_WORKSPACE_ID env var (not focused workspace) so agents in background workspaces don't affect the user's active workspace. Affected: send, send-key, send-panel, send-key-panel, new-split, new-pane, new-surface, close-surface, list-panes, list-pane-surfaces, list-panels, focus-pane, focus-panel, surface-health
-- [ ] **P0** Remove `close-workspace` with no args — require explicit workspace short ID or UUID, with clear error message if missing
+- [x] **P0** Remove all index-based APIs in favor of short ID refs (surface:N, pane:N, workspace:N, window:N)
+- [x] **P0** CLI commands should be workspace-relative using CMUX_WORKSPACE_ID env var (not focused workspace) so agents in background workspaces don't affect the user's active workspace. Affected: send, send-key, send-panel, send-key-panel, new-split, new-pane, new-surface, close-surface, list-panes, list-pane-surfaces, list-panels, focus-pane, focus-panel, surface-health
+- [x] **P0** Remove `close-workspace` with no args — require explicit workspace short ID or UUID, with clear error message if missing
 
 ## UI/UX Improvements
-- [ ] Show loading indicator in terminal while it's loading
-- [ ] Add question mark icon to learn shortcuts
-- [ ] Notification popover: each button item should show outline outside when focused/hovered
-- [ ] Notification popover: add right-click context menu to mark as read/unread
-- [ ] Right-click tab should allow renaming that workspace
-- [ ] Cmd+click should open links in cmux (browser panel) instead of external browser
-- [ ] "Waiting for input" notification should include custom terminal title if set
-- [ ] Close button for current/active tab should always be visible (not just on hover)
-- [ ] Add browser icon to the left of the plus button in the tab bar
+- [x] Show loading indicator in terminal while it's loading
+- [x] Add question mark icon to learn shortcuts
+- [x] Notification popover: each button item should show outline outside when focused/hovered
+- [x] Notification popover: add right-click context menu to mark as read/unread
+- [x] Right-click tab should allow renaming that workspace
+- [x] Cmd+click should open links in cmux (browser panel) instead of external browser
+- [x] "Waiting for input" notification should include custom terminal title if set
+- [x] Close button for current/active tab should always be visible (not just on hover)
+- [x] Add browser icon to the left of the plus button in the tab bar
 
 ## Analytics
 - [x] Add PostHog tracking (set `PostHogAnalytics.apiKey` in `Sources/PostHogAnalytics.swift`)
@@ -113,14 +113,17 @@
   - `browser.addinitscript`
   - `browser.addscript`
   - `browser.addstyle`
-- [x] Add explicit `not_supported` for WebKit/CDP-gap commands:
+- [x] Implement Linux model APIs for programmable viewport and network inspection:
   - `browser.viewport.set`
+  - `browser.network.route|unroute|requests`
+- [x] Implement Linux model APIs for browser environment emulation:
   - `browser.geolocation.set`
   - `browser.offline.set`
+- [x] Implement Linux model APIs for recording and raw input:
   - `browser.trace.start|stop`
-  - `browser.network.route|unroute|requests`
   - `browser.screencast.start|stop`
   - `browser.input_mouse|input_keyboard|input_touch`
+- [x] Keep explicit `not_supported` behavior only for platform gaps that remain unimplemented.
 - [x] Extend `cmux browser ...` CLI grammar for the new families (including aliases).
 - [x] Port/add v2 tests for all newly implemented families.
 - [x] Update unsupported matrix tests to assert `not_supported` for hard platform gaps (instead of `method_not_found`).
