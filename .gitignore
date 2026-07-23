@@ -26,6 +26,7 @@ GhosttyKit.xcframework.bak-*/
 # Release artifacts
 cmux-*.zip
 cmux-macos.dmg
+cmux-linux-*.tar.gz*
 appcast.xml
 
 # Python
@@ -40,6 +41,9 @@ __pycache__/
 .zig-cache/
 zig-out/
 
+# Rust
+linux/target/
+
 # Node
 node_modules/
 .next/
@@ -47,6 +51,9 @@ node_modules/
 # Test outputs
 tests/visual_output/
 tests/visual_report.html
+tests_v2/terminal_input_report.html
+tests_v2/visual_report.html
+linux/--help
 experiments/*/target/
 
 # Generated docs search index

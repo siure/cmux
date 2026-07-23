@@ -148,7 +148,7 @@ should_install_grok_hooks() {
 REAL_GROK="$(find_real_grok)" || { echo "Error: grok not found in PATH" >&2; exit 127; }
 
 IN_CMUX=0
-if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+if [[ -n "${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}" ]]; then
     IN_CMUX=1
 fi
 

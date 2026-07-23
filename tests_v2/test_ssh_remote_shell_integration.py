@@ -81,6 +81,16 @@ def _docker_available() -> bool:
     return probe.returncode == 0
 
 
+def _ssh_remote_full_supported() -> bool:
+    try:
+        with cmux(SOCKET_PATH) as client:
+            capabilities = client._call("system.capabilities", {}) or {}
+    except Exception:
+        return True
+    features = capabilities.get("features") or {}
+    return bool(features.get("ssh_remote_full", True))
+
+
 def _parse_host_port(docker_port_output: str) -> int:
     text = docker_port_output.strip()
     if not text:
@@ -487,6 +497,9 @@ def _wait_readable_terminal_text(client: cmux, surface_id: str, timeout: float =
 def main() -> int:
     if not _docker_available():
         print("SKIP: docker is not available")
+        return 0
+    if not _ssh_remote_full_supported():
+        print("SKIP: cmux build does not advertise full SSH remote relay support")
         return 0
     if shutil.which("infocmp") is None:
         print("SKIP: local infocmp is not available (required for ssh-terminfo)")

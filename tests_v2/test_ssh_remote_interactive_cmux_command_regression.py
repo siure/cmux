@@ -18,6 +18,9 @@ from cmux import cmux, cmuxError
 
 SOCKET_PATH = os.environ.get("CMUX_SOCKET_PATH", "/tmp/cmux-debug.sock")
 SSH_HOST = os.environ.get("CMUX_SSH_TEST_HOST", "").strip()
+SSH_PORT = os.environ.get("CMUX_SSH_TEST_PORT", "").strip()
+SSH_IDENTITY = os.environ.get("CMUX_SSH_TEST_IDENTITY", "").strip()
+SSH_OPTIONS_RAW = os.environ.get("CMUX_SSH_TEST_OPTIONS", "").strip()
 
 
 def _must(cond: bool, msg: str) -> None:
@@ -64,6 +67,20 @@ def _run_cli_json(cli: str, args: list[str]) -> dict:
         return json.loads(proc.stdout or "{}")
     except Exception as exc:  # noqa: BLE001
         raise cmuxError(f"Invalid JSON output for {' '.join(args)}: {proc.stdout!r} ({exc})")
+
+
+def _ssh_cli_args() -> list[str]:
+    args = ["ssh", SSH_HOST]
+    if SSH_PORT:
+        args.extend(["--port", SSH_PORT])
+    if SSH_IDENTITY:
+        args.extend(["--identity", SSH_IDENTITY])
+    if SSH_OPTIONS_RAW:
+        for option in SSH_OPTIONS_RAW.split(","):
+            trimmed = option.strip()
+            if trimmed:
+                args.extend(["--ssh-option", trimmed])
+    return args
 
 
 def _workspace_id_from_payload(client: cmux, payload: dict) -> str:
@@ -178,7 +195,7 @@ def main() -> int:
     workspace_ids: list[str] = []
     try:
         with cmux(SOCKET_PATH) as client:
-            payload = _run_cli_json(cli, ["ssh", SSH_HOST])
+            payload = _run_cli_json(cli, _ssh_cli_args())
             workspace_id = _workspace_id_from_payload(client, payload)
             _must(bool(workspace_id), f"cmux ssh output missing workspace_id: {payload}")
             workspace_ids.append(workspace_id)

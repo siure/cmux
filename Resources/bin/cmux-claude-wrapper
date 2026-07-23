@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cmux claude wrapper - injects hooks and session tracking
 #
-# When running inside a cmux terminal (CMUX_SURFACE_ID is set), this wrapper
+# When running inside a cmux terminal (CMUX_SURFACE_ID or CMUX_PANEL_ID is set), this wrapper
 # intercepts `claude` invocations to inject --session-id and --settings flags
 # so that Claude Code hooks fire back into cmux for notifications/status.
 # Outside cmux, it passes through to the real claude binary unchanged.
@@ -203,7 +203,7 @@ clear_inherited_claude_auth_selection_env() {
 # Pass through if not in a cmux terminal, hooks are disabled, or the cmux
 # socket is unavailable (stale env / app not running).
 IN_CMUX=0
-if [[ -n "$CMUX_SURFACE_ID" ]]; then
+if [[ -n "${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-}}" ]]; then
     IN_CMUX=1
 fi
 

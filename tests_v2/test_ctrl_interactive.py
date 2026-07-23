@@ -79,7 +79,8 @@ def main():
 
     # Check if running in a terminal
     if not os.isatty(sys.stdin.fileno()):
-        print("Warning: Not running in a terminal")
+        print("SKIP: Not running in an interactive terminal.")
+        return 0
 
     results = []
 

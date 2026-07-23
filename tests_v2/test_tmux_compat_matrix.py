@@ -164,6 +164,10 @@ def main() -> int:
         _run_cli(cli, ["pipe-pane", "--workspace", ws, "--surface", s1, "--command", f"cat > {pipe_file}"])
         piped = pipe_file.read_text() if pipe_file.exists() else ""
         _must(capture_token in piped, f"pipe-pane output missing token: {piped!r}")
+        count_file = Path(tempfile.gettempdir()) / f"cmux_pipe_pane_count_{stamp}.log"
+        _run_cli(cli, ["pipe-pane", "--workspace", ws, "--surface", s1, "--command", f"wc -c > {count_file}"])
+        count = int((count_file.read_text() if count_file.exists() else "0").strip() or "0")
+        _must(count >= len(capture_token), f"pipe-pane command byte count too small: {count}")
 
         wait_name = f"tmux_wait_{stamp}"
         waiter = _run_cli(cli, ["wait-for", wait_name, "--timeout", "5"], expect_ok=False)
@@ -241,10 +245,20 @@ def main() -> int:
         hooks2 = _run_cli(cli, ["set-hook", "--list"])
         _must("workspace-created" not in hooks2.stdout, f"set-hook --unset failed: {hooks2.stdout!r}")
 
-        for cmd in (["popup"], ["bind-key", "C-b", "split-window"], ["unbind-key", "C-b"], ["copy-mode"]):
-            proc = _run_cli(cli, cmd, expect_ok=False)
-            merged = f"{proc.stdout}\n{proc.stderr}".lower()
-            _must(proc.returncode != 0 and "not supported" in merged, f"Expected not_supported for {cmd}, got: {merged!r}")
+        _run_cli(cli, ["bind-key", "-a", "split-window"])
+        bindings = _run_cli(cli, ["bind-key", "--list"])
+        _must("bind-key -a split-window" in bindings.stdout, f"bind-key --list missing binding: {bindings.stdout!r}")
+        _run_cli(cli, ["unbind-key", "-a"])
+        bindings_after = _run_cli(cli, ["bind-key", "--list"])
+        _must("bind-key -a split-window" not in bindings_after.stdout, f"unbind-key did not remove binding: {bindings_after.stdout!r}")
+
+        copy_mode = _run_cli(cli, ["copy-mode"])
+        _must("copy-mode active" in copy_mode.stdout, f"copy-mode should report active state: {copy_mode.stdout!r}")
+        copy_mode_cancel = _run_cli(cli, ["copy-mode", "-q"])
+        _must("copy-mode inactive" in copy_mode_cancel.stdout, f"copy-mode -q should report inactive state: {copy_mode_cancel.stdout!r}")
+
+        popup = _run_cli(cli, ["popup", "--workspace", ws, "--command", f"echo TMUX_POPUP_{stamp}"])
+        _must("popup" in popup.stdout, f"popup should create a terminal popup surface: {popup.stdout!r}")
 
         resize_target, resize_flag, resize_axis = _pick_resize_target(c, current_panes)
         pre_extent = _pane_extent(c, resize_target, resize_axis)

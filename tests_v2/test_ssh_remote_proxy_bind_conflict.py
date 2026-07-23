@@ -61,6 +61,16 @@ def _docker_available() -> bool:
     return probe.returncode == 0
 
 
+def _ssh_remote_proxy_bind_conflict_supported() -> bool:
+    try:
+        with cmux(SOCKET_PATH) as client:
+            capabilities = client._call("system.capabilities", {}) or {}
+    except Exception:
+        return True
+    features = capabilities.get("features") or {}
+    return bool(features.get("ssh_remote_proxy_bind_conflict", features.get("ssh_remote_full", True)))
+
+
 def _parse_host_port(docker_port_output: str) -> int:
     text = docker_port_output.strip()
     if not text:
@@ -152,6 +162,9 @@ def _wait_for_proxy_conflict_status(client: cmux, workspace_id: str, expected_lo
 def main() -> int:
     if not _docker_available():
         print("SKIP: docker is not available")
+        return 0
+    if not _ssh_remote_proxy_bind_conflict_supported():
+        print("SKIP: cmux build does not advertise SSH remote proxy bind-conflict support")
         return 0
 
     _ = _find_cli_binary()  # enforce same test prerequisites as other SSH remote suites

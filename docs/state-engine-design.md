@@ -1,22 +1,48 @@
 # Custom sidebar interpreter: `@State` engine design
 
 The leaf-tier surface (views, modifiers, shapes, gradients, value methods,
-arbitrary-child modifiers) is implemented. The remaining frontier is
-**interactivity**: `@State`, two-way `$bindings`, and the input controls that
-need them (`TextField`, `Toggle`, `Slider`, `Picker`, `Stepper`), plus
-author-driven state mutation from button actions. This converts the renderer
-from one-shot to interactive. It is a single coherent capability and should land
-as its own PR (it needs real dogfooding — typing/toggling/sliding — which a
-non-interactive build pass cannot verify).
+arbitrary-child modifiers) and the interaction engine are implemented on Linux.
+This document records the state/binding/control design that converted the
+renderer from one-shot to interactive. Stable state identity now works in
+dynamic helper and simple stored-property custom `View` instances; the
+remaining frontier is the advanced type system and composed bindings. Tagged
+enum values also round-trip through the same state store and can drive
+`switch`-selected controls and actions.
+
+## Linux implementation status
+
+The Linux port now ships the control portion of stages S1 through S3:
+
+- A bounded host-owned state bag is persisted privately per sidebar provider.
+- In-process and isolated-worker evaluation use the same state protocol.
+- Top-level keys remain source-compatible, while helper state in `ForEach`,
+  `Reorderable`, and ordinary `for` loops receives deterministic per-instance
+  keys that survive reorder and app restart.
+- Removed generated instances are pruned; active state is bounded to 256 values
+  and identity nesting to 32 scopes.
+- Button actions support `=`, `+=`, `-=`, `.toggle()`, and `.append(...)`.
+- State writes trigger a new document generation.
+- Native GTK `Toggle`, `TextField`, `Slider`, `Picker`, and `Stepper` controls
+  write through `$bindings`; picker selections retain typed `.tag` values.
+- `.onChange(of:)` re-evaluates after matching state writes with old/new closure
+  parameters, and inherited `.onSubmit` handlers fire from GTK text fields.
+- `cmux sidebar clear-state [name]` resets persisted values.
+
+The remaining state work is composed `@Binding` projection into collection
+elements and custom `View` parameters. Custom views already inherit the same
+identity path for their own `@State`.
 
 ## What exists today
 
-`SwiftViewInterpreter.evaluate(source, state:)` is **one-shot and read-only**:
-it builds a fresh `Environment` from the read-only `state` dictionary, walks the
-AST once, returns a `RenderNode` tree. The host (`ContentView`) re-invokes it on
-a 1s `TimelineView` tick and on workspace changes. `ButtonAction` is a frozen
-`[ActionCommand]` (`cmux`/`log`/`openURL`); actions never mutate interpreter
-state. There is no `$binding` value, no mutable bag, no re-walk-on-change.
+The Linux interpreter now evaluates against a host-owned mutable state bag and
+returns a neutral document with typed bindings and state operations. The app
+persists that bag, applies action/control writes, and re-evaluates the source.
+The original one-shot path remains available for sources with no state.
+
+Top-level declarations use their original variable names as persisted keys.
+Nested declarations combine their declaration site with the enclosing
+collection and helper-call identity path. This keeps independent row values
+stable while preserving existing top-level state files.
 
 ## The four pieces
 
@@ -61,6 +87,7 @@ state. There is no `$binding` value, no mutable bag, no re-walk-on-change.
 - **S2 — `Toggle`/`TextField`** bound to `$state` (the two highest-value
   controls). Dogfood typing/toggling.
 - **S3 — `Slider`/`Picker`/`Stepper`** + `.onChange`/`on(event:)` author hooks.
+  The controls, `.onChange`, and `.onSubmit` are shipped.
 
 ## Constraints / gotchas
 
@@ -69,8 +96,11 @@ state. There is no `$binding` value, no mutable bag, no re-walk-on-change.
   cadence; do not sleep).
 - Snapshot-boundary rule (CLAUDE.md): the bag is an `@Observable` the host view
   observes; rows still receive value snapshots, not the store.
-- Identity for per-row `@State` (inside `ForEach`) is the hard part — defer to
-  S3; S1/S2 can restrict `@State` to top level.
+- Dynamic identity must remain deterministic and bounded. Prefer explicit
+  `ForEach(..., id:)` values or an item `id`; value-based fallback identity is
+  appropriate only when the value itself is stable.
+- Prune only generated instance keys. User-facing top-level keys must survive
+  temporary branches that do not render them.
 - Keep the one-shot path working when no `@State` is present (zero overhead).
 
 ## Touch-points

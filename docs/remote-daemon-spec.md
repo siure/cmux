@@ -139,7 +139,7 @@ Recompute effective size on:
 | M-008 | WebView proxy auto-wiring for remote workspaces | DONE | Workspace-scoped `WKWebsiteDataStore.proxyConfigurations` wiring is active |
 | M-009 | PTY resize coordinator (`smallest screen wins`) | DONE | Daemon session RPC now tracks attachments and applies min cols/rows semantics with unit tests |
 | M-010 | Resize + proxy reconnect e2e test suites | DONE | `tests_v2/test_ssh_remote_docker_forwarding.py` validates HTTP/websocket egress plus SOCKS pipelined-payload handling; `tests_v2/test_ssh_remote_docker_reconnect.py` verifies reconnect recovery and repeats SOCKS pipelined-payload checks after host restart; `tests_v2/test_ssh_remote_proxy_bind_conflict.py` validates structured `proxy_unavailable` bind-conflict surfacing and `local_proxy_port` status retention under bind conflict; `tests_v2/test_ssh_remote_daemon_resize_stdio.py` validates session resize semantics over real stdio RPC process boundaries; `tests_v2/test_ssh_remote_cli_metadata.py` validates `workspace.remote.configure` numeric-string compatibility, explicit `null` clear semantics (including `workspace.remote.status` reflection), strict `port`/`local_proxy_port` validation (bounds/type), case-insensitive SSH option override precedence for StrictHostKeyChecking/control-socket keys, and `local_proxy_port` payload echo for deterministic bind-conflict test hook behavior |
-| M-011 | Detachable persistent `cmux ssh` PTY sessions | IN PROGRESS | Persistent remote daemon slots keep PTY sessions alive across local surface close and app relaunch; coverage includes Go daemon auth/reattach tests, Swift restore tests, CLI contract tests, and `tests_v2/test_ssh_remote_detachable_pty.py` |
+| M-011 | Detachable persistent `cmux ssh` PTY sessions | DONE | Persistent remote daemon slots keep PTY sessions alive across local surface close and app relaunch; coverage includes Go daemon auth/reattach tests, Swift restore tests, CLI contract tests, and `tests_v2/test_ssh_remote_detachable_pty.py`; the Linux port mirrors the contract in `linux/tests/socket_contract.rs` |
 
 ## 7. Acceptance Test Matrix (With Status)
 
@@ -193,11 +193,11 @@ Recompute effective size on:
 
 | ID | Scenario | Status |
 |---|---|---|
-| DP-001 | `cmux ssh` creates a persistent daemon slot and PTY session ID | IN PROGRESS |
-| DP-002 | closing the local SSH surface detaches the attachment without killing the remote shell | IN PROGRESS |
-| DP-003 | `cmux ssh-session-list` reports detached persisted sessions with bounded scrollback metadata | IN PROGRESS |
-| DP-004 | `cmux ssh-session-attach` reattaches to the same remote shell PID and env | IN PROGRESS |
-| DP-005 | app relaunch restores saved remote PTY session IDs only when the snapshot has a persistent daemon slot | IN PROGRESS |
+| DP-001 | `cmux ssh` creates a persistent daemon slot and PTY session ID | DONE |
+| DP-002 | closing the local SSH surface detaches the attachment without killing the remote shell | DONE |
+| DP-003 | `cmux ssh-session-list` reports detached persisted sessions with bounded scrollback metadata | DONE |
+| DP-004 | `cmux ssh-session-attach` reattaches to the same remote shell PID and env | DONE |
+| DP-005 | app relaunch restores saved remote PTY session IDs only when the snapshot has a persistent daemon slot | DONE |
 | DP-006 | `cmux ssh-session-cleanup` terminates persisted PTY sessions explicitly | DONE |
 
 ## 8. Removal Checklist (Port Mirroring)

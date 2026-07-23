@@ -30,6 +30,45 @@
       "type": "object",
       "additionalProperties": true
     },
+    "customSidebars": {
+      "title": "Custom Sidebars",
+      "description": "Settings for user-authored JSON and interpreted Swift-style sidebars.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "renderer": {
+          "type": "string",
+          "enum": ["inProcess", "remote"],
+          "default": "inProcess",
+          "description": "Interpret Swift-style sidebars in the cmux process or in a crash-isolated worker process."
+        }
+      }
+    },
+    "rightSidebar.beta.feed.enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show the experimental Feed mode in the right sidebar."
+    },
+    "rightSidebar.beta.dock.enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show the experimental terminal Dock mode in the right sidebar."
+    },
+    "extensions.beta.enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable the experimental sidebar extension host. Linux runs approved executable providers through a bounded Bubblewrap sandbox."
+    },
+    "customSidebars.beta.enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show user-authored JSON and interpreted Swift-style sidebars in the provider picker."
+    },
+    "remoteTmux.beta.enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable the experimental remote tmux socket and CLI entry points."
+    },
     "commands": {
       "title": "commands",
       "description": "Custom shell commands and workspace layout definitions.",
@@ -318,6 +357,11 @@
           "default": true,
           "description": "When cmux is inactive, the first click can activate and focus the clicked pane."
         },
+        "systemWideHotkeyEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Register the Show or Hide All Windows shortcut system-wide. Global Search remains system-wide regardless of this setting."
+        },
         "preferredEditor": {
           "type": "string",
           "default": "",
@@ -447,6 +491,13 @@
               "maximum": 256,
               "default": 12,
               "description": "Maximum live restorable agent terminals to keep before cmux hibernates eligible background terminals, oldest first."
+            },
+            "confirmationSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600,
+              "default": 60,
+              "description": "Seconds that an eligible terminal's output and scoped process set must remain unchanged before cmux terminates it."
             }
           }
         },
@@ -682,6 +733,16 @@
           "default": "vertical",
           "description": "Show git branch details stacked vertically or inline."
         },
+        "stackBranchDirectory": {
+          "type": "boolean",
+          "default": false,
+          "description": "Keep branch and directory on separate lines even when branchLayout is inline."
+        },
+        "pathLastSegmentOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show only the final path component for workspace directories."
+        },
         "showNotificationMessage": {
           "type": "boolean",
           "default": true,
@@ -743,10 +804,18 @@
           "description": "Show custom metadata pills."
         },
         "rightMaxWidth": {
-          "type": "number",
-          "exclusiveMinimum": 0,
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 276,
+              "maximum": 4096
+            },
+            {
+              "type": "null"
+            }
+          ],
           "descriptionKey": "schemaDescriptions.sidebar.rightMaxWidth",
-          "description": "Maximum width in points for the right sidebar. When omitted, the built-in dynamic cap applies."
+          "description": "Maximum width in points for the right sidebar. Null or an omitted value uses the built-in width."
         }
       }
     },

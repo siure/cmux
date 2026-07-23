@@ -47,6 +47,420 @@ The corresponding prebuilt archive is published at
 https://github.com/manaflow-ai/ghostty/releases/tag/xcframework-34cbf180d8917b802d61d9929cfb493594f2ab52-crashsubdir-cmux-crash-v1
 and pinned in `scripts/ghosttykit-checksums.txt`.
 
+### Linux port staging (unpublished local checkout)
+
+- Status: local cmux Linux-port work in `/home/akily/Project/sandbox/cmux-port/ghostty`;
+  not yet published as a pinned fork head or prebuilt archive. The cmux
+  `Build Linux Desktop App` workflow accepts the eventual published commit as
+  its required immutable `ghostty_ref`, records that resolved SHA inside and
+  alongside the archive, and is called by stable/nightly desktop workflows.
+  Configure the published 40-character commit in the cmux repository variable
+  `CMUX_LINUX_GHOSTTY_REF`; manual workflow dispatches can override it with
+  `linux_ghostty_ref`.
+- Local release validation on July 16, 2026:
+  - `zig build -Dapp-runtime=none test` passes the full Ghostty unit suite.
+  - The installed-header C/EGL smoke passes against both the checkout's
+    `zig-out` tree and a clean `ReleaseSafe` install prefix, including
+    surfaceless OpenGL rendering, multiple surfaces, manual I/O, ABI
+    self-reporting, and teardown.
+  - A clean optimized cmux build plus that `ReleaseSafe` prefix produces a
+    28 MB relocatable `cmux-linux-x86_64.tar.gz`; source and relocated
+    diagnostics report the Linux embedding and resources available.
+  - Rebuilding the archive with the same inputs and `SOURCE_DATE_EPOCH`
+    produces a byte-identical archive. The relocated and installed launchers
+    both start the GTK/Ghostty app, accept socket control, and exit cleanly.
+  - Publication is still required: these changes are not contained in the
+    recorded Ghostty `HEAD`, and the current latest cmux GitHub release does
+    not yet carry the Linux archive consumed by `cmux update`.
+- Files:
+  - `build.zig`
+  - `include/ghostty.h`
+  - `macos/Sources/Ghostty/Ghostty.App.swift`
+  - `macos/Sources/Ghostty/Ghostty.Config.swift`
+  - `macos/Sources/Ghostty/Ghostty.Inspector.swift`
+  - `macos/Sources/Ghostty/Surface View/SurfaceView.swift`
+  - `macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift`
+  - `src/App.zig`
+  - `src/Surface.zig`
+  - `src/apprt.zig`
+  - `src/apprt/embedded.zig`
+  - `src/apprt/gtk/class/surface.zig`
+  - `src/apprt/structs.zig`
+  - `src/apprt/surface.zig`
+  - `src/build/GhosttyResources.zig`
+  - `src/build/SharedDeps.zig`
+  - `src/config/CApi.zig`
+  - `src/main_c.zig`
+  - `src/os/resourcesdir.zig`
+  - `src/renderer/Metal.zig`
+  - `src/renderer/OpenGL.zig`
+  - `src/renderer/generic.zig`
+  - `src/renderer/image.zig`
+  - `src/renderer/opengl/shaders.zig`
+  - `src/terminal/osc.zig`
+  - `src/terminal/osc/parsers.zig`
+  - `src/terminal/osc/parsers/kitty_notification.zig`
+- Summary:
+  - Exposes the current Linux embedding ABI slice with `GHOSTTY_PLATFORM_LINUX`,
+    host-owned OpenGL make-current/proc-address/done-current callbacks, and
+    display realized/unrealized hooks for embedders that own the host surface.
+  - Adds an explicit `ghostty_surface_set_visible` export for Linux embedding
+    hosts, while keeping `ghostty_surface_set_occlusion` as a compatibility
+    alias with the same visibility boolean semantics.
+  - Exposes `ghostty_surface_set_renderer_realized(surface, bool)` on the local
+    Linux embedding path as a compatibility alias for the existing cmux fork
+    API; `true` maps to display realization and `false` maps to display
+    unrealization.
+  - Restores `ghostty_surface_select_cursor_cell` in the local Linux embedding
+    ABI so cmux selection/copy-mode callers can select the active cursor cell
+    through the same C boundary as macOS/iOS embedders.
+  - Wires the Linux GTK Ghostty host to use that renderer-realized alias for
+    initial surface realization and occlusion transitions, while final surface
+    teardown uses the explicit display-unrealized C API so hidden terminal
+    surfaces can release/rebuild renderer resources without killing the PTY.
+  - Routes Ghostty app-level quit/close-all-windows, close-window, and
+    close-tab actions through model-persisted embedded terminal
+    close-confirmation state before allowing the GTK host to close windows or
+    cmux surfaces, so sibling tabs/surfaces with live confirmation
+    requirements are still surfaced from Ghostty shortcuts.
+  - Exposes Ghostty start/end-search and match-count actions to the cmux GTK
+    host, which uses `ghostty_surface_binding_action` for live search text and
+    previous/next navigation while Ghostty owns search execution, highlighting,
+    and selection state.
+  - Lets the embedded runtime request host-thread redraws and routes Linux
+    OpenGL renderer/inspector setup through the local embedder context used by
+    the cmux GTK `GLArea` host.
+  - Uses those redraw requests as the sole source of GTK `GLArea` paints while
+    the host timer services only `ghostty_app_tick`. The app-thread draw
+    requirement controls where requested frames run, not a continuous host
+    render loop, avoiding unbounded idle DMA-BUF descriptor growth.
+  - Treats embedded render actions as handled but skips the host redraw callback
+    while a Linux surface display is unrealized, avoiding stale `GLArea` paints
+    before `ghostty_surface_display_realized` or after display teardown.
+  - Treats exported `ghostty_surface_draw` calls against an unrealized embedded
+    display as successful no-ops, so stale GTK render callbacks after
+    occlusion/display teardown do not surface as renderer failures.
+  - Invalidates cached OpenGL presentation targets across Linux embedded
+    display teardown/re-realization and forces the first frame after a rebuilt
+    swap chain to redraw instead of replaying stale framebuffer handles.
+  - Preserves the thread-local GLAD dispatch table when a later embedded Linux
+    surface fails OpenGL context preparation, so one bad `GLArea` realization
+    cannot invalidate already-running terminal surfaces on the GTK app thread.
+  - Defers a transient Linux OpenGL-context-unavailable result during display
+    realization and retries it from the first host draw, covering GTK map timing
+    without converting a recoverable pre-map state into permanent teardown.
+  - Transfers host-context ownership from the temporary OpenGL API value used
+    during generic renderer construction into the renderer-owned value before
+    releasing the context. Embedders that implement `done_current` can now
+    unbind after surface creation without later realization mistaking the
+    released context for a current one.
+  - Uses live renderer resource state, not only the display-realized flag, to
+    drive Linux display unrealize cleanup so early host teardown still releases
+    GL resources allocated during surface construction.
+  - Hardens embedder-provided inputs by sanitizing content scale, drawable
+    sizes, pointer coordinates, scroll deltas, mouse pressure, and the optional
+    surface font-size override, validating required runtime callbacks plus raw
+    key, mouse, and split enum values, bounding the surface environment
+    variable array advertised in `ghostty.h` and mirrored by the cmux GTK host,
+    and rejecting invalid UTF-8 text, binding-action payloads, and surface
+    creation option strings before they reach core surface or inspector state.
+    Ghostty also rejects empty or `=`-containing environment variable names at
+    the C surface config boundary so direct Linux embedders cannot pass invalid
+    process environment keys through `ghostty_surface_new`.
+  - Zero-initializes the platform union returned by
+    `ghostty_surface_config_new`, keeping the C surface config initializer
+    deterministic until a Linux embedder installs its host GL callbacks.
+  - Completes the C header's `GHOSTTY_MOUSE_BUTTON_*` aliases for buttons
+    four through eleven so Linux embedders can bind the full terminal mouse
+    tracking range by name instead of relying on raw enum integers.
+  - Includes the full input modifier and binding-flag constants plus the
+    function/control key constants through F25, PrintScreen, ScrollLock, and
+    Pause in the Linux embedding constants fingerprint, covering lock/right-side
+    modifiers plus consumed/all/global/performable binding flags so GTK hosts
+    can preserve Ghostty keybinding semantics across the C boundary. Synthesized
+    keys without native keycodes can mark `ghostty_input_key_s.keycode` with
+    `GHOSTTY_INPUT_KEYCODE_PHYSICAL_KEY_FLAG` and pass a `GHOSTTY_KEY_*` value in
+    the low bits.
+  - Adds C-import ABI assertions for Linux platform callbacks, runtime
+    callbacks, surface config, text/selection structs, config accessors, and
+    the exported app/surface/inspector function signatures that cmux loads
+    dynamically.
+  - Restores the `ghostty_config_load_string(config, bytes, len)` C API in the
+    Linux embedding checkout so embedders can layer generated config snippets
+    without writing a temporary Ghostty config file.
+  - Unrealizes embedded displays before freeing inspector objects so Linux
+    OpenGL inspector backend cleanup runs while host context callbacks are
+    still available.
+  - Keeps the existing Swift embedded bridge aligned with the expanded C
+    structs by populating the new runtime redraw callback field, copying
+    startup-input and wait-after-command surface config fields, and freeing
+    inherited Ghostty-owned surface config fields after copying them.
+  - Runs `app-runtime=none` Zig tests against the embedded runtime and avoids
+    GTK apprt imports unless the GTK runtime is selected, so libghostty C API
+    tests exercise the Linux embedding path without requiring GTK modules.
+  - Installs the Linux internal library with the runtime resources that the
+    embedded app core resolves at startup, including terminfo,
+    shell-integration files, optional bundled themes, and i18n locale files
+    when gettext support is enabled.
+  - Resolves embedded Linux resources from the loaded Ghostty shared object via
+    `dladdr` before falling back to the host executable, so cmux can load
+    `ghostty-internal.so` from Ghostty's install prefix even when the cmux
+    process lives elsewhere, and exposes that resolved runtime path through
+    `ghostty_resources_dir` for embedders that need to verify the library's
+    actual resource view. The Linux resolver now requires the adjacent
+    `share/ghostty` directory to exist before reporting a terminfo-only prefix
+    as Ghostty's app resource directory. cmux renderer diagnostics now include
+    the selected runtime resource source so staged installs can be
+    distinguished from environment and checkout fallbacks, require the staged
+    header's `GHOSTTY_EMBEDDING_ABI_VERSION`, `GHOSTTY_PLATFORM_LINUX` enum
+    value, `GHOSTTY_SURFACE_MAX_ENV_VARS` bound, and physical-key marker
+    constants to match cmux's Rust FFI boundary, require the loaded library's
+    direct `ghostty_embedding_info` export and length-checked
+    `ghostty_embedding_info_query` self-report to agree with each other and
+    match the same ABI version, Linux platform, environment bound,
+    app-thread draw contract, high-risk
+    C struct layout sizes/alignments plus a field-offset layout fingerprint,
+    the OpenGL renderer backend that the cmux GTK `GLArea` host requires, and
+    the Ghostty enum/constant values cmux mirrors. Failed cmux dynamic
+    loader probes now close partially opened `ghostty-internal` handles when a
+    required symbol is missing. The cmux-loaded config API now includes
+    `ghostty_config_get` alongside the load/finalize/diagnostic functions, so
+    diagnostics, the Rust dynamic loader, and Ghostty's Linux export allowlist
+    all enforce the same required symbol set. The local Linux embedding ABI is
+    currently v13; the self-report covers runtime/surface config, Linux platform
+    callbacks, input keys/triggers, target/action payloads, returned strings,
+    diagnostics, surface sizes, text/selection readback, environment variables,
+    clipboard content, and manual-I/O surface fields before cmux reports the
+    full Ghostty backend available. ABI v11 adds process-free manual surfaces,
+    the encoded-input write callback, and `ghostty_surface_process_output` for
+    remote terminal transports such as Linux remote tmux. ABI v12 adds bounded
+    initial terminal output parsed before child IO starts, allowing cmux to
+    restore scrollback ahead of a fresh shell prompt without shell input replay.
+    ABI v13 adds byte-bounded full-screen scrollback-tail readback whose memory
+    use does not grow with Ghostty's retained history.
+  - Makes the C API `ghostty_init` entry point idempotent after a successful
+    initialization so repeated embedder probes in one process cannot
+    reinitialize or leak Ghostty global state. It also exposes the argv pointer
+    list and strings as read-only, normalizes empty embedder argument vectors
+    to a synthetic program name, and rejects null non-empty vectors or null
+    argv entries before touching global state. The Linux cmux loader now calls
+    this idempotent entry point directly for each loaded `ghostty-internal`
+    handle with an empty argv, instead of caching initialization success or
+    failure process-wide, and cmux diagnostics require the read-only init argv
+    declaration before reporting full Linux embedding support.
+  - Propagates cmux socket/CLI config reload requests through a renderer
+    snapshot generation so GTK Ghostty hosts update the embedded app and
+    surface config through the libghostty config-update exports even when the
+    reload was not initiated by a Ghostty keybind.
+  - Ports the OSC 99 kitty desktop-notification parser into the Linux embedding
+    checkout so Ghostty-owned PTYs store `p=title` chunks by notification id and
+    emit the existing embedded desktop-notification action for simple
+    notifications and `p=body` payloads. This keeps the full `ghostty` renderer
+    path aligned with cmux's Rust parser-backed notification behavior.
+  - Clears `ghostty_text_s` outputs before failed `ghostty_surface_read_selection`
+    and `ghostty_surface_read_text` paths return, so embedders do not observe
+    stale Ghostty-owned text pointers after a failed readback.
+  - Allocates surface TTY-name, title, and working-directory strings returned
+    through the C API with Ghostty's global C string allocator, keeping the
+    `ghostty_string_free` ownership boundary independent from any future
+    per-app allocator changes. cmux renderer diagnostics now require the
+    staged header to declare those three surface metadata APIs as returning
+    `ghostty_string_s` before reporting full Linux embedding support.
+  - Clears the optional `ghostty_surface_key_is_binding` binding-flags output
+    and provided `ghostty_surface_ime_point` output coordinates before early
+    failure returns, so Linux embedders do not observe stale binding metadata or
+    IME geometry when a lookup is rejected or no binding/point is available.
+  - Clears the caller-provided bytes in `ghostty_embedding_info_query` before
+    rejecting undersized ABI self-report buffers, so Linux embedders cannot
+    accidentally interpret stale layout/constant fingerprints after a failed
+    dynamic compatibility probe.
+  - Validates both C enum fields in each `ghostty_selection_s` point before
+    terminal text readback, so malformed Linux FFI selections fail cleanly
+    instead of reaching exhaustive Zig enum switches with invalid values.
+  - Consumes pending clipboard request pointers when
+    `ghostty_surface_complete_clipboard_request` is called with null or invalid
+    UTF-8 text, so rejected embedder clipboard completions do not leak the
+    Ghostty-owned request allocation.
+  - Honors Ghostty clipboard authorization in the cmux Linux GTK host. Unsafe
+    pastes and OSC 52 reads/writes now show a modal confirmation with the exact
+    text before completing the request or replacing either GTK clipboard;
+    closing or denying the dialog uses an empty confirmed read, and callback
+    generation plus surface identity checks reject stale dialog responses.
+  - Tracks outstanding embedded clipboard requests per surface, rejects stale or
+    foreign completion pointers before dereferencing request memory, and drains
+    any still-pending requests during surface teardown.
+  - Replaces allocator-address clipboard request identity with monotonic opaque
+    tokens. A delayed completion can no longer alias a newer request after the
+    allocator reuses an address; confirmation callbacks reissue the same token,
+    and every callback issuance still authorizes exactly one completion.
+  - Drains the core app surface list before each surface deinit during
+    `ghostty_app_free`, so multi-surface Linux embedders cannot skip teardown
+    entries while surfaces remove themselves from the same list.
+  - Lets runtime surfaces provide an app-destroy hook, and uses it for
+    embedded surfaces so `ghostty_app_free` releases any remaining
+    Ghostty-owned surface allocations instead of only deinitializing their core
+    surface state.
+  - Serializes the core app surface registry and focused-surface pointer behind
+    a mutex, preserving the prior cmux fork invariant that host-thread
+    `ghostty_surface_new`/`ghostty_surface_free` calls cannot concurrently
+    mutate the embedded app's surface list. Quit-timer callbacks stay outside
+    the registry lock, config reload/global action fanout snapshots the surface
+    registry before iterating, and `ghostty_app_free` surface drains no longer
+    trigger a quit-timer action for surfaces that were already popped for
+    teardown.
+  - Hides Darwin-only display-id, quicklook, Metal inspector, and window blur
+    declarations from Linux `ghostty.h` consumers while keeping the Linux
+    OpenGL inspector declarations available in the same header. The Linux
+    `ghostty-internal` export surface now follows the same split: cmux
+    diagnostics reject Linux builds that still export those Darwin-only entry
+    points.
+  - Builds Ghostty's own SIMD C++ helper objects with hidden ELF visibility, so
+    Linux `libghostty-internal.so` no longer publishes internal
+    `ghostty_simd_*` symbols while keeping the explicit embedding C API visible
+    for dynamic loaders. cmux renderer diagnostics now expose
+    `embedding_internal_symbols_hidden` and reject stale Linux builds that still
+    publish those helper symbols.
+  - Adds a Linux ELF version script for `libghostty-internal.so`, reducing the
+    dynamic export table to the exact embedded C API symbols cmux loads and
+    keeping vendored dependency symbols such as FreeType, Harfbuzz, libxml2,
+    shader, and C++ helper entry points out of the host process namespace. cmux
+    renderer diagnostics now expose `embedding_unexpected_export_symbols_hidden`
+    and reject stale Linux builds that still publish non-embedding symbols.
+  - Emits the dedicated `ghostty-internal-static.pc` archive dependencies in
+    `Libs`, making a normal pkg-config query a complete static link command;
+    the shared module keeps those dependencies private for `--static` queries.
+  - Declares zero-argument config and surface-config constructors with `(void)`
+    in `ghostty.h`, keeping installed Linux headers valid under strict C
+    prototype warnings as well as C++ compilation.
+  - Rejects short-enum compiler modes in `ghostty.h` with portable compile-time
+    assertions for every C enum in the embedding ABI, preventing silent Linux
+    struct-layout and calling-convention mismatches with Zig and cmux.
+  - Keeps `ghostty_embedding_info_query` genuinely prefix-compatible: smaller
+    caller buffers receive every leading byte that fits while the return value
+    still reports that the current full contract requires a larger buffer.
+  - Deep-copies non-empty `ghostty_init` argument vectors for process-lifetime
+    config reloads instead of retaining pointers into temporary host storage;
+    failed initialization frees the copy so a later retry remains clean.
+  - Orders the GTK host's Rust fields so `ghostty_app_free` and config cleanup
+    run before callback userdata or the dynamically loaded library are dropped,
+    preventing teardown callbacks from observing freed host state or code.
+  - Shares one Ghostty app/config/library context across all GTK terminal
+    surfaces on the application thread. Surface-targeted actions route through
+    a synchronized raw-surface registry, app-targeted actions fall back to the
+    focused surface, app ticks and snapshot config reloads are deduplicated,
+    and the shared context is released after the final terminal host drops.
+  - Resolves desktop OpenGL entry points through `libOpenGL`, `libGL`, and
+    `libEGL`, including `glXGetProcAddressARB` and `eglGetProcAddress`
+    fallbacks. This avoids relying on a nonexistent public
+    `epoxy_get_proc_address` symbol when a GTK `GLArea` initializes Ghostty.
+  - Leaves the optional Linux `done_current` callback unset for the GTK host,
+    allowing `GLArea` to retain ownership of its current context through
+    Ghostty's initial display-realization render pass.
+  - Runs the GTK application with a sanitized argument vector and updates
+    realized Ghostty widgets in place while the snapshot's structural layout
+    is unchanged. cmux renderer flags are therefore not reparsed as
+    `GApplication` options, and periodic preview/title refreshes no longer
+    unrealize and recreate active OpenGL terminal surfaces.
+  - Rotates GTK callback registry tokens whenever an embedded surface is
+    released or realization fails, so delayed actions and clipboard completions
+    from an old GL surface cannot target a replacement that reuses its address.
+  - Removes embedded surfaces from the core app registry before the runtime
+    `ghostty_surface_free` path deinitializes and destroys them, keeping
+    registry ownership and object teardown distinct for GTK host widget
+    destruction and app shutdown.
+  - Atomically marks an embedded surface as destroying before
+    `ghostty_surface_free` enters the app registry. Reentrant or overlapping
+    free attempts while the object is still allocated are rejected, and the
+    same acquire/release gate keeps late surface and inspector C API calls from
+    entering teardown state.
+  - Captures the embedded runtime app before host-initiated surface teardown
+    and passes that app into the post-deinit quit-timer finish path, so Linux
+    embedders no longer rely on reading a deinitialized surface just to notify
+    the host that the last terminal closed.
+  - Rejects late inspector C API calls when the inspector belongs to an
+    embedded surface that has entered teardown, matching the existing surface
+    handle guards so stale GTK inspector size/focus/input/OpenGL callbacks
+    return false instead of mutating teardown state.
+  - Gives inspectors an independent atomic teardown gate because hosts can
+    close them while their surface remains live. Ghostty keeps a destroying
+    inspector attached until OpenGL backend and ImGui cleanup finish, so host
+    context callbacks cannot recursively free or mutate it and cannot create a
+    replacement against process-global backend state that is still shutting
+    down.
+  - Reference-tracks dcimgui OpenGL backends across ImGui contexts. Closing one
+    embedded or GTK inspector restores imgl3w while other inspectors remain
+    live, and only the final backend shutdown clears the process-wide function
+    table; simultaneous inspectors can therefore close in any order without a
+    null OpenGL function call. Context-loss abandonment releases the same
+    tracking slot without issuing invalid per-context GL cleanup.
+  - Defers Ghostty `quit` and `close_all_windows` GTK destruction to the next
+    main-loop idle turn. These actions can originate inside an embedded host
+    tick; synchronous window destruction would emit `GLArea::unrealize` while
+    that host is still mutably borrowed and abort on a nested `RefCell` borrow.
+  - Keeps `ghostty_surface_inherited_config_free` available while its surface
+    is actively tearing down. Delayed host callbacks can release the
+    Ghostty-owned inherited working-directory string instead of losing that
+    allocation when the general surface mutation guard closes.
+  - Completes the internal C header's IPC action wrapper
+    `ghostty_ipc_action_s` and asserts its layout against
+    `apprt.ipc.Action.C`, so Linux embedders that parse the whole embedding
+    header see the same action tag/payload shape Ghostty's Zig IPC layer uses.
+    The IPC target class string is exposed as read-only in the header, and the
+    C-import ABI tests now cover the IPC target union, target struct offsets,
+    and new-window action payload layout. The IPC new-window argument vector is
+    also exposed as a read-only pointer list of read-only strings, matching
+    cmux's Rust FFI mirror and preventing embedders from treating Ghostty-owned
+    argv storage as mutable. cmux renderer diagnostics now require that
+    source-level header contract before reporting full Linux embedding support.
+  - Bumps the local Linux embedding ABI to v10 and includes IPC target/action
+    sizes, alignments, field-offset layout fingerprint inputs, and IPC enum
+    constants in `ghostty_embedding_info_s`, so cmux rejects stale
+    `ghostty-internal` libraries that do not cover the whole exposed
+    embedding header contract.
+  - Includes `GHOSTTY_CLIPBOARD_REQUEST_*` enum values in the v10 constants
+    fingerprint so cmux rejects libraries that disagree on the confirm-read
+    clipboard callback request tag contract.
+  - Marks `ghostty_surface_config_s.env_vars` as a read-only host-owned array
+    in the C ABI and mirrors that constness in the Rust FFI. cmux renderer
+    diagnostics expose `embedding_header_surface_env_vars_const` and return
+    `surface_env_vars_not_const` for stale mutable headers before reporting
+    full Linux embedding support.
+  - Adds an explicit C-import assertion for the
+    `ghostty_runtime_config_s.redraw_surface_cb` field and makes cmux renderer
+    diagnostics expose `embedding_header_has_redraw_surface_callback`, returning
+    `missing_redraw_surface_callback` for staged headers that cannot schedule
+    host-thread Linux GL redraws.
+  - Propagates the embedder action callback's handled result through
+    `ghostty_app_open_config`, `ghostty_app_reload_config`, and the exported
+    split create/focus/resize/equalize/zoom helpers. Hosts can now distinguish
+    accepted actions from rejected ones instead of receiving a successful C
+    API result for both cases.
+  - Hardens the Linux development installer so the resolved full Ghostty or
+    `ghostty-vt` artifact is checked through the freshly built
+    `cmux app --renderer ... --script 'renderer diagnostics ...'` path before
+    `linux-app.env` is written. This catches stale headers, incompatible
+    libraries, missing runtime resources, Darwin-only/internal helper or other
+    non-embedding dynamic exports from `libghostty-internal.so`, and missing
+    `libghostty-vt` exports at install time instead of deferring the failure to
+    desktop launch.
+  - Marks the embedded runtime app as destroying before `ghostty_app_free`
+    drains its surfaces. Reentrant host callbacks can no longer create a new
+    surface in the app being torn down, and a second overlapping free request
+    is rejected while the runtime object is still alive. All other app-level C
+    API calls also reject the destroying handle, preventing reentrant ticks,
+    configuration updates, key events, and state queries from entering fields
+    while app teardown deinitializes them.
+  - Adds a Ghostty-owned Linux C integration probe to the existing
+    `build-linux-libghostty` CI job. The job now consumes the staged
+    `ReleaseSafe` DSO through its installed pkg-config metadata, compiles the
+    public header with strict C warnings, verifies ABI self-report and prefix
+    queries, resolves adjacent runtime resources, exercises config parsing, and
+    creates, ticks, and tears down an embedded app with the required Linux
+    callback table. The probe also creates a real surfaceless Mesa/EGL OpenGL
+    context and terminal surface, verifies PTY sizing and host userdata, covers
+    deferred context realization, draws a frame, and releases the display and
+    surface through only the installed public C API.
+
 ### 1) macOS display link restart on display changes
 
 - Commit: `05cf31b38` (macos: restart display link after display ID change)

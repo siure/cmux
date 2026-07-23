@@ -135,17 +135,26 @@ _cmux_relay_workspace_id() {
     print -r -- "$CMUX_TAB_ID"
 }
 
+_cmux_surface_context_id() {
+    if [[ -n "$CMUX_PANEL_ID" ]]; then
+        print -r -- "$CMUX_PANEL_ID"
+        return 0
+    fi
+    [[ -n "$CMUX_SURFACE_ID" ]] || return 1
+    print -r -- "$CMUX_SURFACE_ID"
+}
+
 _cmux_report_tty_via_relay() {
     _cmux_socket_uses_remote_relay || return 1
     local workspace_id=""
     workspace_id="$(_cmux_relay_workspace_id)" || return 1
     [[ -n "$_CMUX_TTY_NAME" ]] || return 1
 
-    local tty_name_json params
+    local tty_name_json params surface_id=""
     tty_name_json="$(_cmux_json_escape "$_CMUX_TTY_NAME")"
     params="{\"workspace_id\":\"$workspace_id\",\"tty_name\":\"$tty_name_json\""
-    if [[ -n "$CMUX_PANEL_ID" ]]; then
-        params+=",\"surface_id\":\"$CMUX_PANEL_ID\""
+    if surface_id="$(_cmux_surface_context_id)"; then
+        params+=",\"surface_id\":\"$surface_id\""
     fi
     params+="}"
     _cmux_relay_rpc "surface.report_tty" "$params"
@@ -156,9 +165,9 @@ _cmux_ports_kick_via_relay() {
     _cmux_socket_uses_remote_relay || return 1
     local workspace_id=""
     workspace_id="$(_cmux_relay_workspace_id)" || return 1
-    local params="{\"workspace_id\":\"$workspace_id\",\"reason\":\"$reason\""
-    if [[ -n "$CMUX_PANEL_ID" ]]; then
-        params+=",\"surface_id\":\"$CMUX_PANEL_ID\""
+    local params="{\"workspace_id\":\"$workspace_id\",\"reason\":\"$reason\"" surface_id=""
+    if surface_id="$(_cmux_surface_context_id)"; then
+        params+=",\"surface_id\":\"$surface_id\""
     fi
     params+="}"
     _cmux_relay_rpc_bg "surface.ports_kick" "$params"
@@ -222,7 +231,7 @@ _cmux_path_prepend_unique_directory() {
 _cmux_install_cli_command_shim() {
     local command_name="$1"
     local wrapper_path="$2"
-    local shim_root="${TMPDIR:-/tmp}/cmux-cli-shims/${CMUX_SURFACE_ID:-$$}"
+    local shim_root="${TMPDIR:-/tmp}/cmux-cli-shims/${CMUX_SURFACE_ID:-${CMUX_PANEL_ID:-$$}}"
     local shim_path="$shim_root/$command_name"
     local escaped_wrapper="$wrapper_path"
 
@@ -615,7 +624,7 @@ _cmux_install_winch_guard() {
 
     TRAPWINCH() {
         [[ -n "$CMUX_TAB_ID" ]] || return 0
-        [[ -n "$CMUX_PANEL_ID" ]] || return 0
+        _cmux_surface_context_id >/dev/null || return 0
 
         # Ghostty already marks prompt redraws on SIGWINCH. Writing to the PTY
         # here grows the screen and makes resize look like a fresh prompt.
@@ -717,8 +726,9 @@ _cmux_report_tty_payload() {
 
     local payload="report_tty $_CMUX_TTY_NAME --tab=$CMUX_TAB_ID"
     if [[ -z "$TMUX" ]]; then
-        [[ -n "$CMUX_PANEL_ID" ]] || return 0
-        payload+=" --panel=$CMUX_PANEL_ID"
+        local surface_id
+        surface_id="$(_cmux_surface_context_id)" || return 0
+        payload+=" --panel=$surface_id"
     fi
 
     print -r -- "$payload"
@@ -750,10 +760,11 @@ _cmux_report_shell_activity_state() {
     [[ -n "$state" ]] || return 0
     [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 0
     [[ "$_CMUX_SHELL_ACTIVITY_LAST" == "$state" ]] && return 0
     _CMUX_SHELL_ACTIVITY_LAST="$state"
-    _cmux_send_bg "report_shell_state $state --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    _cmux_send_bg "report_shell_state $state --tab=$CMUX_TAB_ID --panel=$surface_id"
 }
 
 _cmux_reset_terminal_keyboard_protocols() {
@@ -769,12 +780,13 @@ _cmux_ports_kick() {
     # The app coalesces kicks across all panels and runs a single ps+lsof.
     _cmux_has_port_scan_transport || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
+    local surface_id=""
     if _cmux_socket_is_unix; then
-        [[ -n "$CMUX_PANEL_ID" ]] || return 0
+        surface_id="$(_cmux_surface_context_id)" || return 0
     fi
     _CMUX_PORTS_LAST_RUN="$(_cmux_now)"
     if _cmux_socket_is_unix; then
-        _cmux_send_bg "ports_kick --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID --reason=$reason"
+        _cmux_send_bg "ports_kick --tab=$CMUX_TAB_ID --panel=$surface_id --reason=$reason"
     else
         _cmux_ports_kick_via_relay "$reason"
     fi
@@ -786,16 +798,17 @@ _cmux_report_git_branch_for_path() {
     [[ -n "$repo_path" ]] || return 0
     [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 0
     _cmux_git_report_path_is_active "$repo_path" || return 0
 
     local branch dirty_opt="--status=unknown"
     branch="$(_cmux_git_branch_for_path "$repo_path" 2>/dev/null || true)"
     _cmux_git_report_path_is_active "$repo_path" || return 0
     if [[ -n "$branch" ]]; then
-        _cmux_send "report_git_branch $branch $dirty_opt --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+        _cmux_send "report_git_branch $branch $dirty_opt --tab=$CMUX_TAB_ID --panel=$surface_id"
     else
-        _cmux_send "clear_git_branch --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+        _cmux_send "clear_git_branch --tab=$CMUX_TAB_ID --panel=$surface_id"
     fi
 }
 
@@ -873,10 +886,11 @@ _cmux_emit_pr_command_hint() {
     [[ "${CMUX_NO_PR_WATCH:-}" == "1" ]] && return 0
     [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 0
     [[ -n "$_CMUX_LAST_PR_ACTION" ]] || return 0
 
-    local payload="report_pr_action $_CMUX_LAST_PR_ACTION --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    local payload="report_pr_action $_CMUX_LAST_PR_ACTION --tab=$CMUX_TAB_ID --panel=$surface_id"
     if [[ -n "$_CMUX_LAST_PR_TARGET" ]]; then
         local quoted_target="${_CMUX_LAST_PR_TARGET//\"/\\\"}"
         payload+=" --target=\"$quoted_target\""
@@ -890,8 +904,9 @@ _cmux_clear_pr_for_panel() {
     [[ "${CMUX_NO_GIT_WATCH:-}" == "1" ]] && return 0
     [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
-    _cmux_send_bg "clear_pr --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 0
+    _cmux_send_bg "clear_pr --tab=$CMUX_TAB_ID --panel=$surface_id"
 }
 
 _cmux_pr_output_indicates_no_pull_request() {
@@ -1163,13 +1178,15 @@ _cmux_github_repo_slug_for_path() {
 }
 
 _cmux_pr_cache_prefix() {
-    [[ -n "$CMUX_PANEL_ID" ]] || return 1
-    print -r -- "/tmp/cmux-pr-cache-${CMUX_PANEL_ID}"
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 1
+    print -r -- "/tmp/cmux-pr-cache-${surface_id}"
 }
 
 _cmux_pr_force_signal_path() {
-    [[ -n "$CMUX_PANEL_ID" ]] || return 1
-    print -r -- "/tmp/cmux-pr-force-${CMUX_PANEL_ID}"
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 1
+    print -r -- "/tmp/cmux-pr-force-${surface_id}"
 }
 
 _cmux_pr_debug_log() {
@@ -1225,7 +1242,7 @@ _cmux_report_pr_for_path() {
     }
     [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    _cmux_surface_context_id >/dev/null || return 0
 
     local branch repo_slug="" gh_output="" gh_error="" err_file="" number state url status_opt="" gh_status
     local now="${EPOCHSECONDS:-$SECONDS}"
@@ -1340,7 +1357,9 @@ _cmux_report_pr_for_path() {
     _CMUX_PR_NO_PR_BRANCH=""
 
     local quoted_branch="${branch//\"/\\\"}"
-    _cmux_send "report_pr $number $url $status_opt --branch=\"$quoted_branch\" --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 1
+    _cmux_send "report_pr $number $url $status_opt --branch=\"$quoted_branch\" --tab=$CMUX_TAB_ID --panel=$surface_id"
 }
 
 _cmux_child_pids() {
@@ -1404,7 +1423,8 @@ _cmux_halt_pr_poll_loop() {
     # the synchronous /bin/ps + awk of tree-kill (~5-13ms).
     [[ -z "$_CMUX_PR_POLL_PID" ]] || kill -KILL -- -"$_CMUX_PR_POLL_PID" 2>/dev/null || true
     local signal_path=""
-    [[ -n "$CMUX_PANEL_ID" ]] && signal_path="/tmp/cmux-pr-force-${CMUX_PANEL_ID}"
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" && signal_path="/tmp/cmux-pr-force-${surface_id}"
     [[ -z "$signal_path" ]] || /bin/rm -f -- "$signal_path" >/dev/null 2>&1 || true
     _CMUX_PR_POLL_PID=""
     _CMUX_PR_POLL_PWD=""
@@ -1423,7 +1443,7 @@ _cmux_start_pr_poll_loop() {
     [[ "${CMUX_NO_GIT_WATCH:-}" == "1" ]] && return 0
     [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    _cmux_surface_context_id >/dev/null || return 0
     _cmux_zsh_job_table_saturated && return 0
 
     local watch_pwd="${1:-$PWD}"
@@ -1479,7 +1499,7 @@ _cmux_start_git_head_watch() {
     [[ "${CMUX_NO_GIT_WATCH:-}" == "1" ]] && return 0
     [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    _cmux_surface_context_id >/dev/null || return 0
     _cmux_zsh_job_table_saturated && return 0
 
     local watch_pwd="$PWD"
@@ -1623,7 +1643,7 @@ _cmux_precmd() {
     _cmux_socket_is_unix && cmux_has_unix_socket=1
     (( cmux_has_unix_socket )) || _cmux_has_port_scan_transport || return 0
     [[ -n "$CMUX_TAB_ID" ]] || return 0
-    if [[ -n "$CMUX_PANEL_ID" ]]; then
+    if _cmux_surface_context_id >/dev/null; then
         _cmux_reset_terminal_keyboard_protocols
         _cmux_report_shell_activity_state prompt
     fi
@@ -1652,7 +1672,8 @@ _cmux_precmd() {
         return 0
     fi
 
-    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    local surface_id
+    surface_id="$(_cmux_surface_context_id)" || return 0
     local pwd="$PWD"
     _cmux_set_git_active_pwd "$pwd"
 
@@ -1676,7 +1697,7 @@ _cmux_precmd() {
     if [[ "$pwd" != "$_CMUX_PWD_LAST_PWD" ]]; then
         _CMUX_PWD_LAST_PWD="$pwd"
         local qpwd="${pwd//\"/\\\"}"
-        _cmux_send_bg "report_pwd \"${qpwd}\" --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+        _cmux_send_bg "report_pwd \"${qpwd}\" --tab=$CMUX_TAB_ID --panel=$surface_id"
     fi
 
     # Git branch/dirty: update immediately on directory change, otherwise every ~3s.

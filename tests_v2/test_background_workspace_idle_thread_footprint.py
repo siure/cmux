@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -146,6 +147,9 @@ def _mb(value: int) -> float:
 
 
 def main() -> int:
+    if shutil.which("vmmap") is None:
+        print("SKIP: vmmap is not available on this platform.")
+        return 0
     created_workspaces: list[str] = []
 
     with cmux(SOCKET_PATH) as client:

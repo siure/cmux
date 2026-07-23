@@ -9,6 +9,9 @@ const IMMUTABLE_RELEASE_ASSETS = [
   "cmuxd-remote-linux-amd64",
   "cmuxd-remote-checksums.txt",
   "cmuxd-remote-manifest.json",
+  "cmux-linux-x86_64.tar.gz",
+  "cmux-linux-x86_64.tar.gz.sha256",
+  "cmux-linux-build.json",
 ];
 const RELEASE_ASSET_GUARD_STATE = Object.freeze({
   CLEAR: "clear",

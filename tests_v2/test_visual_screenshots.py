@@ -149,7 +149,8 @@ def capture(client: cmux, label: str):
 def reset_workspace(client: cmux) -> cmux:
     """Create a fresh workspace and return a reconnected client."""
     try:
-        client.new_workspace()
+        workspace_id = client.new_workspace()
+        client.select_workspace(workspace_id)
     except Exception:
         pass
     time.sleep(SHORT_WAIT)
