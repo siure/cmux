@@ -106,33 +106,60 @@ def check_command_palette_caret_tint(repo_root: Path) -> List[str]:
     except Exception as e:
         return [f"Could not read {content_view}: {e}"]
 
-    checks = [
-        (
-            "search input",
-            r"TextField\(commandPaletteSearchPlaceholder, text: \$commandPaletteQuery\)(?P<body>.*?)"
-            r"\.focused\(\$isCommandPaletteSearchFocused\)",
-        ),
-        (
-            "rename input",
-            r"TextField\(target\.placeholder, text: \$commandPaletteRenameDraft\)(?P<body>.*?)"
-            r"\.focused\(\$isCommandPaletteRenameFocused\)",
-        ),
-    ]
-
     violations: List[str] = []
-    for label, pattern in checks:
-        match = re.search(pattern, content, flags=re.DOTALL)
-        if not match:
-            violations.append(
-                f"Could not locate command palette {label} TextField block in Sources/ContentView.swift"
-            )
-            continue
+    search_call = re.search(
+        r"CommandPaletteSearchFieldRepresentable\(\s*"
+        r"placeholder:\s*commandPaletteSearchPlaceholder,\s*"
+        r"text:\s*\$commandPaletteQuery,\s*"
+        r"isFocused:\s*Binding\(get:\s*\{\s*isCommandPaletteSearchFocused\s*\},\s*"
+        r"set:\s*\{\s*isCommandPaletteSearchFocused\s*=\s*\$0\s*\}\)",
+        content,
+        flags=re.DOTALL,
+    )
+    if not search_call:
+        violations.append(
+            "Could not locate command palette search input wiring in Sources/ContentView.swift"
+        )
 
-        body = match.group("body")
-        if ".tint(.white)" not in body:
-            violations.append(
-                f"Command palette {label} TextField must use `.tint(.white)` in Sources/ContentView.swift"
-            )
+    caret_helper = re.search(
+        r"private static func applyCaretTint\(to editor: NSTextView\)\s*\{(?P<body>.*?)\n\s*\}",
+        content,
+        flags=re.DOTALL,
+    )
+    if not caret_helper or "editor.insertionPointColor = .white" not in caret_helper.group("body"):
+        violations.append(
+            "Command palette search input must force a white AppKit insertion point in Sources/ContentView.swift"
+        )
+    elif content.count("applyCaretTint(to: editor)") < 2:
+        violations.append(
+            "Command palette search input must apply its white caret tint when editing and updating"
+        )
+
+    single_line_field = re.search(
+        r"TextField\(placeholder, text: text\)(?P<body>.*?)\.focused\(focus\)",
+        content,
+        flags=re.DOTALL,
+    )
+    if not single_line_field:
+        violations.append(
+            "Could not locate command palette single-line TextField block in Sources/ContentView.swift"
+        )
+    elif ".tint(.white)" not in single_line_field.group("body"):
+        violations.append(
+            "Command palette rename input TextField must use `.tint(.white)` in Sources/ContentView.swift"
+        )
+
+    rename_wiring = re.search(
+        r"private func commandPaletteRenameInputView\(target: CommandPaletteRenameTarget\).*?"
+        r"focus:\s*\$isCommandPaletteRenameFocused.*?"
+        r"text:\s*\$commandPaletteRenameDraft",
+        content,
+        flags=re.DOTALL,
+    )
+    if not rename_wiring:
+        violations.append(
+            "Could not locate command palette rename input wiring in Sources/ContentView.swift"
+        )
 
     return violations
 

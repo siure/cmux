@@ -3574,7 +3574,7 @@ struct ContentView: View {
             TextField(placeholder, text: text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, weight: .regular))
-                .tint(Color(nsColor: sidebarActiveForegroundNSColor(opacity: 1.0)))
+                .tint(.white)
                 .focused(focus)
                 .accessibilityIdentifier(accessibilityIdentifier)
                 .backport.onKeyPress(.delete) { modifiers in
@@ -3814,6 +3814,7 @@ struct ContentView: View {
                 if let field = obj.object as? NSTextField,
                    let editor = field.currentEditor() as? NSTextView {
                     attachEditorTextDidChangeObserverIfNeeded(editor)
+                    CommandPaletteSearchFieldRepresentable.applyCaretTint(to: editor)
                 }
                 if !parent.isFocused {
                     DispatchQueue.main.async {
@@ -3910,6 +3911,10 @@ struct ContentView: View {
             Coordinator(parent: self)
         }
 
+        private static func applyCaretTint(to editor: NSTextView) {
+            editor.insertionPointColor = .white
+        }
+
         func makeNSView(context: Context) -> CommandPaletteNativeTextField {
             let field = CommandPaletteNativeTextField(frame: .zero)
             field.font = .systemFont(ofSize: 13)
@@ -3934,6 +3939,7 @@ struct ContentView: View {
 
             if let editor = nsView.currentEditor() as? NSTextView {
                 context.coordinator.attachEditorTextDidChangeObserverIfNeeded(editor)
+                Self.applyCaretTint(to: editor)
                 if editor.string != text, !editor.hasMarkedText() {
                     context.coordinator.isProgrammaticMutation = true
                     editor.string = text
@@ -3967,6 +3973,9 @@ struct ContentView: View {
                         ((firstResponder as? NSTextView)?.delegate as? NSTextField) === nsView
                     guard !alreadyFocused else { return }
                     window.makeFirstResponder(nsView)
+                    if let editor = nsView.currentEditor() as? NSTextView {
+                        Self.applyCaretTint(to: editor)
+                    }
                 }
             }
         }
