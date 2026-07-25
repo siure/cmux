@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/ai/manaflow/cmux/ui">
+    <file>css/cmux.css</file>
+    <file>css/tokens.css</file>
+    <file>css/legacy.css</file>
+    <file>css/next.css</file>
+    <file>strings/en.json</file>
+    <file>strings/ja.json</file>
+  </gresource>
+</gresources>

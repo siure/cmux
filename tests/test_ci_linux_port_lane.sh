@@ -33,8 +33,8 @@ require_token 'RUST_VERSION: "1.92.0"' \
   "the Linux port lane must pin its validated Rust toolchain"
 require_token "libgtk-4-dev libwebkitgtk-6.0-dev pkg-config xauth xvfb" \
   "the Linux port lane must install GTK4 and Xvfb development/runtime dependencies"
-require_token "libwebkitgtk-6.0-dev pkg-config xauth xvfb dbus-x11" \
-  "the Linux port lane must install WebKitGTK and a D-Bus session helper"
+require_token "libwebkitgtk-6.0-dev pkg-config xauth xvfb dbus-x11 python3-pil" \
+  "the Linux port lane must install WebKitGTK, D-Bus, and GTK screenshot dependencies"
 require_token 'rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt' \
   "the Linux port lane must provision Rust and rustfmt explicitly"
 require_token "cargo fmt --all -- --check" \
@@ -65,6 +65,12 @@ require_token 'rpc app.quit.request "{}"' \
   "the GTK smoke test must request shutdown from a second process"
 require_token 'while kill -0 "$app_pid"' \
   "the GTK smoke test must verify that the native app process exits"
+require_token "./scripts/test-gtk-next-visual.sh" \
+  "the Linux port lane must capture deterministic next-shell screenshots"
+require_token "CMUX_VISUAL_SMOKE_ONLY" \
+  "the CI screenshot lane must use smoke mode outside a pinned golden container"
+require_token "cmux-gtk-visual" \
+  "the Linux port lane must preserve GTK screenshots as failure artifacts"
 require_token "bash -n linux/scripts/install-dev.sh" \
   "the Linux port lane must syntax-check the installer"
 require_token "bash -n linux/scripts/build-bundle.sh" \

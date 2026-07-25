@@ -12,6 +12,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LD_LIBRARY_PATH");
     println!("cargo:rerun-if-env-changed=LIBRARY_PATH");
     println!("cargo:rerun-if-changed=webkit/request_headers_extension.c");
+    println!("cargo:rerun-if-changed=resources/ui/cmux.gresource.xml");
+    println!("cargo:rerun-if-changed=resources/ui/css/cmux.css");
+    println!("cargo:rerun-if-changed=resources/ui/css/tokens.css");
+    println!("cargo:rerun-if-changed=resources/ui/css/legacy.css");
+    println!("cargo:rerun-if-changed=resources/ui/css/next.css");
+    println!("cargo:rerun-if-changed=resources/ui/strings/en.json");
+    println!("cargo:rerun-if-changed=resources/ui/strings/ja.json");
 
     if env::var_os("CARGO_FEATURE_GTK").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
@@ -29,11 +36,32 @@ fn main() {
         );
     }
     compile_webkit_request_headers_extension();
+    compile_gtk_resources();
 }
 
 fn fail(reason: &str) -> ! {
     eprintln!("error: {reason}. {GTK4_DEVELOPMENT_PACKAGE_HINT}");
     std::process::exit(1);
+}
+
+fn compile_gtk_resources() {
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
+    let target = out_dir.join("cmux-ui.gresource");
+    let compiler =
+        env::var_os("GLIB_COMPILE_RESOURCES").unwrap_or_else(|| "glib-compile-resources".into());
+    let status = Command::new(compiler)
+        .args([
+            "--sourcedir",
+            "resources/ui",
+            "--target",
+            target.to_str().expect("UTF-8 GTK resource output path"),
+            "resources/ui/cmux.gresource.xml",
+        ])
+        .status()
+        .unwrap_or_else(|err| fail(&format!("failed to run glib-compile-resources: {err}")));
+    if !status.success() {
+        fail("failed to compile GTK resources");
+    }
 }
 
 fn compile_webkit_request_headers_extension() {

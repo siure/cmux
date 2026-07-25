@@ -1,0 +1,1165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>cmux Linux GTK UI Rewrite Plan</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #111310;
+      --surface: #191c17;
+      --surface-strong: #20241e;
+      --surface-soft: #151713;
+      --line: #363b34;
+      --line-soft: #292d27;
+      --text: #f2f3ed;
+      --muted: #a7ada3;
+      --subtle: #7f877b;
+      --accent: #3989f7;
+      --accent-soft: rgba(57, 137, 247, 0.14);
+      --accent-line: rgba(74, 153, 255, 0.58);
+      --green: #62b56f;
+      --amber: #d2a952;
+      --red: #db7272;
+      --sidebar-width: 17rem;
+      --content-width: 76rem;
+      --radius: 12px;
+      --shadow: 0 18px 60px rgba(0, 0, 0, 0.24);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 82% -8%, rgba(57, 137, 247, 0.12), transparent 30rem),
+        var(--page);
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    a { color: #79b3ff; text-underline-offset: 0.2em; }
+    a:hover { color: #a9ceff; }
+
+    code, pre, .eyebrow, .metric, .phase-number, .file-path {
+      font-family: "SFMono-Regular", "Cascadia Code", "Liberation Mono", Consolas, monospace;
+    }
+
+    code {
+      padding: 0.1rem 0.32rem;
+      border: 1px solid var(--line-soft);
+      border-radius: 5px;
+      background: var(--surface-soft);
+      color: #dbe8f7;
+      font-size: 0.9em;
+    }
+
+    pre {
+      overflow: auto;
+      margin: 1rem 0 0;
+      padding: 1rem;
+      border: 1px solid var(--line-soft);
+      border-radius: 9px;
+      background: #0d0f0c;
+      color: #d9ded5;
+      font-size: 0.84rem;
+      line-height: 1.55;
+    }
+
+    h1, h2, h3, h4 {
+      margin: 0;
+      line-height: 1.18;
+      letter-spacing: -0.02em;
+    }
+
+    h1 { max-width: 15ch; font-size: clamp(2.6rem, 6vw, 5.6rem); }
+    h2 { font-size: clamp(1.55rem, 2.4vw, 2.15rem); }
+    h3 { font-size: 1.12rem; }
+    h4 { font-size: 0.95rem; }
+    p { margin: 0.65rem 0 0; }
+    ul, ol { margin: 0.75rem 0 0; padding-left: 1.2rem; }
+    li + li { margin-top: 0.42rem; }
+    strong { color: #fff; }
+
+    .skip-link {
+      position: absolute;
+      left: 1rem;
+      top: -5rem;
+      z-index: 50;
+      padding: 0.6rem 0.8rem;
+      border-radius: 7px;
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .skip-link:focus { top: 1rem; }
+
+    .hero {
+      padding: clamp(3rem, 8vw, 7rem) max(1.25rem, calc((100vw - var(--content-width)) / 2));
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .hero-inner {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(17rem, 26rem);
+      gap: clamp(2rem, 7vw, 6rem);
+      align-items: end;
+      max-width: var(--content-width);
+      margin: 0 auto;
+    }
+
+    .eyebrow {
+      margin-bottom: 1rem;
+      color: #84b9ff;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .lede {
+      max-width: 58ch;
+      margin-top: 1.4rem;
+      color: var(--muted);
+      font-size: clamp(1rem, 1.6vw, 1.22rem);
+    }
+
+    .meta-card {
+      padding: 1.2rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(25, 28, 23, 0.86);
+      box-shadow: var(--shadow);
+    }
+
+    .meta-row {
+      display: grid;
+      grid-template-columns: 6rem 1fr;
+      gap: 0.7rem;
+      padding: 0.55rem 0;
+      border-top: 1px solid var(--line-soft);
+    }
+
+    .meta-row:first-child { padding-top: 0; border-top: 0; }
+    .meta-row:last-child { padding-bottom: 0; }
+    .meta-label { color: var(--subtle); font-size: 0.8rem; text-transform: uppercase; }
+    .status { color: #9ddd9f; font-weight: 700; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+      gap: clamp(2rem, 5vw, 5rem);
+      width: min(calc(100% - 2.5rem), var(--content-width));
+      margin: 0 auto;
+      padding: 3rem 0 7rem;
+    }
+
+    .toc {
+      position: sticky;
+      top: 1.2rem;
+      align-self: start;
+      max-height: calc(100vh - 2.4rem);
+      overflow: auto;
+      padding: 1rem;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: rgba(21, 23, 19, 0.82);
+      backdrop-filter: blur(14px);
+    }
+
+    .toc-title {
+      margin-bottom: 0.6rem;
+      color: var(--subtle);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      padding: 0.36rem 0.5rem;
+      border-left: 2px solid transparent;
+      color: var(--muted);
+      font-size: 0.86rem;
+      text-decoration: none;
+    }
+
+    .toc a:hover, .toc a:focus-visible {
+      border-left-color: var(--accent);
+      color: var(--text);
+      background: var(--accent-soft);
+      outline: none;
+    }
+
+    main { min-width: 0; }
+
+    section {
+      scroll-margin-top: 1.5rem;
+      padding: 3rem 0;
+      border-top: 1px solid var(--line-soft);
+    }
+
+    main > section:first-child { padding-top: 0; border-top: 0; }
+
+    .section-kicker {
+      display: block;
+      margin-bottom: 0.45rem;
+      color: #76aaf1;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .section-intro {
+      max-width: 72ch;
+      margin-top: 0.8rem;
+      color: var(--muted);
+      font-size: 1.02rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      margin-top: 1.4rem;
+    }
+
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .card {
+      padding: 1.15rem;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .card p, .card li { color: var(--muted); }
+    .card h3 + p { margin-top: 0.45rem; }
+
+    .callout {
+      margin-top: 1.35rem;
+      padding: 1.05rem 1.15rem;
+      border: 1px solid var(--accent-line);
+      border-left: 4px solid var(--accent);
+      border-radius: 9px;
+      background: var(--accent-soft);
+    }
+
+    .callout.warning {
+      border-color: rgba(210, 169, 82, 0.55);
+      border-left-color: var(--amber);
+      background: rgba(210, 169, 82, 0.08);
+    }
+
+    .reference {
+      margin-top: 1.5rem;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #0a0b09;
+      box-shadow: var(--shadow);
+    }
+
+    .reference img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .reference figcaption {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.8rem 1rem;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .reference-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.9rem;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.8rem;
+      padding: 0.2rem 0.62rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-soft);
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-decoration: none;
+    }
+
+    .chip:hover { border-color: var(--accent-line); color: var(--text); }
+
+    .anatomy {
+      display: grid;
+      grid-template-columns: 13rem 1fr;
+      grid-template-rows: 2.4rem minmax(19rem, 32rem);
+      margin-top: 1.4rem;
+      overflow: hidden;
+      border: 1px solid #454a42;
+      border-radius: 13px;
+      background: #11130f;
+      box-shadow: var(--shadow);
+    }
+
+    .anatomy > div { position: relative; }
+    .anatomy-label {
+      position: absolute;
+      left: 0.55rem;
+      bottom: 0.42rem;
+      padding: 0.12rem 0.38rem;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.58);
+      color: #d7ddd2;
+      font-size: 0.68rem;
+    }
+
+    .window-controls {
+      grid-row: 1;
+      grid-column: 1;
+      border-right: 1px solid #3a3e37;
+      border-bottom: 1px solid #3a3e37;
+      background: #20231e;
+    }
+
+    .title-strip {
+      grid-row: 1;
+      grid-column: 2;
+      border-bottom: 1px solid #3a3e37;
+      background: #20231e;
+    }
+
+    .left-sidebar {
+      grid-row: 2;
+      grid-column: 1;
+      padding: 0.65rem;
+      border-right: 1px solid #3a3e37;
+      background: #20231e;
+    }
+
+    .workspace-demo {
+      height: 3.2rem;
+      margin-top: 0.3rem;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #2e7eea, #4698f6);
+    }
+
+    .workspace-line {
+      height: 2.65rem;
+      margin-top: 0.4rem;
+      border-bottom: 1px solid #343830;
+      opacity: 0.8;
+    }
+
+    .pane-grid {
+      grid-row: 2;
+      grid-column: 2;
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      grid-template-rows: 1.15fr 0.85fr;
+      background: #171a15;
+    }
+
+    .pane {
+      min-height: 9rem;
+      border-right: 1px solid #44483f;
+      border-bottom: 1px solid #44483f;
+      background:
+        repeating-linear-gradient(to bottom, transparent 0 1.05rem, rgba(255,255,255,0.025) 1.05rem 1.1rem),
+        #1b1e19;
+    }
+
+    .pane.primary { grid-row: 1 / 3; }
+    .pane:last-child { border-bottom: 0; }
+    .pane-tabs {
+      height: 1.8rem;
+      border-bottom: 1px solid #3d4139;
+      background: #22251f;
+    }
+    .pane.focused { box-shadow: inset 0 0 0 2px var(--accent); }
+
+    .comparison {
+      width: 100%;
+      margin-top: 1.4rem;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    .comparison th, .comparison td {
+      padding: 0.78rem 0.85rem;
+      border: 1px solid var(--line-soft);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .comparison th { background: var(--surface-strong); color: #fff; }
+    .comparison td { color: var(--muted); background: rgba(25, 28, 23, 0.62); }
+    .comparison td:first-child { color: var(--text); font-weight: 650; }
+
+    .architecture {
+      margin-top: 1.5rem;
+      padding: 1.25rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-soft);
+    }
+
+    .architecture-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 0.7rem;
+      align-items: stretch;
+    }
+
+    .architecture-node {
+      display: grid;
+      place-items: center;
+      min-height: 6rem;
+      padding: 0.8rem;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      text-align: center;
+    }
+
+    .architecture-node strong { display: block; }
+    .architecture-node span { display: block; margin-top: 0.3rem; color: var(--muted); font-size: 0.8rem; }
+    .arrow { align-self: center; color: #76aaf1; font-size: 1.4rem; }
+
+    .module-tree { font-size: 0.81rem; }
+
+    .spec-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      margin-top: 1.4rem;
+    }
+
+    details {
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    summary {
+      cursor: pointer;
+      padding: 1rem;
+      color: #fff;
+      font-weight: 700;
+    }
+
+    details[open] summary { border-bottom: 1px solid var(--line-soft); }
+    .details-body { padding: 0.1rem 1rem 1rem; color: var(--muted); }
+
+    .phases {
+      margin-top: 1.5rem;
+      border-left: 1px solid var(--line);
+    }
+
+    .phase {
+      position: relative;
+      display: grid;
+      grid-template-columns: 3.7rem 1fr;
+      gap: 1rem;
+      padding: 0 0 1.7rem 1.4rem;
+    }
+
+    .phase::before {
+      content: "";
+      position: absolute;
+      left: -0.38rem;
+      top: 0.25rem;
+      width: 0.7rem;
+      height: 0.7rem;
+      border: 2px solid var(--accent);
+      border-radius: 50%;
+      background: var(--page);
+    }
+
+    .phase-number { color: #76aaf1; font-size: 0.77rem; font-weight: 700; }
+    .phase p { color: var(--muted); }
+    .gate { margin-top: 0.65rem; color: #aed6b1; font-size: 0.86rem; }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.8rem;
+      margin-top: 1.3rem;
+    }
+
+    .metric-card {
+      padding: 1rem;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .metric { color: #90c1ff; font-size: 1.25rem; font-weight: 750; }
+    .metric-label { margin-top: 0.28rem; color: var(--muted); font-size: 0.8rem; }
+
+    .checklist {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.6rem 1rem;
+      margin-top: 1.25rem;
+      padding: 0;
+      list-style: none;
+    }
+
+    .checklist li {
+      position: relative;
+      margin: 0;
+      padding: 0.8rem 0.85rem 0.8rem 2.25rem;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--muted);
+    }
+
+    .checklist li::before {
+      content: "✓";
+      position: absolute;
+      left: 0.82rem;
+      top: 0.78rem;
+      color: var(--green);
+      font-weight: 800;
+    }
+
+    .file-list {
+      margin-top: 1.2rem;
+      overflow: hidden;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+    }
+
+    .file-row {
+      display: grid;
+      grid-template-columns: minmax(15rem, 0.75fr) 1.25fr;
+      gap: 1rem;
+      padding: 0.75rem 0.9rem;
+      border-top: 1px solid var(--line-soft);
+      background: var(--surface);
+    }
+
+    .file-row:first-child { border-top: 0; }
+    .file-path { color: #b7d5fc; font-size: 0.79rem; overflow-wrap: anywhere; }
+    .file-role { color: var(--muted); font-size: 0.87rem; }
+
+    footer {
+      padding: 2.5rem max(1.25rem, calc((100vw - var(--content-width)) / 2));
+      border-top: 1px solid var(--line-soft);
+      color: var(--subtle);
+      font-size: 0.82rem;
+    }
+
+    @media (max-width: 940px) {
+      .hero-inner, .layout { grid-template-columns: 1fr; }
+      .toc { position: static; max-height: none; }
+      .toc nav { columns: 2; }
+      .grid.three, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .architecture-row { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); justify-self: center; }
+    }
+
+    @media (max-width: 680px) {
+      .hero { padding-left: 1.25rem; padding-right: 1.25rem; }
+      .grid, .grid.three, .spec-list, .metric-grid, .checklist { grid-template-columns: 1fr; }
+      .toc nav { columns: 1; }
+      .anatomy { grid-template-columns: 7rem 1fr; }
+      .pane-grid { grid-template-columns: 1fr; grid-template-rows: repeat(3, minmax(8rem, 1fr)); }
+      .pane.primary { grid-row: auto; }
+      .reference figcaption, .file-row { display: block; }
+      .file-role { margin-top: 0.4rem; }
+      .comparison { display: block; overflow-x: auto; }
+    }
+
+    @media print {
+      :root { color-scheme: light; --page: #fff; --surface: #fff; --surface-soft: #fff; --surface-strong: #f2f2f2; --line: #999; --line-soft: #ccc; --text: #111; --muted: #444; --subtle: #555; }
+      body { background: #fff; }
+      .hero { padding: 2rem 0; }
+      .layout { display: block; width: 100%; padding: 1rem 0; }
+      .toc { display: none; }
+      .reference, .anatomy, .architecture, .card, details, .metric-card, .file-row { box-shadow: none; break-inside: avoid; }
+      section { break-before: auto; }
+      a { color: inherit; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to plan</a>
+
+  <header class="hero">
+    <div class="hero-inner">
+      <div>
+        <div class="eyebrow">Implementation plan · Linux / GTK4</div>
+        <h1>Rewrite the shell, keep the product.</h1>
+        <p class="lede">
+          A complete GTK presentation rewrite that brings the Linux port to the density, clarity,
+          stability, and terminal-first feel of normal cmux—without rewriting the Rust core,
+          Ghostty integration, WebKit runtime, session model, or socket API.
+        </p>
+      </div>
+      <aside class="meta-card" aria-label="Plan metadata">
+        <div class="meta-row"><span class="meta-label">Status</span><span class="status">Proposed</span></div>
+        <div class="meta-row"><span class="meta-label">Scope</span><span>GTK shell and UI model boundary</span></div>
+        <div class="meta-row"><span class="meta-label">Strategy</span><span>Incremental replacement behind flags</span></div>
+        <div class="meta-row"><span class="meta-label">North star</span><span>macOS cmux composition and density</span></div>
+        <div class="meta-row"><span class="meta-label">Primary code</span><span><code>linux/src/gtk_ui.rs</code></span></div>
+      </aside>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="toc" aria-label="Table of contents">
+      <div class="toc-title">Contents</div>
+      <nav>
+        <a href="#summary">01 · Executive summary</a>
+        <a href="#north-star">02 · Visual north star</a>
+        <a href="#gaps">03 · What is wrong today</a>
+        <a href="#invariants">04 · UX invariants</a>
+        <a href="#architecture">05 · Target architecture</a>
+        <a href="#visual-system">06 · Visual system</a>
+        <a href="#components">07 · Component plan</a>
+        <a href="#migration">08 · Migration phases</a>
+        <a href="#validation">09 · Validation</a>
+        <a href="#performance">10 · Performance budgets</a>
+        <a href="#rollout">11 · Rollout and risks</a>
+        <a href="#files">12 · File map</a>
+        <a href="#done">13 · Definition of done</a>
+      </nav>
+    </aside>
+
+    <main id="content">
+      <section id="summary">
+        <span class="section-kicker">01 · Executive summary</span>
+        <h2>The rewrite boundary is the GTK presentation layer.</h2>
+        <p class="section-intro">
+          The Linux port already implements most of the product. The problem is not missing capability;
+          it is that nearly every UI concern lives inside one large file, consumes untyped JSON snapshots,
+          refreshes through polling, and carries hardcoded styling. That structure makes the interface
+          visually inconsistent, fragile while editing, and expensive to improve.
+        </p>
+
+        <div class="grid three">
+          <article class="card">
+            <h3>Keep</h3>
+            <p><code>AppState</code>, socket commands, session persistence, Ghostty, WebKitGTK, browser profiles, Canvas state, custom sidebar documents, and CLI behavior.</p>
+          </article>
+          <article class="card">
+            <h3>Replace</h3>
+            <p>The GTK shell, widget ownership, snapshot parsing, CSS organization, focus routing, component reconciliation, and coarse polling loop.</p>
+          </article>
+          <article class="card">
+            <h3>Deliver</h3>
+            <p>A compact native Linux UI that visually reads as cmux, retains surface identity, updates reactively, and can be tested one component at a time.</p>
+          </article>
+        </div>
+
+        <div class="callout">
+          <strong>Core rule:</strong> do not mechanically split <code>gtk_ui.rs</code> into smaller files and call that a rewrite.
+          The rewrite is complete only when untyped parsing, periodic full refresh, broad reconstruction, and cross-component ownership are removed.
+        </div>
+      </section>
+
+      <section id="north-star">
+        <span class="section-kicker">02 · Visual north star</span>
+        <h2>Match the hierarchy and density of normal cmux.</h2>
+        <p class="section-intro">
+          The macOS UI is the canonical product reference. Linux should not imitate platform-specific
+          traffic lights or AppKit controls, but it should preserve the same proportions, information
+          hierarchy, compact chrome, split topology, and localized attention cues.
+        </p>
+
+        <figure class="reference">
+          <img src="../../docs/assets/main-first-image.png" alt="Normal cmux showing a dense workspace sidebar, terminal and browser panes, pane tabs, and nested splits">
+          <figcaption>
+            <span>Primary reference: dense, terminal-first, low-chrome, multi-pane cmux.</span>
+            <a href="../../docs/assets/main-first-image.png">Open full image</a>
+          </figcaption>
+        </figure>
+
+        <div class="reference-links" aria-label="Additional visual references">
+          <a class="chip" href="../../docs/assets/vertical-horizontal-tabs-and-splits.png">Splits and tabs</a>
+          <a class="chip" href="../../docs/assets/notification-rings.png">Notification rings</a>
+          <a class="chip" href="../../docs/assets/sidebar-notification-badge.png">Sidebar badges</a>
+          <a class="chip" href="../../docs/assets/built-in-browser.png">Built-in browser</a>
+          <a class="chip" href="../../docs/assets/claude-code-teams.png">Agent teams</a>
+          <a class="chip" href="../../docs/assets/ssh.png">SSH workspace</a>
+        </div>
+
+        <div class="anatomy" role="img" aria-label="Target cmux shell anatomy: compact header, narrow workspace sidebar, and dense split panes with pane tab bars">
+          <div class="window-controls"><span class="anatomy-label">window actions</span></div>
+          <div class="title-strip"><span class="anatomy-label">compact workspace title strip</span></div>
+          <div class="left-sidebar">
+            <div class="workspace-demo"></div>
+            <div class="workspace-line"></div>
+            <div class="workspace-line"></div>
+            <div class="workspace-line"></div>
+            <span class="anatomy-label">vertical workspace tabs</span>
+          </div>
+          <div class="pane-grid">
+            <div class="pane primary"><div class="pane-tabs"></div><span class="anatomy-label">primary terminal</span></div>
+            <div class="pane focused"><div class="pane-tabs"></div><span class="anatomy-label">focused pane + ring</span></div>
+            <div class="pane"><div class="pane-tabs"></div><span class="anatomy-label">browser / terminal</span></div>
+          </div>
+        </div>
+
+        <div class="grid">
+          <article class="card"><h3>Dense, not cramped</h3><p>Small type, short toolbars, narrow dividers, and minimal outer padding. Most pixels belong to terminal or browser content.</p></article>
+          <article class="card"><h3>Quiet by default</h3><p>Inactive chrome stays near-monochrome. Blue is reserved for selection, focus, unread state, drag targets, and primary action feedback.</p></article>
+          <article class="card"><h3>Information-rich sidebar</h3><p>Rows show task title, status, branch, directory, PR/issue/port metadata, and latest notification without becoming card-heavy.</p></article>
+          <article class="card"><h3>Native Linux behavior</h3><p>GTK window controls, dialogs, IME, primary selection, drag-and-drop, Wayland/X11 semantics, system scaling, and accessibility remain native.</p></article>
+        </div>
+      </section>
+
+      <section id="gaps">
+        <span class="section-kicker">03 · What is wrong today</span>
+        <h2>The current UI is both visually inefficient and difficult to refine safely.</h2>
+        <p class="section-intro">
+          The screenshot below was captured from the current GTK build on 2026-07-25 at 1504×1436.
+          It confirms that the usability problem is not abstract: chrome, cards, duplicated labels, and
+          wide side regions consume a large share of the window while the terminal content remains sparse.
+        </p>
+
+        <figure class="reference">
+          <img src="current-gtk.png" alt="Current Linux GTK cmux showing a large action toolbar, wide sidebars, card-like split panes, duplicated surface labels, and heavily inset terminal content">
+          <figcaption>
+            <span>Current GTK baseline captured from the running app.</span>
+            <a href="current-gtk.png">Open full image</a>
+          </figcaption>
+        </figure>
+
+        <figure class="reference">
+          <img src="next-gtk.png" alt="First implemented Linux GTK rewrite tranche with a compact native header, narrow workspace sidebar, flat pane tabs, thin split dividers, and edge-to-edge terminal content">
+          <figcaption>
+            <span>Implemented first tranche: compact next shell at 1180×760, enabled with <code>CMUX_LINUX_UI=next</code>.</span>
+            <a href="next-gtk.png">Open full image</a>
+          </figcaption>
+        </figure>
+
+        <div class="grid">
+          <article class="card"><h3>Toolbar dominates the workspace</h3><p>A full row of large bordered buttons exposes installation, split, terminal, palette, and help actions at all times. Normal cmux keeps these actions compact, contextual, or in menus.</p></article>
+          <article class="card"><h3>Pane chrome is nested like cards</h3><p>Each split has an outer border, internal padding, a tab card, a duplicated <code>surface:n · terminal</code> label, and another inset terminal rectangle. The canonical UI uses one thin tab strip and lets content meet pane edges.</p></article>
+          <article class="card"><h3>Useful width is squeezed</h3><p>The workspace sidebar, broad pane gutters, and always-visible right sidebar leave narrow terminals even in a 1504 px window. The reference UI fits more panes while preserving readable columns.</p></article>
+          <article class="card"><h3>Hierarchy exposes implementation details</h3><p>The title shows <code>workspace:2 · pane:2 · surface:2</code>; pane labels repeat internal IDs; generic action names compete with the actual task. User-facing titles, status, branch, and notification context should lead.</p></article>
+          <article class="card"><h3>Sidebar density is poorly balanced</h3><p>Rows truncate early despite ample vertical space, selection resembles a large card, and the close control floats outside the row. Normal cmux fits richer metadata with tighter alignment and less framing.</p></article>
+          <article class="card"><h3>Terminal presentation is not trustworthy</h3><p>The captured fallback terminal text wraps and overlaps awkwardly. The rewrite must treat embedded Ghostty as the primary production path and isolate fallback previews from the main UI contract.</p></article>
+        </div>
+
+        <table class="comparison">
+          <thead><tr><th>Current condition</th><th>User impact</th><th>Rewrite response</th></tr></thead>
+          <tbody>
+            <tr><td>~20k-line <code>gtk_ui.rs</code></td><td>Unrelated widgets, styling, input, caches, and tests change together.</td><td>Component controllers with explicit ownership and bounded modules.</td></tr>
+            <tr><td><code>serde_json::Value</code> inside widget code</td><td>Silent field drift, defaults, aliases, and repeated parsing make state inconsistent.</td><td>Typed immutable UI projections with serialization only at protocol boundaries.</td></tr>
+            <tr><td>500 ms snapshot reconciliation</td><td>Visible delay, wasted idle work, draft/focus suppression, and broad rebuilds.</td><td>Typed in-process change events, revisions, and targeted reconciliation.</td></tr>
+            <tr><td>10 ms / 250 ms browser polling</td><td>Background work continues even when no request is active.</td><td>Request channels that wake only the owning browser controller.</td></tr>
+            <tr><td>Inline hardcoded CSS</td><td>Inconsistent spacing, colors, states, and no maintainable theme contract.</td><td>Compiled GTK resources, semantic classes, and centralized metrics.</td></tr>
+            <tr><td>Widget reconstruction plus caches</td><td>Focus loss and avoidable Ghostty/WebKit lifecycle risk.</td><td>Stable keyed controllers and a surface registry keyed by <code>SurfaceId</code>.</td></tr>
+            <tr><td>Limited visual/accessibility regression coverage</td><td>UI regressions are discovered by users rather than CI.</td><td>Pinned Linux screenshot scenarios plus semantic and AT-SPI assertions.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="invariants">
+        <span class="section-kicker">04 · UX invariants</span>
+        <h2>These rules are not negotiable.</h2>
+        <ol>
+          <li><strong>Stable surfaces:</strong> ordinary workspace, tab, split, sidebar, and layout changes must not recreate Ghostty or WebKit hosts.</li>
+          <li><strong>Typing first:</strong> a terminal key event must not build snapshots, traverse unrelated widgets, or wait for the app-wide model lock.</li>
+          <li><strong>One focus owner:</strong> terminal, browser content, omnibar, sidebar, settings, palette, document, and dialog focus are explicit states.</li>
+          <li><strong>Draft safety:</strong> rename, search, omnibar, settings, TextBox, and agent prompt drafts survive unrelated updates and failed submissions.</li>
+          <li><strong>Shared actions:</strong> keyboard, click, menu, palette, CLI, socket, Ghostty, and WebKit callbacks converge on the same core mutation path.</li>
+          <li><strong>Topology integrity:</strong> pane tabs are independent from split geometry; Canvas and Splits reuse the same surface hosts.</li>
+          <li><strong>Attention consistency:</strong> sidebar badges, tab dots, pane rings, desktop notifications, and jump-to-unread derive from one notification index.</li>
+          <li><strong>Native input:</strong> IME, compose sequences, clipboard and primary selection, web shortcuts, terminal mouse reporting, and drag-and-drop keep working.</li>
+          <li><strong>Accessibility:</strong> every state conveyed by color is also represented by text, icon, accessible state, or structure.</li>
+          <li><strong>Incremental parity:</strong> no feature disappears while its replacement is under construction.</li>
+        </ol>
+      </section>
+
+      <section id="architecture">
+        <span class="section-kicker">05 · Target architecture</span>
+        <h2>Three layers with one-way ownership.</h2>
+        <p class="section-intro">
+          Keep the authoritative product model display-independent. Insert a typed UI projection and event bridge.
+          Make GTK responsible only for native widgets, local edit state, focus, and stable surface hosting.
+        </p>
+
+        <div class="architecture">
+          <div class="architecture-row">
+            <div class="architecture-node"><div><strong>Core runtime</strong><span>AppState, persistence, commands, socket behavior</span></div></div>
+            <div class="arrow">→</div>
+            <div class="architecture-node"><div><strong>Typed UI model</strong><span>snapshots, IDs, revisions, changes, actions</span></div></div>
+            <div class="arrow">→</div>
+            <div class="architecture-node"><div><strong>GTK presentation</strong><span>controllers, widgets, local drafts, focus, resources</span></div></div>
+          </div>
+        </div>
+
+        <h3 style="margin-top:1.6rem">Proposed module shape</h3>
+        <pre class="module-tree">linux/src/
+├── runtime/
+│   ├── app_handle.rs          # one mutation/query gateway
+│   ├── ui_dispatcher.rs       # typed UI actions → core operations
+│   └── ui_change_hub.rs       # in-process revisioned invalidations
+├── ui_model/
+│   ├── ids.rs                 # WindowId, WorkspaceId, PaneId, SurfaceId
+│   ├── snapshot.rs            # UiWindowSnapshot
+│   ├── change.rs              # UiChange and change masks
+│   ├── panes.rs               # typed split tree and pane tabs
+│   ├── surfaces.rs            # TerminalVm, BrowserVm, DocumentVm, …
+│   └── projection.rs          # AppState → immutable UI projection
+└── gtk/
+    ├── application.rs         # GTK application lifecycle
+    ├── window_registry.rs     # WindowId → WindowController
+    ├── store.rs               # revisioned local UI store
+    ├── actions.rs             # GTK events → UiAction
+    ├── focus.rs               # explicit FocusContext
+    ├── style.rs               # resource installation + metrics
+    ├── shell/                 # titlebar, root, overlays, sidebars
+    ├── workspace/             # virtualized groups and rows
+    ├── panes/                 # tab strips, split tree, Canvas
+    ├── surfaces/              # one controller per surface kind
+    └── widgets/               # small reusable native controls</pre>
+
+        <div class="grid">
+          <article class="card">
+            <h3>Typed projection</h3>
+            <ul>
+              <li>GTK receives Rust structs and enums, never arbitrary protocol JSON.</li>
+              <li>The existing renderer JSON contract is produced by serializing the typed model.</li>
+              <li>Each independently updated subtree carries a monotonic revision.</li>
+              <li>Compatibility aliases and defaults live in one adapter.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Event-driven updates</h3>
+            <ul>
+              <li>All authoritative mutations publish a typed <code>UiChange</code>.</li>
+              <li>Changes are coalesced by window and domain before GTK reconciliation.</li>
+              <li>Revision gaps trigger a scoped full snapshot, not a permanent poll.</li>
+              <li>Ghostty rendering stays on Ghostty wakeups; terminal frames never enter the UI event bus.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Stable controllers</h3>
+            <ul>
+              <li>Controllers are keyed by window, pane, or surface identity.</li>
+              <li>Updates mutate properties and models rather than replacing complete subtrees.</li>
+              <li>A window-scoped registry owns Ghostty, WebKit, and native document hosts.</li>
+              <li>Detach/attach is explicit and testable during topology changes.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Local edit state</h3>
+            <ul>
+              <li>Clean → Editing → Submitting → Reconciled / Failed.</li>
+              <li>Request IDs pair optimistic state with authoritative results.</li>
+              <li>Failure retains the draft and shows an inline error.</li>
+              <li>Focus restoration uses explicit tokens, not widget-tree searches.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="visual-system">
+        <span class="section-kicker">06 · Visual system</span>
+        <h2>Make the product visually coherent before polishing individual widgets.</h2>
+
+        <div class="grid three">
+          <article class="card"><h3>Palette</h3><p>Near-black and warm charcoal surfaces; gray hierarchy; one saturated blue accent; terminal colors remain content, not chrome.</p></article>
+          <article class="card"><h3>Density</h3><p>28–32 px pane tabs, 30–34 px compact controls, thin dividers, minimal gutters, and no large card padding in the main shell.</p></article>
+          <article class="card"><h3>Typography</h3><p>System sans for chrome, monospace for paths/branches/technical metadata, restrained weight differences, and no oversized headings in runtime UI.</p></article>
+          <article class="card"><h3>Selection</h3><p>Solid blue compact workspace selection; subtle active-tab underline/background; 2 px pane focus or unread ring without layout shift.</p></article>
+          <article class="card"><h3>Icons</h3><p>Symbolic monochrome icons using current color. Avoid emoji and one-off colored image controls.</p></article>
+          <article class="card"><h3>Modes</h3><p>Dark, light, high contrast, 200% text scaling, and reduced motion. Chrome may derive safe semantic colors from the active Ghostty theme.</p></article>
+        </div>
+
+        <h3 style="margin-top:1.6rem">Resource layout</h3>
+        <pre>linux/resources/ui/
+├── cmux.gresource.xml
+├── css/
+│   ├── tokens.css
+│   ├── base.css
+│   ├── shell.css
+│   ├── sidebar.css
+│   ├── panes.css
+│   ├── browser.css
+│   ├── terminal.css
+│   ├── settings.css
+│   ├── notifications.css
+│   └── high-contrast.css
+└── icons/symbolic/</pre>
+
+        <ul>
+          <li>Compile resources in <code>linux/build.rs</code>; install one provider per application, not per widget.</li>
+          <li>Use semantic classes such as <code>.cmux-workspace-row.selected.unread</code>, not structural selectors tied to incidental widget nesting.</li>
+          <li>Keep numeric spacing and hit-target values in a typed Rust <code>Metrics</code> module.</li>
+          <li>Allow bounded per-workspace color overrides through normalized classes or a cached dynamic provider.</li>
+          <li>Centralize Linux UI strings in a gettext-ready catalog/wrapper during the rewrite; do not continue scattering bare English through controllers.</li>
+        </ul>
+      </section>
+
+      <section id="components">
+        <span class="section-kicker">07 · Component plan</span>
+        <h2>Rewrite by stable visual region.</h2>
+        <p class="section-intro">Each component owns its native widgets and local interaction state, receives immutable view models, and emits typed actions.</p>
+
+        <div class="spec-list">
+          <details open>
+            <summary>Window shell and titlebar</summary>
+            <div class="details-body">
+              <ul>
+                <li>One <code>WindowController</code> per model window.</li>
+                <li>Compact client-side header with native compositor window controls.</li>
+                <li>Sidebar, notification, new-workspace, right-sidebar, and layout actions stay compact.</li>
+                <li>Workspace title and remote/directory context are single-line and ellipsized.</li>
+                <li>Command palette, shortcut help, drag targets, and banners live in an overlay layer.</li>
+              </ul>
+            </div>
+          </details>
+
+          <details open>
+            <summary>Left workspace sidebar</summary>
+            <div class="details-body">
+              <ul>
+                <li><code>GtkListView</code> + typed <code>gio::ListStore</code>; do not rebuild a vertical box.</li>
+                <li>Group headers, pinned partitions, collapse, multi-selection, inline rename, context menus, reorder, and group drops.</li>
+                <li>Rows receive value snapshots plus actions, never the full store.</li>
+                <li>Fixed slots for unread/status controls prevent title and metadata from jumping.</li>
+                <li>Custom sidebars mount through a separate provider controller.</li>
+              </ul>
+            </div>
+          </details>
+
+          <details>
+            <summary>Pane tabs and split tree</summary>
+            <div class="details-body">
+              <ul>
+                <li>One stable tab-strip controller per pane.</li>
+                <li>Horizontal scrolling, selected/hover/unread/loading states, close controls, new terminal, split, and overflow actions.</li>
+                <li>Typed recursive <code>PaneNodeVm::Leaf | Split</code>; do not infer topology from floating-point frames.</li>
+                <li>Reuse unchanged <code>GtkPaned</code> nodes and pane hosts.</li>
+                <li>Divider changes remain local during drag and commit at release or a bounded rate.</li>
+              </ul>
+            </div>
+          </details>
+
+          <details>
+            <summary>Terminal surfaces</summary>
+            <div class="details-body">
+              <ul>
+                <li>Retain <code>gtk_ghostty.rs</code> as the native rendering/input boundary.</li>
+                <li>Move shell chrome, search, TextBox, focus, and context-menu concerns into the terminal controller.</li>
+                <li>Direct key, IME, pointer, selection, scroll, and clipboard paths to Ghostty.</li>
+                <li>No application draw loop and no snapshot work on keystrokes.</li>
+                <li>Fallback preview renderers remain isolated from the production Ghostty controller.</li>
+              </ul>
+            </div>
+          </details>
+
+          <details>
+            <summary>Browser surfaces</summary>
+            <div class="details-body">
+              <ul>
+                <li>Retain <code>gtk_webkit.rs</code> as the dynamic WebKit runtime boundary.</li>
+                <li>Keep views alive across workspace and tab switches; recreate only for profile/data-store generation changes.</li>
+                <li>Compact back/forward/reload, security state, omnibar, loading progress, profile, find, downloads, and overflow controls.</li>
+                <li>Omnibar suggestions update independently; typing never rebuilds the pane.</li>
+                <li>Replace evaluation, screenshot, PDF, and recording polls with controller-bound request channels.</li>
+              </ul>
+            </div>
+          </details>
+
+          <details>
+            <summary>Canvas</summary>
+            <div class="details-body">
+              <ul>
+                <li>Keep Canvas as an independent presentation controller using the existing model.</li>
+                <li>Reuse surface hosts while changing only their container and geometry.</li>
+                <li>Preserve pan, zoom, snapping, guides, minimap, culling, z-order, and persisted viewport state.</li>
+                <li>Plain scroll remains local to content; modifier gestures control the Canvas.</li>
+              </ul>
+            </div>
+          </details>
+
+          <details>
+            <summary>Notifications and attention</summary>
+            <div class="details-body">
+              <ul>
+                <li>One typed index keyed by workspace and surface.</li>
+                <li>Sidebar badge, tab dot, pane ring, notification center, desktop delivery, and jump ordering share that index.</li>
+                <li>Use a 2 px ring that does not alter pane allocation.</li>
+                <li>Short flash animations respect reduced motion and remain separate from persistent unread state.</li>
+              </ul>
+            </div>
+          </details>
+
+          <details>
+            <summary>Right sidebar, settings, and dialogs</summary>
+            <div class="details-body">
+              <ul>
+                <li>Files, Find, Sessions, Feed, and Dock have separate controllers under a shared sidebar shell.</li>
+                <li>Virtualize large lists and move filesystem traversal off the main thread.</li>
+                <li>Settings use a category list with lazily created typed pages and consistent row anatomy.</li>
+                <li>A dialog coordinator serializes close, resume, paste, clipboard, auth, and destructive confirmations per window.</li>
+                <li>All controls expose accessible roles, names, values, states, and keyboard equivalents.</li>
+              </ul>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section id="migration">
+        <span class="section-kicker">08 · Migration phases</span>
+        <h2>Keep the app usable throughout the rewrite.</h2>
+        <div class="phases">
+          <article class="phase"><div class="phase-number">PHASE 0</div><div><h3>Baseline and fixtures</h3><p>Capture current behavior, deterministic renderer fixtures, Linux screenshots, focus flows, surface-identity counters, and performance traces. Add the legacy/next selector.</p><div class="gate">Gate: legacy UI remains the default and all current features are still available.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 1</div><div><h3>Typed UI model</h3><p>Create <code>ui_model</code>. Build the public renderer JSON by serializing typed snapshots and prove compatibility with representative fixtures.</p><div class="gate">Gate: no visible UI change; socket and renderer contracts remain compatible.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 2</div><div><h3>Runtime bridge and change hub</h3><p>Introduce <code>AppHandle</code>, typed actions, revisioned change events, and event completeness instrumentation. Route GTK and socket mutations through the same gateway.</p><div class="gate">Gate: legacy GTK can render while diagnostics prove all mutation domains invalidate correctly.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 3</div><div><h3>New shell and design resources</h3><p>Build application/window registry, titlebar, root layout, overlays, focus controller, CSS resources, metrics, and theme modes behind <code>CMUX_LINUX_UI=next</code>.</p><div class="gate">Gate: launch, restore, multi-window, fullscreen, close, and focus work.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 4</div><div><h3>Workspace sidebar</h3><p>Ship virtualized rows, groups, selection, badges, metadata, rename, context menus, drag-and-drop, and custom-sidebar provider switching.</p><div class="gate">Gate: all workspace management entry points pass behavior-level parity tests.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 5</div><div><h3>Pane chrome and topology</h3><p>Ship stable tab strips, pane hosts, recursive split reconciliation, divider persistence, focus rings, and surface registry integration.</p><div class="gate">Gate: workspace, tab, and split operations do not recreate Ghostty/WebKit hosts.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 6</div><div><h3>Surface controllers</h3><p>Migrate terminal, browser, document, Markdown, diff, project, agent session, feedback, and Canvas one surface family at a time.</p><div class="gate">Gate: each migrated family has focused tests and a temporary component-level fallback.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 7</div><div><h3>Right sidebar, settings, notifications, dialogs</h3><p>Complete the remaining shell regions, command palette, shortcut help, accessibility, and string catalog.</p><div class="gate">Gate: all settings, beta gates, custom sidebars, notification flows, and keyboard-only paths are represented.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 8</div><div><h3>Remove polling</h3><p>Disable the 500 ms snapshot loop and browser request timers. Keep an opt-in low-frequency recovery poll for one release while event completeness soaks.</p><div class="gate">Gate: no stale-state failures in long-running, multi-window, external-socket, and background-process scenarios.</div></div></article>
+          <article class="phase"><div class="phase-number">PHASE 9</div><div><h3>Cut over and delete legacy UI</h3><p>Make the next shell the default, retain one emergency flag window, migrate remaining tests, then remove <code>gtk_ui.rs</code> and temporary compatibility paths.</p><div class="gate">Gate: two stable release cycles without a rollback-class issue.</div></div></article>
+        </div>
+      </section>
+
+      <section id="validation">
+        <span class="section-kicker">09 · Validation</span>
+        <h2>Test appearance, behavior, identity, and accessibility.</h2>
+        <div class="grid">
+          <article class="card"><h3>Unit</h3><ul><li>Typed projection and serialization compatibility.</li><li>Change masks and event completeness.</li><li>Draft, focus, selection, tabs, split tree, and notification reducers.</li><li>Every UI entry point maps to the shared action path.</li></ul></article>
+          <article class="card"><h3>Component</h3><ul><li>Apply immutable view models and assert widget properties, ordering, CSS classes, and accessible state.</li><li>Apply a second model and prove widgets are reused.</li><li>Verify focused editors are protected and errors retain drafts.</li></ul></article>
+          <article class="card"><h3>Integration</h3><ul><li>Xvfb for X11 and headless Weston for Wayland.</li><li>Drive UI state through the public socket.</li><li>Separate real Ghostty and WebKit smoke lanes.</li><li>Multi-window, restore, drag/drop, IME, clipboard, and external mutation coverage.</li></ul></article>
+          <article class="card"><h3>Visual and accessibility</h3><ul><li>Pinned GTK, fonts, icons, scale, locale, renderer, and viewport.</li><li>Golden scenarios based on the canonical cmux compositions.</li><li>Semantic geometry assertions alongside image diffs.</li><li>AT-SPI roles, names, values, focus order, and keyboard actions.</li></ul></article>
+        </div>
+
+        <h3 style="margin-top:1.6rem">Required visual scenarios</h3>
+        <ul class="checklist">
+          <li>Dense nested terminal splits</li>
+          <li>Mixed terminal and browser panes</li>
+          <li>Unread sidebar badge and pane ring</li>
+          <li>Workspace groups and long metadata</li>
+          <li>Right sidebar Files and Find</li>
+          <li>Command palette and shortcut help</li>
+          <li>Settings in dark, light, and high contrast</li>
+          <li>Canvas overview and focused offscreen pane</li>
+          <li>Narrow 900×700 layout</li>
+          <li>Scale factors 1× and 2×</li>
+        </ul>
+
+        <div class="callout warning">
+          macOS screenshots are composition references, not pixel goldens. The executable goldens must be Linux screenshots produced in a pinned test environment.
+        </div>
+      </section>
+
+      <section id="performance">
+        <span class="section-kicker">10 · Performance budgets</span>
+        <h2>Make responsiveness measurable.</h2>
+        <div class="metric-grid">
+          <div class="metric-card"><div class="metric">&lt; 8 ms p95</div><div class="metric-label">GTK key event to Ghostty input enqueue</div></div>
+          <div class="metric-card"><div class="metric">&lt; 50 ms p95</div><div class="metric-label">Authoritative mutation to visible chrome update</div></div>
+          <div class="metric-card"><div class="metric">&lt; 1%</div><div class="metric-label">Idle CPU for an inactive window</div></div>
+          <div class="metric-card"><div class="metric">55+ FPS</div><div class="metric-label">Sidebar, divider, and Canvas drag on baseline hardware</div></div>
+          <div class="metric-card"><div class="metric">&lt; 8 ms</div><div class="metric-label">One-row sidebar reconciliation in a 100-row list</div></div>
+          <div class="metric-card"><div class="metric">0 remounts</div><div class="metric-label">Surface host remounts during ordinary tab/workspace switching</div></div>
+          <div class="metric-card"><div class="metric">&lt; 2 ms</div><div class="metric-label">GTK main-thread hold of the shared application lock</div></div>
+          <div class="metric-card"><div class="metric">&lt; 750 ms</div><div class="metric-label">Warm restored window to interactive state</div></div>
+          <div class="metric-card"><div class="metric">&lt; 25 MiB</div><div class="metric-label">Chrome memory per window, excluding Ghostty/WebKit</div></div>
+        </div>
+        <p>Trace projection, event queueing, reconciliation, widget creation, focus transitions, browser requests, lock duration, frame timing, and surface detach/attach operations.</p>
+      </section>
+
+      <section id="rollout">
+        <span class="section-kicker">11 · Rollout and risks</span>
+        <h2>Use one top-level selector and time-bounded component flags.</h2>
+        <ul>
+          <li><code>CMUX_LINUX_UI=legacy|next</code> is the developer and emergency selector.</li>
+          <li>Component flags choose implementations at controller construction; do not scatter leaf-level conditionals.</li>
+          <li>Recommended rollout: developer opt-in → nightly default → stable opt-in → stable default → legacy deletion.</li>
+          <li>Active UI implementation and migration flags must appear in renderer diagnostics and support reports.</li>
+        </ul>
+
+        <table class="comparison">
+          <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td>Missed invalidation after polling removal</td><td>Dual-run diagnostics, per-domain revisions, mutation coverage, and scoped recovery snapshots.</td></tr>
+            <tr><td>Ghostty/WebKit destruction during reparenting</td><td>Surface registry, explicit detach/attach API, identity counters, and remount integration tests.</td></tr>
+            <tr><td>Focus differences across compositors</td><td>Typed focus controller, restoration tokens, and X11/Wayland acceptance tests.</td></tr>
+            <tr><td>Mac imitation conflicts with Linux conventions</td><td>Copy density and hierarchy while keeping GTK controls, dialogs, input, accessibility, and system modes native.</td></tr>
+            <tr><td>Two UIs double maintenance cost</td><td>Share typed models/actions immediately, migrate vertical slices, and set deadlines for deleting legacy component paths.</td></tr>
+            <tr><td>Public renderer schema drifts</td><td>Serialize the typed model into the existing schema and run fixture compatibility tests before GTK consumes it directly.</td></tr>
+            <tr><td>Distro differences destabilize screenshots</td><td>Pin the visual-test image and pair pixels with semantic layout assertions.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="files">
+        <span class="section-kicker">12 · File map</span>
+        <h2>Critical implementation surfaces.</h2>
+        <div class="file-list">
+          <div class="file-row"><div class="file-path">linux/src/gtk_ui.rs</div><div class="file-role">Legacy GTK implementation. Migrate behavior and tests by component, then delete.</div></div>
+          <div class="file-row"><div class="file-path">linux/src/app.rs</div><div class="file-role">Authoritative state. Publish typed invalidations from shared mutation paths without importing GTK.</div></div>
+          <div class="file-row"><div class="file-path">linux/src/renderer.rs</div><div class="file-role">Build typed snapshots, then serialize them for the existing JSON contract.</div></div>
+          <div class="file-row"><div class="file-path">linux/src/ui.rs</div><div class="file-role">Adopt the shared runtime handle and select legacy/next GTK implementations.</div></div>
+          <div class="file-row"><div class="file-path">linux/src/server.rs</div><div class="file-role">Route external mutations through the same handle so socket changes publish UI events.</div></div>
+          <div class="file-row"><div class="file-path">linux/src/gtk_ghostty.rs</div><div class="file-role">Remain the Ghostty native boundary; expose a smaller typed surface-host API.</div></div>
+          <div class="file-row"><div class="file-path">linux/src/gtk_webkit.rs</div><div class="file-role">Remain the WebKit runtime boundary; replace polls with channels and typed callbacks.</div></div>
+          <div class="file-row"><div class="file-path">linux/src/config.rs</div><div class="file-role">Store rollout, appearance, density, and recovery settings through typed configuration.</div></div>
+          <div class="file-row"><div class="file-path">linux/build.rs · linux/Cargo.toml</div><div class="file-role">Compile GTK resources and add test/build dependencies behind appropriate features.</div></div>
+          <div class="file-row"><div class="file-path">linux/tests/gtk_* · linux/tests/visual/</div><div class="file-role">New component, input, accessibility, surface identity, event completeness, and visual suites.</div></div>
+        </div>
+      </section>
+
+      <section id="done">
+        <span class="section-kicker">13 · Definition of done</span>
+        <h2>The UI must be both better-looking and structurally better.</h2>
+        <ul class="checklist">
+          <li><code>gtk_ui.rs</code> is removed.</li>
+          <li>GTK consumes typed snapshots and emits typed actions.</li>
+          <li>Protocol JSON parsing is confined to compatibility boundaries.</li>
+          <li>The 500 ms snapshot poll and browser request polls are gone.</li>
+          <li>Revision-gap recovery works without permanent background polling.</li>
+          <li>Ghostty and WebKit identity remains stable through normal navigation and layout changes.</li>
+          <li>Sidebar, pane tabs, splits, browser chrome, and notification rings visibly match the cmux north star.</li>
+          <li>Dark, light, high contrast, scaling, and reduced motion are supported.</li>
+          <li>Terminal typing, IME, clipboard, browser focus, drag/drop, shortcuts, and chords pass on X11 and Wayland.</li>
+          <li>Settings, notifications, sidebars, Canvas, documents, diffs, projects, and agent sessions have typed controllers.</li>
+          <li>Visual, semantic, AT-SPI, identity, and performance gates pass.</li>
+          <li>Socket, renderer, persistence, and automation contracts remain compatible.</li>
+          <li>The new shell ships as default for two stable cycles without a rollback-class issue.</li>
+          <li>The legacy kill switch and temporary component flags are deleted.</li>
+        </ul>
+
+        <div class="callout">
+          <strong>Final acceptance test:</strong> open the canonical dense workspace scenario on Linux.
+          It should immediately read as cmux—compact workspace navigation, stable nested panes, quiet chrome,
+          clear focus and unread state, and nearly all available space devoted to work.
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer>
+    Internal implementation plan for the in-tree Linux GTK port. Visual references are linked from <code>docs/assets/</code>; no assets are duplicated by this document.
+  </footer>
+</body>
+</html>
