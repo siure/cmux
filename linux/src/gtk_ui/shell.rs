@@ -285,9 +285,16 @@ fn overflow_action_button(
     app_state: &Arc<Mutex<AppState>>,
     method: &'static str,
     params: Value,
+    popover: &gtk::Popover,
 ) -> gtk::Button {
     let button = action_button(title, app_state, method, params);
     button.set_focusable(true);
+    let popover = popover.downgrade();
+    button.connect_clicked(move |_| {
+        if let Some(popover) = popover.upgrade() {
+            popover.popdown();
+        }
+    });
     button
 }
 
@@ -298,6 +305,7 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
     button.set_tooltip_text(Some(&strings::text("header.more_actions")));
     button.set_focusable(true);
 
+    let popover = gtk::Popover::new();
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
     menu.add_css_class("cmux-overflow-menu");
     for (key, method, params) in [
@@ -322,6 +330,7 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
             app_state,
             method,
             params,
+            &popover,
         ));
     }
     if canvas_mode(snapshot) {
@@ -330,24 +339,28 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
             app_state,
             "canvas.set_mode",
             json!({"mode": "splits"}),
+            &popover,
         ));
         menu.append(&overflow_action_button(
             &strings::text("action.zoom_in"),
             app_state,
             "canvas.zoom",
             json!({"direction": "in"}),
+            &popover,
         ));
         menu.append(&overflow_action_button(
             &strings::text("action.zoom_out"),
             app_state,
             "canvas.zoom",
             json!({"direction": "out"}),
+            &popover,
         ));
         menu.append(&overflow_action_button(
             &strings::text("action.canvas_overview"),
             app_state,
             "canvas.overview",
             json!({}),
+            &popover,
         ));
     } else {
         menu.append(&overflow_action_button(
@@ -355,6 +368,7 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
             app_state,
             "canvas.set_mode",
             json!({"mode": "canvas"}),
+            &popover,
         ));
     }
     for (key, method) in [
@@ -370,10 +384,10 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
             app_state,
             method,
             json!({}),
+            &popover,
         ));
     }
 
-    let popover = gtk::Popover::new();
     popover.set_child(Some(&menu));
     button.set_popover(Some(&popover));
     button
