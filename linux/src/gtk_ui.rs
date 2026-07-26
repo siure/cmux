@@ -13903,6 +13903,13 @@ fn connect_terminal_keys(
         let focused_widget = weak_window
             .upgrade()
             .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+        if control_activation_key_should_propagate(
+            focused_widget_is_activation_control(focused_widget.as_ref()),
+            keyval,
+            modifiers,
+        ) {
+            return glib::Propagation::Proceed;
+        }
         let (model_surface_id, model_terminal_route) = app_state
             .lock()
             .ok()
@@ -14595,6 +14602,36 @@ fn widget_or_ancestor_has_css_class(focused: Option<&gtk::Widget>, class: &str) 
         current = widget.parent();
     }
     false
+}
+
+fn focused_widget_is_activation_control(focused: Option<&gtk::Widget>) -> bool {
+    let mut current = focused.cloned();
+    while let Some(widget) = current {
+        if widget.is::<gtk::Button>() || widget.is::<gtk::MenuButton>() {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
+}
+
+fn control_activation_key_should_propagate(
+    focused_activation_control: bool,
+    keyval: gdk::Key,
+    modifiers: gdk::ModifierType,
+) -> bool {
+    focused_activation_control
+        && matches!(
+            keyval,
+            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space | gdk::Key::KP_Space
+        )
+        && !modifiers.intersects(
+            gdk::ModifierType::SHIFT_MASK
+                | gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::META_MASK,
+        )
 }
 
 fn widget_contains_focus(widget: &impl IsA<gtk::Widget>) -> bool {
@@ -17741,6 +17778,30 @@ mod tests {
             terminal_input_for_key(a, gdk::ModifierType::SUPER_MASK),
             None
         );
+    }
+
+    #[test]
+    fn gtk_control_activation_keys_avoid_terminal_routing() {
+        let empty = gdk::ModifierType::empty();
+        for key in [
+            gdk::Key::Return,
+            gdk::Key::KP_Enter,
+            gdk::Key::space,
+            gdk::Key::KP_Space,
+        ] {
+            assert!(control_activation_key_should_propagate(true, key, empty));
+            assert!(!control_activation_key_should_propagate(false, key, empty));
+        }
+        assert!(!control_activation_key_should_propagate(
+            true,
+            gdk::Key::Return,
+            gdk::ModifierType::CONTROL_MASK
+        ));
+        assert!(!control_activation_key_should_propagate(
+            true,
+            gdk::Key::Escape,
+            empty
+        ));
     }
 
     #[test]
