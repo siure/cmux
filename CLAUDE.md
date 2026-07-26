@@ -2,6 +2,8 @@
 
 ## Initial setup
 
+For Linux-port branch ownership, remotes, and PR targets, follow [`docs/linux-port-git-workflow.md`](docs/linux-port-git-workflow.md). Linux work integrates through `feat/linux-port`, not `main` or tool-named branches.
+
 Run the setup script to initialize submodules, build GhosttyKit, and install the pbxproj normalization pre-commit hook:
 
 ```bash
