@@ -1,0 +1,19 @@
+{
+  "header.new_workspace": "New Workspace",
+  "header.open_browser": "Open Browser",
+  "header.toggle_right_sidebar": "Toggle Right Sidebar",
+  "header.command_palette": "Command Palette",
+  "header.shortcut_help": "Keyboard Shortcuts",
+  "header.more_actions": "More Actions",
+  "action.split_right": "Split Right",
+  "action.split_down": "Split Down",
+  "action.new_terminal": "New Terminal",
+  "action.use_canvas": "Use Canvas Layout",
+  "action.use_splits": "Use Split Layout",
+  "action.zoom_in": "Zoom In",
+  "action.zoom_out": "Zoom Out",
+  "action.canvas_overview": "Show Canvas Overview",
+  "action.install_claude": "Install Claude Code Integration",
+  "action.install_codex": "Install Codex Integration",
+  "action.install_opencode": "Install OpenCode Integration"
+}

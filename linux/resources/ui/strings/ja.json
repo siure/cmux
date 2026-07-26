@@ -1,0 +1,19 @@
+{
+  "header.new_workspace": "新しいワークスペース",
+  "header.open_browser": "ブラウザを開く",
+  "header.toggle_right_sidebar": "右サイドバーを切り替え",
+  "header.command_palette": "コマンドパレット",
+  "header.shortcut_help": "キーボードショートカット",
+  "header.more_actions": "その他の操作",
+  "action.split_right": "右に分割",
+  "action.split_down": "下に分割",
+  "action.new_terminal": "新しいターミナル",
+  "action.use_canvas": "キャンバスレイアウトを使用",
+  "action.use_splits": "分割レイアウトを使用",
+  "action.zoom_in": "拡大",
+  "action.zoom_out": "縮小",
+  "action.canvas_overview": "キャンバス全体を表示",
+  "action.install_claude": "Claude Code 連携をインストール",
+  "action.install_codex": "Codex 連携をインストール",
+  "action.install_opencode": "OpenCode 連携をインストール"
+}

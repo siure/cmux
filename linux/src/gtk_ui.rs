@@ -24,6 +24,14 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+mod mode;
+mod shell;
+mod strings;
+mod style;
+
+use mode::GtkUiMode;
+use shell::GtkSnapshotView;
+
 const GTK_CELL_WIDTH: i32 = 10;
 const GTK_CELL_HEIGHT: i32 = 20;
 const GTK_SPLIT_INITIAL_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
@@ -51,590 +59,25 @@ const SURFACE_DETACH_LABEL: &str = "Move Tab to New Workspace";
 pub(crate) const GTK_APP_DEFAULT_WIDTH: i32 = 1180;
 pub(crate) const GTK_APP_DEFAULT_HEIGHT: i32 = 760;
 
-const CSS: &str = r#"
-.cmux-root {
-  background: #151719;
-  color: #f4f0e8;
-}
-.cmux-sidebar {
-  background: #202326;
-  border-right: 1px solid #34383d;
-  padding: 14px;
-}
-.cmux-sidebar-provider {
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  padding: 6px 8px;
-}
-.cmux-sidebar-provider:hover,
-.cmux-sidebar-provider:focus {
-  background: #30363b;
-}
-.cmux-sidebar-provider-invalid {
-  color: #d69a50;
-}
-.cmux-custom-sidebar-button {
-  min-height: 30px;
-}
-.cmux-custom-sidebar-error {
-  background: #392d22;
-  border: 1px solid #6f5235;
-  border-radius: 6px;
-  padding: 8px;
-}
-.cmux-heading {
-  color: #f4f0e8;
-  font-weight: 700;
-}
-.cmux-muted {
-  color: #a7b0b8;
-}
-.cmux-workspace {
-  padding: 8px 10px;
-  border-radius: 6px;
-}
-.cmux-workspace-selected {
-  background: #2e5e76;
-}
-.cmux-workspace-multi-selected {
-  outline: 2px solid #65b8d8;
-  outline-offset: -2px;
-}
-.cmux-workspace-unread {
-  color: #72c7e7;
-  font-size: 12px;
-}
-.cmux-workspace-detail {
-  color: #a7b0b8;
-  font-size: 12px;
-}
-.cmux-workspace-description {
-  color: #d1d7dc;
-  font-size: 12px;
-}
-.cmux-workspace-metadata {
-  background: #30363b;
-  color: #dbe3e8;
-  border-radius: 4px;
-  padding: 2px 5px;
-  font-size: 11px;
-}
-.cmux-workspace-port {
-  min-height: 22px;
-  padding: 1px 5px;
-  font-size: 11px;
-}
-.cmux-workspace-progress {
-  min-height: 5px;
-}
-.cmux-color-swatch {
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-  border-radius: 4px;
-}
-.cmux-workspace-group {
-  background: #252a2e;
-  border-left: 3px solid #4aa3c7;
-  padding-left: 7px;
-}
-.cmux-workspace-member {
-  margin-left: 14px;
-}
-.cmux-workspace-row {
-  border-radius: 6px;
-}
-.cmux-drop-target {
-  background: #284c5d;
-  outline: 2px solid #4aa3c7;
-  outline-offset: -2px;
-}
-.cmux-drag-source {
-  opacity: 0.72;
-}
-.cmux-workspace-select {
-  background: transparent;
-  border: 0;
-  padding: 0;
-}
-.cmux-workspace-close {
-  background: transparent;
-  color: #d7e2dc;
-  border: 0;
-  border-radius: 4px;
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-}
-.cmux-workspace-close:hover,
-.cmux-workspace-close:focus {
-  background: #3c444a;
-}
-.cmux-group-toggle,
-.cmux-group-add {
-  background: transparent;
-  color: #d7e2dc;
-  border: 0;
-  border-radius: 4px;
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-}
-.cmux-group-toggle:hover,
-.cmux-group-toggle:focus,
-.cmux-group-add:hover,
-.cmux-group-add:focus {
-  background: #3c444a;
-}
-.cmux-main {
-  padding: 14px;
-}
-.cmux-settings {
-  background: #181b1e;
-  border-top: 1px solid #34383d;
-}
-.cmux-settings-nav {
-  background: #202326;
-  border-right: 1px solid #34383d;
-  padding: 10px;
-}
-.cmux-settings-nav button {
-  background: transparent;
-  border: 0;
-  border-radius: 5px;
-  padding: 7px 10px;
-}
-.cmux-settings-nav button:checked {
-  background: #2e5e76;
-  color: #ffffff;
-}
-.cmux-settings-content {
-  padding: 22px 26px;
-}
-.cmux-settings-row {
-  border-bottom: 1px solid #34383d;
-  padding: 12px 0;
-}
-.cmux-settings-control {
-  min-width: 180px;
-}
-.cmux-project {
-  background: #181b1e;
-  border-top: 1px solid #34383d;
-}
-.cmux-project-toolbar {
-  background: #202326;
-  border-bottom: 1px solid #34383d;
-  padding: 8px 10px;
-}
-.cmux-project-content {
-  padding: 12px 14px;
-}
-.cmux-project-row {
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  padding: 5px 8px;
-}
-.cmux-project-row:checked {
-  background: #2e5e76;
-  color: #ffffff;
-}
-.cmux-project-setting {
-  border-bottom: 1px solid #34383d;
-  padding: 6px 4px;
-}
-.cmux-document {
-  background: #181b1e;
-  border-top: 1px solid #34383d;
-}
-.cmux-document-toolbar {
-  background: #202326;
-  border-bottom: 1px solid #34383d;
-  padding: 8px 10px;
-}
-.cmux-document-content {
-  padding: 18px 22px;
-}
-.cmux-document-text,
-.cmux-document-text text {
-  background: #181b1e;
-  color: #e6edf3;
-  caret-color: #e6edf3;
-}
-.cmux-document-annotation {
-  background: #202a31;
-  border-left: 3px solid #4aa3c7;
-  padding: 8px 10px;
-}
-.cmux-diff-split-grid {
-  border-bottom: 1px solid #34383d;
-}
-.cmux-diff-split-line-numbers {
-  color: #7d8790;
-  padding: 0 4px;
-}
-.cmux-diff-split-code {
-  min-width: 320px;
-}
-.cmux-diff-split-divider {
-  background: #34383d;
-}
-.cmux-agent-session {
-  background: #181b1e;
-  border-top: 1px solid #34383d;
-}
-.cmux-agent-session-toolbar,
-.cmux-agent-session-composer {
-  background: #202326;
-  border-bottom: 1px solid #34383d;
-  padding: 8px 10px;
-}
-.cmux-agent-session-composer {
-  border-top: 1px solid #34383d;
-  border-bottom: 0;
-}
-.cmux-agent-session-attachments {
-  background: #202326;
-  padding: 6px 10px 0 10px;
-}
-.cmux-agent-session-attachment {
-  background: #2b3136;
-  border-radius: 5px;
-  padding: 3px 6px;
-}
-.cmux-agent-session-attachment button {
-  min-width: 24px;
-  min-height: 24px;
-  padding: 2px;
-}
-.cmux-agent-session-editor {
-  background: #181b1e;
-  color: #e6edf3;
-  padding: 5px 7px;
-}
-.cmux-agent-session-transcript,
-.cmux-agent-session-transcript text {
-  background: #181b1e;
-  color: #e6edf3;
-}
-.cmux-agent-session-error {
-  background: #352126;
-  color: #ffb4b4;
-  padding: 7px 10px;
-}
-.cmux-agent-session-permissions {
-  min-width: 150px;
-}
-.cmux-split > separator {
-  background: #34383d;
-  min-width: 6px;
-  min-height: 6px;
-}
-.cmux-split > separator:hover {
-  background: #4aa3c7;
-}
-.cmux-chrome {
-  background: #181b1e;
-  border-left: 1px solid #34383d;
-  padding: 14px;
-}
-.cmux-section {
-  margin-top: 10px;
-}
-.cmux-section-heading {
-  color: #a7b0b8;
-  font-size: 12px;
-  font-weight: 700;
-}
-.cmux-toolbar {
-  margin-bottom: 4px;
-}
-.cmux-action {
-  background: #2f353a;
-  color: #f4f0e8;
-  border-radius: 6px;
-  padding: 7px 10px;
-}
-.cmux-action:hover {
-  background: #3c444a;
-}
-.cmux-icon-action {
-  min-width: 34px;
-  min-height: 34px;
-  padding: 5px;
-}
-.cmux-browser-toolbar {
-  margin-bottom: 2px;
-}
-.cmux-browser-location {
-  min-width: 40px;
-  background: #15191c;
-  color: #f4f0e8;
-  border: 1px solid #34383d;
-  border-radius: 5px;
-  padding: 6px 8px;
-}
-.cmux-browser-location:focus {
-  border-color: #4aa3c7;
-}
-.cmux-browser-suggestions {
-  background: #15191c;
-  border: 1px solid #34383d;
-  border-radius: 5px;
-  padding: 4px;
-}
-.cmux-browser-suggestion {
-  padding: 6px 8px;
-}
-.cmux-browser-suggestion:hover,
-.cmux-browser-suggestion:selected {
-  background: #2f353a;
-}
-.cmux-terminal-search-bar,
-.cmux-browser-find-bar {
-  background: #171a1d;
-  border: 1px solid #34383d;
-  border-radius: 5px;
-  padding: 5px;
-}
-.cmux-terminal-search,
-.cmux-browser-find {
-  background: #0f1113;
-  color: #f4f0e8;
-  border: 1px solid #34383d;
-  border-radius: 4px;
-  padding: 5px 7px;
-}
-.cmux-terminal-search:focus,
-.cmux-browser-find:focus {
-  border-color: #4aa3c7;
-}
-.cmux-terminal-search-count {
-  color: #a7b0b8;
-  min-width: 52px;
-}
-.cmux-terminal-copy-cursor {
-  background: rgba(74, 163, 199, 0.28);
-  border: 2px solid #69c4e8;
-}
-.cmux-terminal-scrollbar {
-  min-width: 8px;
-  margin: 3px 2px;
-}
-.cmux-terminal-copy-badge {
-  background: #171a1d;
-  color: #69c4e8;
-  border: 1px solid #4a899f;
-  border-radius: 4px;
-  margin: 8px;
-  padding: 2px 6px;
-  font-weight: 700;
-}
-.cmux-browser-view {
-  min-width: 320px;
-  min-height: 240px;
-  background: #ffffff;
-}
-.cmux-sidebar-modes {
-  margin-bottom: 6px;
-}
-.cmux-sidebar-mode-active {
-  background: #2e5e76;
-}
-.cmux-sidebar-file {
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  padding: 5px 7px;
-}
-.cmux-sidebar-file:hover,
-.cmux-sidebar-file:focus {
-  background: #30363b;
-}
-.cmux-plus-action {
-  min-width: 34px;
-  min-height: 34px;
-  padding: 5px;
-  font-weight: 700;
-}
-.cmux-row-button {
-  background: transparent;
-  border: 0;
-  padding: 0;
-}
-.cmux-notification-button {
-  background: transparent;
-  border: 0;
-  border-radius: 7px;
-  padding: 2px;
-}
-.cmux-notification-button:hover,
-.cmux-notification-button:focus {
-  outline: 2px solid #4aa3c7;
-  outline-offset: 2px;
-}
-.cmux-context-menu {
-  background: #202326;
-  border: 1px solid #4aa3c7;
-  border-radius: 6px;
-  padding: 6px;
-}
-.cmux-context-item {
-  background: transparent;
-  color: #f4f0e8;
-  border-radius: 4px;
-  padding: 6px 10px;
-}
-.cmux-context-item:hover,
-.cmux-context-item:focus {
-  background: #314a55;
-}
-.cmux-surface {
-  background: #0f1113;
-  border: 1px solid #34383d;
-  border-radius: 6px;
-  padding: 12px;
-}
-.cmux-surface-focused {
-  border-color: #4aa3c7;
-}
-.cmux-pane-tabs {
-  background: #171a1d;
-  border-bottom: 1px solid #34383d;
-  min-height: 34px;
-}
-.cmux-pane-tab {
-  background: transparent;
-  color: #a7b0b8;
-  border: 0;
-  border-radius: 4px 4px 0 0;
-  min-height: 32px;
-  padding: 4px 8px;
-}
-.cmux-pane-tab:hover {
-  background: #282d31;
-  color: #f4f0e8;
-}
-.cmux-pane-tab-selected {
-  background: #2b3439;
-  color: #f4f0e8;
-  border-bottom: 2px solid #4aa3c7;
-}
-.cmux-pane-tab-unread {
-  color: #72c7e7;
-}
-.cmux-pane-tab-tool {
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  min-width: 30px;
-  min-height: 30px;
-  padding: 4px;
-}
-.cmux-pane-tab-tool:hover {
-  background: #343a3f;
-}
-.cmux-terminal-preview {
-  background: #070809;
-  color: #d7e2dc;
-  border-radius: 4px;
-  padding: 10px;
-  font-family: monospace;
-}
-.cmux-terminal-loading {
-  color: #9fb7c4;
-  font-style: italic;
-}
-.cmux-text-box {
-  background: #171a1d;
-  border: 1px solid #3b4248;
-  border-radius: 6px;
-  padding: 8px;
-}
-.cmux-text-box:focus-within {
-  border-color: #4aa3c7;
-}
-.cmux-text-box-editor {
-  background: transparent;
-  color: #f4f0e8;
-  padding: 4px 6px;
-}
-.cmux-text-box-attachments {
-  background: transparent;
-}
-.cmux-text-box-chip {
-  background: #2b3136;
-  border: 0;
-  border-radius: 5px;
-  padding: 3px 6px;
-}
-.cmux-text-box-tool {
-  min-width: 30px;
-  min-height: 30px;
-  padding: 4px;
-}
-.cmux-text-box-send {
-  background: #f4f0e8;
-  color: #111416;
-  border-radius: 15px;
-}
-.cmux-surface-preview {
-  background: #15191c;
-  color: #d7e2dc;
-  border-radius: 4px;
-  padding: 10px;
-}
-.cmux-project-preview {
-  font-family: monospace;
-}
-.cmux-status-row {
-  background: #262b2f;
-  border-radius: 5px;
-  padding: 8px;
-}
-.cmux-log-row {
-  background: #111416;
-  border-radius: 5px;
-  padding: 8px;
-}
-.cmux-notification {
-  background: #2b2517;
-  border-left: 3px solid #d4a93a;
-  border-radius: 5px;
-  padding: 8px;
-}
-.cmux-palette {
-  background: #202326;
-  border: 1px solid #4aa3c7;
-  border-radius: 6px;
-  padding: 10px;
-}
-.cmux-shortcut-help {
-  background: #15191c;
-  border: 1px solid #34383d;
-  border-radius: 6px;
-  padding: 10px;
-}
-.cmux-palette-row {
-  border-radius: 4px;
-  padding: 6px 8px;
-}
-.cmux-palette-selected {
-  background: #314a55;
-}
-"#;
-
 pub fn run_gtk_app(app_state: Arc<Mutex<AppState>>, single_instance: bool) -> Result<()> {
-    run_gtk_app_with_renderer(app_state, GtkRendererMode::Gtk, single_instance)
+    run_gtk_app_with_renderer(
+        app_state,
+        GtkRendererMode::Gtk,
+        GtkUiMode::from_env()?,
+        single_instance,
+    )
 }
 
 pub fn run_gtk_app_with_ghostty(
     app_state: Arc<Mutex<AppState>>,
     single_instance: bool,
 ) -> Result<()> {
-    run_gtk_app_with_renderer(app_state, GtkRendererMode::Ghostty, single_instance)
+    run_gtk_app_with_renderer(
+        app_state,
+        GtkRendererMode::Ghostty,
+        GtkUiMode::from_env()?,
+        single_instance,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -646,6 +89,7 @@ enum GtkRendererMode {
 fn run_gtk_app_with_renderer(
     app_state: Arc<Mutex<AppState>>,
     renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
     single_instance: bool,
 ) -> Result<()> {
     crate::browser_runtime::activate_browser_runtime();
@@ -685,12 +129,17 @@ fn run_gtk_app_with_renderer(
     let activate_sync_started = Rc::clone(&sync_started);
     let activate_global_visibility = Rc::clone(&global_visibility);
     application.connect_activate(move |application| {
-        install_css();
+        if let Err(err) = style::install() {
+            eprintln!("error: failed to install GTK resources: {err:#}");
+            application.quit();
+            return;
+        }
         activate_global_visibility.borrow_mut().hidden = false;
         if !sync_gtk_window_hosts(
             application,
             &app_state,
             renderer_mode,
+            ui_mode,
             &activate_window_hosts,
             &activate_desktop_notifications,
             &activate_presented_model_window,
@@ -742,6 +191,7 @@ fn run_gtk_app_with_renderer(
                 &sync_application,
                 &sync_app_state,
                 renderer_mode,
+                ui_mode,
                 &sync_window_hosts,
                 &sync_desktop_notifications,
                 &sync_presented_model_window,
@@ -787,14 +237,9 @@ struct GtkWindowHost {
     last_main_rebuild_key: Value,
     last_main_non_tab_rebuild_key: Value,
     last_right_rebuild_key: Value,
+    last_header_rebuild_key: Value,
+    last_overlay_rebuild_key: Value,
     last_right_sidebar_focus_generation: u64,
-}
-
-struct GtkSnapshotView {
-    root: gtk::Box,
-    left_slot: gtk::Box,
-    main_slot: gtk::Box,
-    right_slot: gtk::Box,
 }
 
 type GtkWindowHosts = Rc<RefCell<HashMap<String, GtkWindowHost>>>;
@@ -1012,6 +457,7 @@ fn sync_gtk_window_hosts(
     application: &gtk::Application,
     app_state: &Arc<Mutex<AppState>>,
     renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
     hosts: &GtkWindowHosts,
     desktop_notifications: &Rc<RefCell<Option<DesktopNotificationTracker>>>,
     presented_model_window: &Rc<RefCell<Option<String>>>,
@@ -1059,6 +505,7 @@ fn sync_gtk_window_hosts(
                 application,
                 app_state,
                 renderer_mode,
+                ui_mode,
                 &window_id,
                 &row,
                 &snapshot,
@@ -1068,7 +515,7 @@ fn sync_gtk_window_hosts(
             }
             hosts.borrow_mut().insert(window_id.clone(), host);
         } else if let Some(host) = hosts.borrow_mut().get_mut(&window_id) {
-            refresh_gtk_window_host(host, app_state, renderer_mode, &row, &snapshot);
+            refresh_gtk_window_host(host, app_state, renderer_mode, ui_mode, &row, &snapshot);
         }
         if selected {
             selected_window_id = Some(window_id);
@@ -1101,6 +548,7 @@ fn create_gtk_window_host(
     application: &gtk::Application,
     app_state: &Arc<Mutex<AppState>>,
     renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
     window_id: &str,
     row: &Value,
     snapshot: &Value,
@@ -1129,7 +577,7 @@ fn create_gtk_window_host(
         &diff_controls,
         &pending_browser_shortcut_actions,
     );
-    let snapshot_view = build_snapshot_view(
+    let snapshot_view = shell::build_snapshot_view(
         snapshot,
         app_state,
         &pane_allocations,
@@ -1141,7 +589,11 @@ fn create_gtk_window_host(
         &canvas_minimap_states,
         &canvas_occlusion_states,
         renderer_mode,
+        ui_mode,
     );
+    if let Some(titlebar) = snapshot_view.titlebar.as_ref() {
+        window.set_titlebar(Some(titlebar));
+    }
     window.set_child(Some(&snapshot_view.root));
 
     let focus_app_state = Arc::clone(app_state);
@@ -1203,7 +655,7 @@ fn create_gtk_window_host(
         glib::Propagation::Proceed
     });
 
-    let rebuild_keys = snapshot_region_rebuild_keys(snapshot);
+    let rebuild_keys = snapshot_region_rebuild_keys_for_mode(snapshot, ui_mode);
     let mut host = GtkWindowHost {
         window,
         snapshot_view,
@@ -1222,6 +674,8 @@ fn create_gtk_window_host(
         last_main_rebuild_key: rebuild_keys.main,
         last_main_non_tab_rebuild_key: rebuild_keys.main_without_tabs,
         last_right_rebuild_key: rebuild_keys.right,
+        last_header_rebuild_key: shell::header_rebuild_key(snapshot),
+        last_overlay_rebuild_key: shell::overlay_rebuild_key(snapshot),
         last_right_sidebar_focus_generation: 0,
     };
     sync_resume_command_prompts(&mut host, snapshot, app_state);
@@ -1233,6 +687,7 @@ fn refresh_gtk_window_host(
     host: &mut GtkWindowHost,
     app_state: &Arc<Mutex<AppState>>,
     renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
     row: &Value,
     snapshot: &Value,
 ) {
@@ -1247,7 +702,17 @@ fn refresh_gtk_window_host(
     let focus_generation = right_sidebar_focus_generation(snapshot);
     let focus_right_sidebar =
         focus_generation != host.last_right_sidebar_focus_generation && focus_generation > 0;
-    let rebuild_keys = snapshot_region_rebuild_keys(snapshot);
+    let rebuild_keys = snapshot_region_rebuild_keys_for_mode(snapshot, ui_mode);
+    let header_rebuild_key = shell::header_rebuild_key(snapshot);
+    if host.last_header_rebuild_key != header_rebuild_key {
+        shell::refresh_header(&host.snapshot_view, snapshot, app_state);
+        host.last_header_rebuild_key = header_rebuild_key;
+    }
+    let overlay_rebuild_key = shell::overlay_rebuild_key(snapshot);
+    if ui_mode.is_next() && host.last_overlay_rebuild_key != overlay_rebuild_key {
+        shell::refresh_overlay(&host.snapshot_view, snapshot);
+        host.last_overlay_rebuild_key = overlay_rebuild_key;
+    }
     let focused = gtk::prelude::GtkWindowExt::focus(&host.window);
     let left_rebuild_suppressed =
         widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-custom-sidebar-input");
@@ -1266,7 +731,7 @@ fn refresh_gtk_window_host(
     if host.last_left_rebuild_key != rebuild_keys.left && !left_rebuild_suppressed {
         replace_snapshot_slot_child(
             &host.snapshot_view.left_slot,
-            Some(workspace_sidebar(snapshot, app_state).upcast()),
+            Some(workspace_sidebar(snapshot, app_state, ui_mode).upcast()),
         );
         host.last_left_rebuild_key = rebuild_keys.left;
     }
@@ -1292,6 +757,7 @@ fn refresh_gtk_window_host(
                     &host.canvas_minimap_states,
                     &host.canvas_occlusion_states,
                     renderer_mode,
+                    ui_mode,
                 )
                 .upcast(),
             ),
@@ -1303,7 +769,6 @@ fn refresh_gtk_window_host(
         host.last_main_rebuild_key = rebuild_keys.main;
         host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
     }
-
     if host.last_right_rebuild_key != rebuild_keys.right && !right_rebuild_suppressed {
         let sidebar = right_sidebar_visible(snapshot)
             .then(|| app_chrome_sidebar(snapshot, app_state).upcast());
@@ -2220,62 +1685,6 @@ fn desktop_notification_body(notification: &Value) -> String {
     .join(" - ")
 }
 
-fn build_snapshot_view(
-    snapshot: &Value,
-    app_state: &Arc<Mutex<AppState>>,
-    pane_allocations: &PaneAllocations,
-    ghostty_widgets: &GhosttySurfaceWidgets,
-    browser_controls: &BrowserSurfaceControlsCache,
-    diff_controls: &DiffSurfaceControlsCache,
-    terminal_search_controls: &TerminalSearchControlsCache,
-    terminal_text_box_controls: &TerminalTextBoxControlsCache,
-    canvas_minimap_states: &GtkCanvasMinimapStates,
-    canvas_occlusion_states: &GtkCanvasOcclusionStates,
-    renderer_mode: GtkRendererMode,
-) -> GtkSnapshotView {
-    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    root.add_css_class("cmux-root");
-
-    let left_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    left_slot.add_css_class("cmux-left-slot");
-    left_slot.append(&workspace_sidebar(snapshot, app_state));
-    root.append(&left_slot);
-
-    let main_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    main_slot.add_css_class("cmux-main-slot");
-    main_slot.set_hexpand(true);
-    main_slot.set_vexpand(true);
-    main_slot.append(&surface_area(
-        snapshot,
-        app_state,
-        pane_allocations,
-        ghostty_widgets,
-        browser_controls,
-        diff_controls,
-        terminal_search_controls,
-        terminal_text_box_controls,
-        canvas_minimap_states,
-        canvas_occlusion_states,
-        renderer_mode,
-    ));
-    root.append(&main_slot);
-
-    let right_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    right_slot.add_css_class("cmux-right-slot");
-    if right_sidebar_visible(snapshot) {
-        right_slot.append(&app_chrome_sidebar(snapshot, app_state));
-    }
-    right_slot.set_visible(right_sidebar_visible(snapshot));
-    root.append(&right_slot);
-
-    GtkSnapshotView {
-        root,
-        left_slot,
-        main_slot,
-        right_slot,
-    }
-}
-
 fn snapshot_or_error(
     app_state: &Arc<Mutex<AppState>>,
     renderer_mode: GtkRendererMode,
@@ -2320,11 +1729,20 @@ struct GtkSnapshotRegionRebuildKeys {
     right: Value,
 }
 
+#[cfg(test)]
 fn snapshot_region_rebuild_keys(snapshot: &Value) -> GtkSnapshotRegionRebuildKeys {
+    snapshot_region_rebuild_keys_for_mode(snapshot, GtkUiMode::Legacy)
+}
+
+fn snapshot_region_rebuild_keys_for_mode(
+    snapshot: &Value,
+    ui_mode: GtkUiMode,
+) -> GtkSnapshotRegionRebuildKeys {
+    let include_overlays = !ui_mode.is_next();
     GtkSnapshotRegionRebuildKeys {
         left: snapshot_left_rebuild_key(snapshot),
-        main: snapshot_main_rebuild_key(snapshot, true),
-        main_without_tabs: snapshot_main_rebuild_key(snapshot, false),
+        main: snapshot_main_rebuild_key(snapshot, true, include_overlays),
+        main_without_tabs: snapshot_main_rebuild_key(snapshot, false, include_overlays),
         right: snapshot_right_rebuild_key(snapshot),
     }
 }
@@ -2338,7 +1756,11 @@ fn snapshot_left_rebuild_key(snapshot: &Value) -> Value {
     })
 }
 
-fn snapshot_main_rebuild_key(snapshot: &Value, include_tabs: bool) -> Value {
+fn snapshot_main_rebuild_key(
+    snapshot: &Value,
+    include_tabs: bool,
+    include_overlays: bool,
+) -> Value {
     let workspaces = snapshot
         .get("workspaces")
         .and_then(Value::as_array)
@@ -2423,8 +1845,8 @@ fn snapshot_main_rebuild_key(snapshot: &Value, include_tabs: bool) -> Value {
     json!({
         "workspaces": workspaces,
         "surfaces": surfaces,
-        "command_palette": snapshot.get("command_palette"),
-        "shortcut_help": snapshot.get("shortcut_help"),
+        "command_palette": include_overlays.then(|| snapshot.get("command_palette")).flatten(),
+        "shortcut_help": include_overlays.then(|| snapshot.get("shortcut_help")).flatten(),
         "canvas": canvas,
         "app_config": snapshot.pointer("/config/app"),
         "config_reload_generation": snapshot.pointer("/config/reload_generation")
@@ -2537,10 +1959,17 @@ fn gtk_snapshot_backend(renderer_mode: GtkRendererMode) -> &'static str {
     }
 }
 
-fn workspace_sidebar(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::Box {
+fn workspace_sidebar(
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    ui_mode: GtkUiMode,
+) -> gtk::Box {
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
     sidebar.add_css_class("cmux-sidebar");
-    sidebar.set_width_request(260);
+    sidebar.set_width_request(if ui_mode.is_next() { 228 } else { 260 });
+    if ui_mode.is_next() {
+        sidebar.set_hexpand(false);
+    }
     sidebar.set_vexpand(true);
     let sidebar_settings = config::sidebar_settings();
     if sidebar_settings.match_terminal_background {
@@ -5415,6 +4844,14 @@ fn navigate_browser_omnibar(
     true
 }
 
+fn browser_surface_requires_recreation(
+    profile_id: &str,
+    profile_data_generation: u64,
+    state: &ui::BrowserNavigationState,
+) -> bool {
+    profile_id != state.profile_id || profile_data_generation != state.profile_data_generation
+}
+
 fn ensure_browser_surface_controls(
     state: &ui::BrowserNavigationState,
     global_search_needle: Option<&str>,
@@ -5425,8 +4862,11 @@ fn ensure_browser_surface_controls(
     let controls = {
         let mut controls = browser_controls.borrow_mut();
         if controls.get(&state.surface_id).is_some_and(|controls| {
-            controls.profile_id != state.profile_id
-                || controls.profile_data_generation != state.profile_data_generation
+            browser_surface_requires_recreation(
+                &controls.profile_id,
+                controls.profile_data_generation,
+                state,
+            )
         }) {
             controls.remove(&state.surface_id);
         }
@@ -6700,26 +6140,32 @@ fn surface_area(
     canvas_minimap_states: &GtkCanvasMinimapStates,
     canvas_occlusion_states: &GtkCanvasOcclusionStates,
     renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
 ) -> gtk::Box {
-    let main = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    let main = gtk::Box::new(
+        gtk::Orientation::Vertical,
+        if ui_mode.is_next() { 0 } else { 10 },
+    );
     main.add_css_class("cmux-main");
     main.set_hexpand(true);
     main.set_vexpand(true);
 
-    let focused = snapshot.get("focused").unwrap_or(&Value::Null);
-    let title = format!(
-        "{} · {} · {}",
-        value_str(focused, "workspace_ref", "workspace:-"),
-        value_str(focused, "pane_ref", "pane:-"),
-        value_str(focused, "surface_ref", "surface:-")
-    );
-    main.append(&label(&title, "cmux-heading"));
-    main.append(&toolbar(snapshot, app_state));
-    if let Some(palette) = command_palette_panel(snapshot) {
-        main.append(&palette);
-    }
-    if let Some(shortcuts) = shortcut_help_panel(snapshot) {
-        main.append(&shortcuts);
+    if !ui_mode.is_next() {
+        let focused = snapshot.get("focused").unwrap_or(&Value::Null);
+        let title = format!(
+            "{} · {} · {}",
+            value_str(focused, "workspace_ref", "workspace:-"),
+            value_str(focused, "pane_ref", "pane:-"),
+            value_str(focused, "surface_ref", "surface:-")
+        );
+        main.append(&label(&title, "cmux-heading"));
+        main.append(&toolbar(snapshot, app_state));
+        if let Some(palette) = command_palette_panel(snapshot) {
+            main.append(&palette);
+        }
+        if let Some(shortcuts) = shortcut_help_panel(snapshot) {
+            main.append(&shortcuts);
+        }
     }
 
     let views = snapshot
@@ -6779,11 +6225,13 @@ fn surface_area(
             terminal_text_box_controls,
             renderer_mode,
             config_reload_generation,
+            ui_mode,
         );
-        card.set_margin_start(6);
-        card.set_margin_end(6);
-        card.set_margin_top(6);
-        card.set_margin_bottom(6);
+        let margin = if ui_mode.is_next() { 0 } else { 6 };
+        card.set_margin_start(margin);
+        card.set_margin_end(margin);
+        card.set_margin_top(margin);
+        card.set_margin_bottom(margin);
         cards.insert(view_index, card);
     }
     if renderer_mode == GtkRendererMode::Ghostty {
@@ -9512,7 +8960,7 @@ fn action_button(
 
 fn icon_action_button(
     icon_name: &'static str,
-    tooltip: &'static str,
+    tooltip: &str,
     app_state: &Arc<Mutex<AppState>>,
     method: &'static str,
     params: Value,
@@ -13894,8 +13342,12 @@ fn surface_card(
     terminal_text_box_controls: &TerminalTextBoxControlsCache,
     renderer_mode: GtkRendererMode,
     config_reload_generation: u64,
+    ui_mode: GtkUiMode,
 ) -> gtk::Box {
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let card = gtk::Box::new(
+        gtk::Orientation::Vertical,
+        if ui_mode.is_next() { 0 } else { 8 },
+    );
     card.add_css_class("cmux-surface");
     let kind = value_str(view, "kind", "terminal");
     card.add_css_class(match kind {
@@ -13915,13 +13367,15 @@ fn surface_card(
     card.set_vexpand(true);
 
     let title = value_str(view, "title", "Terminal");
-    let meta = format!("{} · {}", value_str(view, "surface_ref", "surface:-"), kind);
     if let Some(tab_strip) = pane_tab_strip(view, app_state) {
         card.append(&tab_strip);
     } else {
         card.append(&label(title, "cmux-heading"));
     }
-    card.append(&label(&meta, "cmux-muted"));
+    if !ui_mode.is_next() {
+        let meta = format!("{} · {}", value_str(view, "surface_ref", "surface:-"), kind);
+        card.append(&label(&meta, "cmux-muted"));
+    }
 
     let is_terminal = value_str(view, "kind", "terminal") == "terminal";
     if is_terminal
@@ -14449,6 +13903,13 @@ fn connect_terminal_keys(
         let focused_widget = weak_window
             .upgrade()
             .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+        if control_activation_key_should_propagate(
+            focused_widget_is_activation_control(focused_widget.as_ref()),
+            keyval,
+            modifiers,
+        ) {
+            return glib::Propagation::Proceed;
+        }
         let (model_surface_id, model_terminal_route) = app_state
             .lock()
             .ok()
@@ -15143,6 +14604,36 @@ fn widget_or_ancestor_has_css_class(focused: Option<&gtk::Widget>, class: &str) 
     false
 }
 
+fn focused_widget_is_activation_control(focused: Option<&gtk::Widget>) -> bool {
+    let mut current = focused.cloned();
+    while let Some(widget) = current {
+        if widget.is::<gtk::Button>() || widget.is::<gtk::MenuButton>() {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
+}
+
+fn control_activation_key_should_propagate(
+    focused_activation_control: bool,
+    keyval: gdk::Key,
+    modifiers: gdk::ModifierType,
+) -> bool {
+    focused_activation_control
+        && matches!(
+            keyval,
+            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space | gdk::Key::KP_Space
+        )
+        && !modifiers.intersects(
+            gdk::ModifierType::SHIFT_MASK
+                | gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::META_MASK,
+        )
+}
+
 fn widget_contains_focus(widget: &impl IsA<gtk::Widget>) -> bool {
     widget.has_focus() || widget.focus_child().is_some()
 }
@@ -15387,18 +14878,6 @@ fn palette_shortcut_combo(key: &str) -> Option<&'static str> {
         "page-down" => Some("pagedown"),
         "enter" => Some("enter"),
         _ => None,
-    }
-}
-
-fn install_css() {
-    let provider = gtk::CssProvider::new();
-    provider.load_from_data(CSS);
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
     }
 }
 
@@ -17107,6 +16586,35 @@ mod tests {
     }
 
     #[test]
+    fn gtk_next_overlay_changes_do_not_rebuild_native_surface_tree() {
+        let base = json!({
+            "surface_views": [{
+                "surface_id": "s1",
+                "pane_id": "p1",
+                "kind": "terminal",
+                "visible": true,
+                "tabs": [{"surface_id": "s1", "selected": true}]
+            }],
+            "command_palette": {"visible": false},
+            "shortcut_help": {"visible": false}
+        });
+        let keys = snapshot_region_rebuild_keys_for_mode(&base, GtkUiMode::Next);
+        let mut changed = base.clone();
+        changed["command_palette"] = json!({
+            "visible": true,
+            "query": "split",
+            "selected_index": 1
+        });
+        let changed_keys = snapshot_region_rebuild_keys_for_mode(&changed, GtkUiMode::Next);
+        assert_eq!(keys.main, changed_keys.main);
+        assert_eq!(keys.main_without_tabs, changed_keys.main_without_tabs);
+        assert_ne!(
+            shell::overlay_rebuild_key(&base),
+            shell::overlay_rebuild_key(&changed)
+        );
+    }
+
+    #[test]
     fn gtk_custom_sidebar_cmux_action_dispatches_to_app_methods() {
         let app_state = Arc::new(Mutex::new(
             AppState::with_paths(None, None).expect("app state"),
@@ -18273,6 +17781,30 @@ mod tests {
     }
 
     #[test]
+    fn gtk_control_activation_keys_avoid_terminal_routing() {
+        let empty = gdk::ModifierType::empty();
+        for key in [
+            gdk::Key::Return,
+            gdk::Key::KP_Enter,
+            gdk::Key::space,
+            gdk::Key::KP_Space,
+        ] {
+            assert!(control_activation_key_should_propagate(true, key, empty));
+            assert!(!control_activation_key_should_propagate(false, key, empty));
+        }
+        assert!(!control_activation_key_should_propagate(
+            true,
+            gdk::Key::Return,
+            gdk::ModifierType::CONTROL_MASK
+        ));
+        assert!(!control_activation_key_should_propagate(
+            true,
+            gdk::Key::Escape,
+            empty
+        ));
+    }
+
+    #[test]
     fn stale_browser_widget_does_not_own_input_after_model_focus_moves() {
         assert!(browser_widget_owns_model_focus(
             "browser-surface",
@@ -19253,13 +18785,6 @@ mod tests {
     }
 
     #[test]
-    fn gtk_notification_buttons_have_focus_outline_style() {
-        assert!(CSS.contains(".cmux-notification-button:hover"));
-        assert!(CSS.contains(".cmux-notification-button:focus"));
-        assert!(CSS.contains("outline-offset: 2px"));
-    }
-
-    #[test]
     fn gtk_toolbar_places_browser_icon_before_plus_action() {
         assert_eq!(
             toolbar_primary_action_markers(),
@@ -19267,12 +18792,6 @@ mod tests {
         );
         assert_eq!(BROWSER_TOOLBAR_ICON, "web-browser-symbolic");
         assert_eq!(NEW_WORKSPACE_TOOLBAR_LABEL, "+");
-        assert!(CSS.contains(".cmux-icon-action"));
-        assert!(CSS.contains(".cmux-plus-action"));
-        assert!(CSS.contains(".cmux-workspace-group"));
-        assert!(CSS.contains(".cmux-workspace-member"));
-        assert!(CSS.contains(".cmux-group-toggle"));
-        assert!(CSS.contains(".cmux-group-add"));
         assert_eq!(GROUP_NEW_WORKSPACE_LABEL, "New Workspace in Group");
         assert_eq!(GROUP_EDIT_CONFIG_LABEL, "Edit Group Config");
         assert_eq!(GROUP_DOCS_LABEL, "Open Workspace Groups Docs");
@@ -20265,6 +19784,23 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
                 ("work-id".to_string(), "Work".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn gtk_browser_host_recreation_is_limited_to_profile_identity_changes() {
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": "surface-id",
+            "browser": {
+                "profile_id": "work",
+                "profile_data_generation": 7,
+                "url": "https://example.test"
+            }
+        }))
+        .unwrap();
+        assert!(!browser_surface_requires_recreation("work", 7, &state));
+        assert!(browser_surface_requires_recreation("personal", 7, &state));
+        assert!(browser_surface_requires_recreation("work", 8, &state));
     }
 
     #[test]

@@ -1,0 +1,155 @@
+.cmux-ui-next,
+.cmux-ui-next.cmux-headerbar {
+  background: @cmux_window;
+  color: @cmux_text;
+}
+
+.cmux-ui-next.cmux-headerbar {
+  min-height: 34px;
+  padding: 0 6px;
+  border-bottom: 1px solid @cmux_separator;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-header-title {
+  color: @cmux_text;
+  font-weight: 650;
+  font-size: 13px;
+}
+
+.cmux-ui-next .cmux-header-context {
+  color: @cmux_muted;
+  font-size: 10px;
+}
+
+.cmux-ui-next .cmux-header-action,
+.cmux-ui-next.cmux-headerbar .cmux-header-action {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: @cmux_muted;
+}
+
+.cmux-ui-next .cmux-header-action:hover,
+.cmux-ui-next .cmux-header-action:focus,
+.cmux-ui-next.cmux-headerbar .cmux-header-action:hover,
+.cmux-ui-next.cmux-headerbar .cmux-header-action:focus {
+  background: alpha(@cmux_text, 0.09);
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-shell-body,
+.cmux-ui-next .cmux-main,
+.cmux-ui-next .cmux-main-slot {
+  background: @cmux_window;
+  padding: 0;
+}
+
+.cmux-ui-next .cmux-sidebar {
+  background: @cmux_chrome;
+  border-right: 1px solid @cmux_separator;
+  padding: 8px 7px;
+}
+
+.cmux-ui-next .cmux-workspace {
+  padding: 6px 7px;
+  border-radius: 6px;
+}
+
+.cmux-ui-next .cmux-workspace-selected {
+  background: @cmux_selection;
+  color: #ffffff;
+}
+
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-detail,
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-description,
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-metadata {
+  background: transparent;
+  color: #ffffff;
+}
+
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-metadata {
+  padding: 0;
+}
+
+.cmux-ui-next .cmux-chrome {
+  background: @cmux_chrome;
+  border-left: 1px solid @cmux_separator;
+  padding: 8px;
+}
+
+.cmux-ui-next .cmux-split > separator {
+  background: @cmux_separator;
+  min-width: 2px;
+  min-height: 2px;
+}
+
+.cmux-ui-next .cmux-split > separator:hover {
+  background: @cmux_accent_hover;
+}
+
+.cmux-ui-next .cmux-surface {
+  background: @cmux_surface;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
+.cmux-ui-next .cmux-surface-focused {
+  box-shadow: inset 0 0 0 2px @cmux_accent;
+}
+
+.cmux-ui-next .cmux-pane-tabs {
+  min-height: 28px;
+  background: @cmux_surface_raised;
+  border-bottom: 1px solid @cmux_separator;
+}
+
+.cmux-ui-next .cmux-pane-tab {
+  min-height: 27px;
+  padding: 2px 7px;
+  border-radius: 0;
+}
+
+.cmux-ui-next .cmux-pane-tab-selected {
+  background: alpha(@cmux_text, 0.07);
+  border-bottom: 2px solid @cmux_accent;
+}
+
+.cmux-ui-next .cmux-pane-tab-tool {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 2px;
+}
+
+.cmux-ui-next .cmux-terminal-preview,
+.cmux-ui-next .cmux-surface-preview {
+  border-radius: 0;
+  padding: 7px 9px;
+}
+
+.cmux-ui-next .cmux-shell-overlay-panel {
+  margin-top: 12px;
+  min-width: 420px;
+  box-shadow: 0 12px 32px alpha(#000000, 0.45);
+}
+
+.cmux-ui-next .cmux-overflow-menu {
+  padding: 5px;
+}
+
+.cmux-ui-next .cmux-overflow-menu button {
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+}
+
+.cmux-ui-next .cmux-overflow-menu button:hover,
+.cmux-ui-next .cmux-overflow-menu button:focus {
+  background: alpha(@cmux_text, 0.09);
+}
