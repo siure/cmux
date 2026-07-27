@@ -576,6 +576,7 @@ fn create_gtk_window_host(
         &browser_controls,
         &diff_controls,
         &pending_browser_shortcut_actions,
+        window_id,
     );
     let snapshot_view = shell::build_snapshot_view(
         snapshot,
@@ -590,6 +591,7 @@ fn create_gtk_window_host(
         &canvas_occlusion_states,
         renderer_mode,
         ui_mode,
+        window_id,
     );
     if let Some(titlebar) = snapshot_view.titlebar.as_ref() {
         window.set_titlebar(Some(titlebar));
@@ -710,7 +712,8 @@ fn refresh_gtk_window_host(
     }
     let overlay_rebuild_key = shell::overlay_rebuild_key(snapshot);
     if ui_mode.is_next() && host.last_overlay_rebuild_key != overlay_rebuild_key {
-        shell::refresh_overlay(&host.snapshot_view, snapshot);
+        let window_id = model_window_id(row).unwrap_or_default();
+        shell::refresh_overlay(&host.snapshot_view, snapshot, app_state, window_id);
         host.last_overlay_rebuild_key = overlay_rebuild_key;
     }
     let focused = gtk::prelude::GtkWindowExt::focus(&host.window);
@@ -6206,7 +6209,7 @@ fn surface_area(
         if let Some(palette) = command_palette_panel(snapshot) {
             main.append(&palette);
         }
-        if let Some(shortcuts) = shortcut_help_panel(snapshot) {
+        if let Some(shortcuts) = shortcut_help_panel(snapshot, None) {
             main.append(&shortcuts);
         }
     }
@@ -8902,7 +8905,39 @@ fn command_palette_input_mode(mode: &str) -> bool {
     matches!(mode, "rename_input" | "workspace_description_input")
 }
 
-fn shortcut_help_panel(snapshot: &Value) -> Option<gtk::Box> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutHelpDismissInteraction {
+    CloseButton,
+    BackdropPress,
+    PanelPress,
+    PlainEscape,
+}
+
+fn handle_shortcut_help_dismissal(
+    app_state: &Arc<Mutex<AppState>>,
+    window_id: &str,
+    interaction: ShortcutHelpDismissInteraction,
+) -> bool {
+    if interaction == ShortcutHelpDismissInteraction::PanelPress {
+        return false;
+    }
+    call_app(
+        app_state,
+        "help.shortcuts.toggle",
+        json!({"window_id": window_id, "visible": false}),
+    )
+}
+
+fn shortcut_help_is_visible(app_state: &Arc<Mutex<AppState>>, window_id: &str) -> bool {
+    call_app_value(app_state, "help.shortcuts", json!({"window_id": window_id}))
+        .and_then(|value| value.get("visible").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn shortcut_help_panel(
+    snapshot: &Value,
+    dismissal: Option<(&Arc<Mutex<AppState>>, &str)>,
+) -> Option<gtk::Box> {
     let help = snapshot.get("shortcut_help")?;
     if !shortcut_help_visible(snapshot) {
         return None;
@@ -8910,10 +8945,34 @@ fn shortcut_help_panel(snapshot: &Value) -> Option<gtk::Box> {
 
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.add_css_class("cmux-shortcut-help");
-    panel.append(&label(
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let title = label(
         value_str(help, "title", "Keyboard Shortcuts"),
         "cmux-heading",
-    ));
+    );
+    title.set_hexpand(true);
+    title.set_xalign(0.0);
+    header.append(&title);
+    if let Some((app_state, window_id)) = dismissal {
+        let close_text = strings::text("shortcut_help.close");
+        let close = gtk::Button::builder()
+            .child(&gtk::Image::from_icon_name("window-close-symbolic"))
+            .build();
+        close.add_css_class("cmux-shortcut-help-close");
+        close.set_tooltip_text(Some(&close_text));
+        close.update_property(&[gtk::accessible::Property::Label(&close_text)]);
+        let app_state = Arc::clone(app_state);
+        let window_id = window_id.to_string();
+        close.connect_clicked(move |_| {
+            handle_shortcut_help_dismissal(
+                &app_state,
+                &window_id,
+                ShortcutHelpDismissInteraction::CloseButton,
+            );
+        });
+        header.append(&close);
+    }
+    panel.append(&header);
 
     for row_value in help
         .get("rows")
@@ -13930,6 +13989,7 @@ fn connect_terminal_keys(
     browser_controls: &BrowserSurfaceControlsCache,
     diff_controls: &DiffSurfaceControlsCache,
     pending_browser_shortcut_actions: &PendingBrowserShortcutActions,
+    window_id: &str,
 ) {
     let controller = gtk::EventControllerKey::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -13942,7 +14002,16 @@ fn connect_terminal_keys(
     let pending_browser_shortcut_actions = Rc::clone(pending_browser_shortcut_actions);
     let weak_window = window.downgrade();
     let browser_focus_escape_for_press = Rc::clone(&browser_focus_escape);
+    let window_id = window_id.to_string();
     controller.connect_key_pressed(move |_, keyval, keycode, modifiers| {
+        if is_plain_escape(keyval, modifiers) && shortcut_help_is_visible(&app_state, &window_id) {
+            handle_shortcut_help_dismissal(
+                &app_state,
+                &window_id,
+                ShortcutHelpDismissInteraction::PlainEscape,
+            );
+            return glib::Propagation::Stop;
+        }
         let focused_widget = weak_window
             .upgrade()
             .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
@@ -19537,7 +19606,7 @@ mod tests {
                 "rows": []
             }
         });
-        assert!(shortcut_help_panel(&hidden).is_none());
+        assert!(shortcut_help_panel(&hidden, None).is_none());
 
         let visible = json!({
             "shortcut_help": {

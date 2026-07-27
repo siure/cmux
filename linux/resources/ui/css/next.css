@@ -137,6 +137,17 @@
   box-shadow: 0 12px 32px alpha(#000000, 0.45);
 }
 
+.cmux-ui-next .cmux-shortcut-help-backdrop {
+  background: alpha(#000000, 0.42);
+}
+
+.cmux-ui-next .cmux-shortcut-help-close {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 3px;
+  border-radius: 5px;
+}
+
 .cmux-ui-next .cmux-overflow-menu {
   padding: 5px;
 }

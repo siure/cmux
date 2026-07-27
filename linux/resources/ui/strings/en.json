@@ -5,6 +5,7 @@
   "header.command_palette": "Command Palette",
   "header.shortcut_help": "Keyboard Shortcuts",
   "header.more_actions": "More Actions",
+  "shortcut_help.close": "Close keyboard shortcuts",
   "action.split_right": "Split Right",
   "action.split_down": "Split Down",
   "action.new_terminal": "New Terminal",
