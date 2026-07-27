@@ -19472,6 +19472,64 @@ mod tests {
     }
 
     #[test]
+    fn gtk_shortcut_help_dismissal_routes_all_interactions_through_model_action() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let window_id = call_app_value(&app_state, "help.shortcuts", json!({}))
+            .expect("shortcut help state")["window_id"]
+            .as_str()
+            .expect("window id")
+            .to_string();
+
+        for interaction in [
+            ShortcutHelpDismissInteraction::CloseButton,
+            ShortcutHelpDismissInteraction::BackdropPress,
+            ShortcutHelpDismissInteraction::PlainEscape,
+        ] {
+            assert!(call_app(
+                &app_state,
+                "help.shortcuts.toggle",
+                json!({"window_id": window_id, "visible": true})
+            ));
+            assert!(handle_shortcut_help_dismissal(
+                &app_state,
+                &window_id,
+                interaction
+            ));
+            assert_eq!(
+                call_app_value(
+                    &app_state,
+                    "help.shortcuts",
+                    json!({"window_id": window_id})
+                )
+                .expect("shortcut help state")["visible"],
+                false
+            );
+        }
+
+        assert!(call_app(
+            &app_state,
+            "help.shortcuts.toggle",
+            json!({"window_id": window_id, "visible": true})
+        ));
+        assert!(!handle_shortcut_help_dismissal(
+            &app_state,
+            &window_id,
+            ShortcutHelpDismissInteraction::PanelPress
+        ));
+        assert_eq!(
+            call_app_value(
+                &app_state,
+                "help.shortcuts",
+                json!({"window_id": window_id})
+            )
+            .expect("shortcut help state")["visible"],
+            true
+        );
+    }
+
+    #[test]
     fn gtk_shortcut_help_panel_requires_visible_state() {
         let hidden = json!({
             "shortcut_help": {
