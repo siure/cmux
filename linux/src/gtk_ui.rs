@@ -19761,9 +19761,10 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
     }
 
     #[test]
-    fn gtk_pane_tab_close_button_respects_count_and_hidden_setting() {
-        assert!(!pane_tab_close_button_visible(1, false));
+    fn gtk_pane_tab_close_button_remains_visible_for_single_tab_unless_hidden() {
+        assert!(pane_tab_close_button_visible(1, false));
         assert!(pane_tab_close_button_visible(2, false));
+        assert!(!pane_tab_close_button_visible(1, true));
         assert!(!pane_tab_close_button_visible(2, true));
     }
 
