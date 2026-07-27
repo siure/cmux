@@ -1964,12 +1964,10 @@ fn workspace_sidebar(
     app_state: &Arc<Mutex<AppState>>,
     ui_mode: GtkUiMode,
 ) -> gtk::Box {
+    let width = if ui_mode.is_next() { 228 } else { 260 };
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
     sidebar.add_css_class("cmux-sidebar");
-    sidebar.set_width_request(if ui_mode.is_next() { 228 } else { 260 });
-    if ui_mode.is_next() {
-        sidebar.set_hexpand(false);
-    }
+    sidebar.set_hexpand(true);
     sidebar.set_vexpand(true);
     let sidebar_settings = config::sidebar_settings();
     if sidebar_settings.match_terminal_background {
@@ -1987,7 +1985,7 @@ fn workspace_sidebar(
         })
     {
         append_custom_sidebar(&sidebar, custom_sidebar, app_state);
-        return sidebar;
+        return bounded_workspace_sidebar(sidebar, width);
     }
 
     let drag_state = Rc::new(RefCell::new(GtkWorkspaceDragState::default()));
@@ -2015,7 +2013,28 @@ fn workspace_sidebar(
         }
     }
 
-    sidebar
+    bounded_workspace_sidebar(sidebar, width)
+}
+
+fn bounded_workspace_sidebar(sidebar: gtk::Box, width: i32) -> gtk::Box {
+    let viewport = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .min_content_width(width)
+        .max_content_width(width)
+        .propagate_natural_width(false)
+        .propagate_natural_height(false)
+        .hexpand(true)
+        .vexpand(true)
+        .child(&sidebar)
+        .build();
+    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    frame.set_width_request(width);
+    frame.set_hexpand(false);
+    frame.set_vexpand(true);
+    frame.set_overflow(gtk::Overflow::Hidden);
+    frame.append(&viewport);
+    frame
 }
 
 fn custom_sidebar_header(custom_sidebar: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::Box {
@@ -2027,7 +2046,7 @@ fn custom_sidebar_header(custom_sidebar: &Value, app_state: &Arc<Mutex<AppState>
         .filter(|name| !name.is_empty())
         .unwrap_or("Workspaces");
     let heading = label(title, "cmux-heading");
-    heading.set_hexpand(true);
+    configure_workspace_bounded_label(&heading);
     header.append(&heading);
 
     if !custom_sidebar
@@ -3217,18 +3236,27 @@ fn workspace_sidebar_row(
     button.add_css_class("cmux-workspace-select");
     button.set_focusable(false);
     button.set_hexpand(true);
+    let click_modifiers = Rc::new(Cell::new(gdk::ModifierType::empty()));
     let gesture = gtk::GestureClick::new();
-    gesture.set_button(1);
+    gesture.set_button(gdk::BUTTON_PRIMARY);
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let pressed_modifiers = Rc::clone(&click_modifiers);
+    gesture.connect_pressed(move |gesture, _, _, _| {
+        pressed_modifiers.set(gesture.current_event_state());
+    });
+    button.add_controller(gesture);
     let target = row_model.target.clone();
     let click_app_state = Arc::clone(app_state);
-    gesture.connect_released(move |gesture, _, _, _| {
+    button.connect_clicked(move |_| {
         call_app(
             &click_app_state,
             "workspace.sidebar_select",
-            workspace_sidebar_select_params(&target, gesture.current_event_state()),
+            workspace_sidebar_select_params(
+                &target,
+                click_modifiers.replace(gdk::ModifierType::empty()),
+            ),
         );
     });
-    button.add_controller(gesture);
     attach_workspace_context_menu_for(&button, app_state, row_model);
     attach_workspace_drag_source(&button, row_model, drag_state, app_state);
     attach_workspace_drop_target(&button, row_model, drag_state);
@@ -3292,7 +3320,10 @@ fn workspace_group_sidebar_row(
     configure_workspace_title_label(&title, sidebar_settings.wrap_workspace_titles);
     row.append(&title);
     if !sidebar_settings.hide_all_details {
-        row.append(&label(&row_model.subtitle, "cmux-workspace-detail"));
+        row.append(&workspace_detail_label(
+            &row_model.subtitle,
+            "cmux-workspace-detail",
+        ));
     }
 
     let button = gtk::Button::builder().child(&row).build();
@@ -3332,7 +3363,14 @@ fn workspace_group_sidebar_row(
     row_container
 }
 
+fn configure_workspace_bounded_label(label: &gtk::Label) {
+    label.set_hexpand(true);
+    label.set_width_chars(1);
+    label.set_max_width_chars(1);
+}
+
 fn configure_workspace_title_label(title: &gtk::Label, wrap: bool) {
+    configure_workspace_bounded_label(title);
     title.set_wrap(wrap);
     title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     title.set_single_line_mode(!wrap);
@@ -3528,6 +3566,8 @@ fn append_workspace_sidebar_details(
         metadata.set_row_spacing(4);
         for entry in details.metadata {
             let pill = label(&entry.value, "cmux-workspace-metadata");
+            configure_workspace_bounded_label(&pill);
+            pill.set_ellipsize(gtk::pango::EllipsizeMode::End);
             if let Some(color) = entry
                 .color
                 .as_deref()
@@ -3558,6 +3598,7 @@ fn append_workspace_sidebar_details(
 
 fn workspace_detail_label(text: &str, css_class: &str) -> gtk::Label {
     let detail = label(text, css_class);
+    configure_workspace_bounded_label(&detail);
     detail.set_wrap(true);
     detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     detail.set_lines(2);
@@ -3573,6 +3614,8 @@ fn workspace_sidebar_link_label(
     app_state: &Arc<Mutex<AppState>>,
 ) -> gtk::Label {
     let link = label(text, "cmux-workspace-metadata");
+    configure_workspace_bounded_label(&link);
+    link.set_ellipsize(gtk::pango::EllipsizeMode::End);
     link.add_css_class("cmux-workspace-port");
     link.set_tooltip_text(Some(url));
     let url = url.to_string();
@@ -4130,7 +4173,7 @@ fn workspace_sidebar_model(
     group_target: Option<String>,
     available_group_targets: Vec<GtkWorkspaceGroupMenuTarget>,
 ) -> GtkWorkspaceSidebarRow {
-    let target = workspace_ref_or_id(workspace).unwrap_or_default();
+    let target = workspace_id_or_ref(workspace).unwrap_or_default();
     GtkWorkspaceSidebarRow {
         kind: GtkWorkspaceSidebarRowKind::Workspace,
         target,
@@ -4235,9 +4278,9 @@ fn workspace_group_sidebar_model(
     GtkWorkspaceSidebarRow {
         kind: GtkWorkspaceSidebarRowKind::GroupHeader,
         target: group_ref.clone(),
-        anchor_workspace_target: workspace_ref_or_id(anchor)
-            .or_else(|| value_string(group, "anchor_workspace_ref"))
+        anchor_workspace_target: workspace_id_or_ref(anchor)
             .or_else(|| value_string(group, "anchor_workspace_id"))
+            .or_else(|| value_string(group, "anchor_workspace_ref"))
             .unwrap_or_default(),
         group_target: None,
         available_group_targets: Vec::new(),
@@ -15702,14 +15745,6 @@ fn pad_to_cell(line: &mut String, target_col: usize) {
     }
 }
 
-fn workspace_ref_or_id(value: &Value) -> Option<String> {
-    value
-        .get("workspace_ref")
-        .or_else(|| value.get("workspace_id"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-}
-
 fn workspace_id_or_ref(value: &Value) -> Option<String> {
     value
         .get("workspace_id")
@@ -18105,7 +18140,7 @@ mod tests {
             "pinned": true,
             "unread": true
         });
-        let workspace_id = workspace_ref_or_id(&workspace).expect("workspace ref");
+        let workspace_id = workspace_id_or_ref(&workspace).expect("workspace ref");
         let rename_params =
             workspace_rename_params(&workspace_id, "  Ops Renamed  ").expect("rename params");
         assert_eq!(rename_params["workspace_id"], "workspace:2");
@@ -18379,7 +18414,7 @@ mod tests {
         assert_eq!(
             payload,
             GtkWorkspaceDragPayload::Workspace {
-                workspace_target: "workspace:3".to_string(),
+                workspace_target: "child-b".to_string(),
                 group_target: Some("workspace_group:1".to_string()),
                 pinned: false
             }
@@ -18388,19 +18423,19 @@ mod tests {
         let (method, params) =
             workspace_drop_request(&payload, child_a, 2.0, 40.0).expect("group reorder");
         assert_eq!(method, "workspace.reorder");
-        assert_eq!(params["workspace_id"], "workspace:3");
-        assert_eq!(params["before_workspace_id"], "workspace:2");
+        assert_eq!(params["workspace_id"], "child-b");
+        assert_eq!(params["before_workspace_id"], "child-a");
         let (_, params) =
             workspace_drop_request(&payload, child_a, 38.0, 40.0).expect("after reorder");
-        assert_eq!(params["workspace_id"], "workspace:3");
-        assert_eq!(params["after_workspace_id"], "workspace:2");
+        assert_eq!(params["workspace_id"], "child-b");
+        assert_eq!(params["after_workspace_id"], "child-a");
         assert!(workspace_drop_request(&payload, outside, 2.0, 40.0).is_none());
 
         let outside_payload = workspace_drag_payload(outside).expect("outside payload");
         let (method, params) =
             workspace_drop_request(&outside_payload, group, 20.0, 40.0).expect("group add");
         assert_eq!(method, "workspace.group.add");
-        assert_eq!(params["workspace_id"], "workspace:4");
+        assert_eq!(params["workspace_id"], "outside");
         assert_eq!(params["group_id"], "workspace_group:1");
         assert!(workspace_drop_request(&outside_payload, group, 2.0, 40.0).is_none());
 
@@ -18420,10 +18455,10 @@ mod tests {
             .expect("move group before workspace");
         assert_eq!(method, "workspace.group.move");
         assert_eq!(params["group_id"], "workspace_group:1");
-        assert_eq!(params["before_workspace_id"], "workspace:4");
+        assert_eq!(params["before_workspace_id"], "outside");
         let (_, params) = workspace_drop_request(&group_payload, outside, 38.0, 40.0)
             .expect("move group after workspace");
-        assert_eq!(params["after_workspace_id"], "workspace:4");
+        assert_eq!(params["after_workspace_id"], "outside");
         assert!(workspace_drop_request(&group_payload, child_a, 2.0, 40.0).is_none());
     }
 
@@ -18530,7 +18565,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert!(row.is_pinned);
-        assert_eq!(row.anchor_workspace_target, "workspace:1");
+        assert_eq!(row.anchor_workspace_target, "anchor");
         assert_eq!(row.configured_context_menu_entries.len(), 10);
 
         let GtkWorkspaceGroupConfiguredMenuEntry::Action(new_workspace) =
@@ -18578,7 +18613,7 @@ mod tests {
             let (method, params) = workspace_group_configured_action_request(row, action)
                 .expect("supported builtin request");
             assert_eq!(method, expected_method);
-            assert_eq!(params["workspace_id"], "workspace:1");
+            assert_eq!(params["workspace_id"], "anchor");
             assert_eq!(params["type"], expected_type);
             assert_eq!(params["focus"], true);
             if let Some(direction) = expected_direction {
@@ -18601,7 +18636,7 @@ mod tests {
         let (method, params) =
             workspace_group_configured_action_request(row, worktree).expect("worktree request");
         assert_eq!(method, "surface.create");
-        assert_eq!(params["workspace_id"], "workspace:1");
+        assert_eq!(params["workspace_id"], "anchor");
         assert_eq!(params["type"], "terminal");
         assert_eq!(params["title"], "New Worktree Here");
         assert_eq!(params["command"], "cmux workspace create");
@@ -18615,7 +18650,7 @@ mod tests {
         let (method, params) =
             workspace_group_configured_action_request(row, agent).expect("agent request");
         assert_eq!(method, "surface.create");
-        assert_eq!(params["workspace_id"], "workspace:1");
+        assert_eq!(params["workspace_id"], "anchor");
         assert_eq!(params["command"], "codex --sandbox read-only");
         assert_eq!(params["title"], "Codex");
 
@@ -18681,7 +18716,7 @@ mod tests {
         assert_eq!(rows[0].subtitle, "workspace_group:1 · 2 workspaces");
         assert!(rows[0].collapsed);
         assert!(rows[0].selected);
-        assert_eq!(rows[1].target, "workspace:3");
+        assert_eq!(rows[1].target, "outside");
     }
 
     #[test]
