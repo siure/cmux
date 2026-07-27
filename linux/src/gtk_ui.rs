@@ -18295,7 +18295,7 @@ mod tests {
         assert!(!rows[0].is_pinned);
         assert!(rows[0].configured_context_menu_entries.is_empty());
         assert_eq!(rows[1].kind, GtkWorkspaceSidebarRowKind::Workspace);
-        assert_eq!(rows[1].target, "workspace:2");
+        assert_eq!(rows[1].target, "child");
         assert_eq!(rows[1].title, "Child");
         assert!(rows[1].selected);
         assert_eq!(rows[1].tint_hex.as_deref(), Some("#1565C0"));
@@ -18309,7 +18309,7 @@ mod tests {
                 title: "Project".to_string(),
             }]
         );
-        assert_eq!(rows[2].target, "workspace:3");
+        assert_eq!(rows[2].target, "outside");
         assert!(!rows[2].indented);
         assert_eq!(rows[2].group_target, None);
         assert_eq!(rows[2].available_group_targets.len(), 1);
@@ -18922,9 +18922,9 @@ mod tests {
     #[test]
     fn gtk_workspace_sidebar_click_modifiers_map_to_selection_contract() {
         assert_eq!(
-            workspace_sidebar_select_params("workspace:2", gdk::ModifierType::empty()),
+            workspace_sidebar_select_params("workspace-uuid", gdk::ModifierType::empty()),
             json!({
-                "workspace_id": "workspace:2",
+                "workspace_id": "workspace-uuid",
                 "toggle": false,
                 "range": false,
                 "extend": false
@@ -18932,18 +18932,18 @@ mod tests {
         );
         assert_eq!(
             workspace_sidebar_select_params(
-                "workspace:2",
+                "workspace-uuid",
                 gdk::ModifierType::SUPER_MASK | gdk::ModifierType::SHIFT_MASK,
             ),
             json!({
-                "workspace_id": "workspace:2",
+                "workspace_id": "workspace-uuid",
                 "toggle": false,
                 "range": true,
                 "extend": true
             })
         );
         assert_eq!(
-            workspace_sidebar_select_params("workspace:2", gdk::ModifierType::CONTROL_MASK)
+            workspace_sidebar_select_params("workspace-uuid", gdk::ModifierType::CONTROL_MASK)
                 ["toggle"],
             true
         );

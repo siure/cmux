@@ -80,7 +80,7 @@ if [[ "${1:-}" == "--capture" ]]; then
   }
 
   rpc workspace.rename '{"workspace_id":"workspace:1","title":"GTK UI rewrite"}'
-  rpc sidebar.status.set '{"workspace_id":"workspace:1","key":"branch","value":"feat/linux-gtk-ui","priority":10}'
+  rpc sidebar.status.set '{"workspace_id":"workspace:1","key":"branch","value":"feat/linux-gtk-ui/sidebar-width-must-not-follow-an-extremely-long-path-derived-status-value-that-keeps-growing","priority":10}'
   rpc surface.send_text '{"surface_id":"surface:1","text":"echo PRIMARY-PANE; echo Linux-GTK-next-shell"}'
   rpc surface.send_key '{"surface_id":"surface:1","key":"enter"}'
   rpc surface.split '{"direction":"right"}'
