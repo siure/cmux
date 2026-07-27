@@ -47655,9 +47655,89 @@ mod shortcut_combo_tests {
         default_shortcut_combo, is_supported_shortcut_name, normalize_numbered_shortcut_binding,
         normalize_shortcut_combo, normalize_shortcut_strokes, normalize_shortcut_strokes_for,
         numbered_shortcut_digit, numbered_shortcut_target, shortcut_config_id,
-        shortcut_default_when, shortcut_name_for_config_id, valid_normalized_shortcut_combo,
+        shortcut_default_when, shortcut_dispatch_names, shortcut_name_for_config_id,
+        valid_normalized_shortcut_combo, ShortcutContext, ShortcutWhenClause,
     };
     use crate::config::ShortcutBinding;
+    use std::collections::HashMap;
+
+    fn default_shortcut_names() -> Vec<&'static str> {
+        shortcut_dispatch_names()
+            .iter()
+            .copied()
+            .chain(["show_hide_all_windows"])
+            .filter(|name| default_shortcut_combo(name).is_some())
+            .collect()
+    }
+
+    fn representative_focus_contexts() -> Vec<(&'static str, ShortcutContext)> {
+        [
+            ("terminal", false, false, false, false),
+            ("browser", true, false, false, false),
+            ("markdown", false, true, false, false),
+            ("sidebar", false, false, true, false),
+            ("terminal palette", false, false, false, true),
+            ("browser palette", true, false, false, true),
+            ("markdown palette", false, true, false, true),
+            ("sidebar palette", false, false, true, true),
+        ]
+        .into_iter()
+        .map(|(name, browser, markdown, sidebar, palette)| {
+            let mut context = ShortcutContext::default();
+            context.set_bool("browserFocus", browser);
+            context.set_bool("markdownFocus", markdown);
+            context.set_bool("sidebarFocus", sidebar);
+            context.set_bool("terminalFocus", !browser && !markdown && !sidebar);
+            context.set_bool("commandPaletteVisible", palette);
+            (name, context)
+        })
+        .collect()
+    }
+
+    fn default_shortcut_allowed(name: &str, context: &ShortcutContext) -> bool {
+        shortcut_default_when(name)
+            .and_then(ShortcutWhenClause::parse)
+            .map_or(true, |clause| clause.evaluate(context))
+    }
+
+    #[test]
+    fn linux_built_in_shortcuts_do_not_use_super_command_or_meta() {
+        for name in default_shortcut_names() {
+            let combo = default_shortcut_combo(name).expect("default shortcut");
+            let modifiers = combo
+                .split_whitespace()
+                .flat_map(|stroke| stroke.split('+').take_while(|part| part.len() > 1));
+            assert!(
+                modifiers
+                    .clone()
+                    .all(|modifier| !matches!(modifier, "cmd" | "command" | "super" | "meta")),
+                "Linux built-in shortcut {name} unexpectedly uses Super/Command/Meta: {combo}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_built_in_shortcuts_do_not_conflict_in_overlapping_focus_contexts() {
+        for (context_name, context) in representative_focus_contexts() {
+            let mut bindings: HashMap<String, Vec<&str>> = HashMap::new();
+            for name in default_shortcut_names() {
+                if default_shortcut_allowed(name, &context) {
+                    let combo = normalize_shortcut_combo(
+                        default_shortcut_combo(name).expect("default shortcut"),
+                    );
+                    bindings.entry(combo).or_default().push(name);
+                }
+            }
+            let conflicts = bindings
+                .into_iter()
+                .filter(|(_, names)| names.len() > 1)
+                .collect::<Vec<_>>();
+            assert!(
+                conflicts.is_empty(),
+                "Linux built-in shortcut conflicts in {context_name} context: {conflicts:?}"
+            );
+        }
+    }
 
     #[test]
     fn shortcut_combos_canonicalize_modifier_aliases_and_order() {
