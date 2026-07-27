@@ -9027,7 +9027,7 @@ fn pane_new_terminal_params(view: &Value) -> Option<Value> {
 }
 
 fn pane_tab_close_button_visible(tab_count: usize, hidden: bool) -> bool {
-    tab_count > 1 && !hidden
+    tab_count > 0 && !hidden
 }
 
 fn pane_tab_strip(view: &Value, app_state: &Arc<Mutex<AppState>>) -> Option<gtk::Box> {
