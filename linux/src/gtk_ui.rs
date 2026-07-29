@@ -17628,6 +17628,70 @@ mod tests {
         }
     }
 
+    fn assert_gtk_local_refresh_does_not_retain_window_hosts() {
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.tab-refresh-lifecycle")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let weak_hosts = Rc::downgrade(&hosts);
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        assert!(sync_gtk_window_hosts(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+            &local_refresh,
+        ));
+        let window = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .window
+            .clone();
+        let root = window.child().expect("GTK window content");
+        let add = gtk_tab_button_with_tooltip(&root, "New Terminal Tab").expect("add tab button");
+        window.destroy();
+        drop(root);
+        drop(window);
+        drop(local_refresh);
+        drop(hosts);
+
+        assert!(
+            weak_hosts.upgrade().is_none(),
+            "tab callbacks must not retain GTK window-host storage"
+        );
+        add.emit_clicked();
+        gtk_run_main_loop_for(Duration::from_millis(10));
+        assert!(
+            weak_hosts.upgrade().is_none(),
+            "an idle refresh must tolerate already-dropped window hosts"
+        );
+    }
+
     fn assert_gtk_selected_tab_changes_keep_main_tree_mounted_and_content_nonblank() {
         let application = gtk::Application::builder()
             .application_id("ai.manaflow.cmux.tests.tab-responsiveness")
@@ -20351,6 +20415,7 @@ mod tests {
         }
         assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position();
         assert_gtk_tab_create_focus_and_close_refresh_before_fallback_poll();
+        assert_gtk_local_refresh_does_not_retain_window_hosts();
         assert_gtk_selected_tab_changes_keep_main_tree_mounted_and_content_nonblank();
 
         let rows = (0..40)
