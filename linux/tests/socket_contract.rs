@@ -11530,7 +11530,7 @@ fn last_surface_close_sources_match_workspace_lifecycle_contract() {
     let shortcut_close = rpc(
         &server.socket,
         "debug.shortcut.simulate",
-        json!({"combo": "ctrl+w"}),
+        json!({"combo": "ctrl+alt+w"}),
     );
     assert_eq!(shortcut_close["source"], "shortcut");
     assert_eq!(shortcut_close["workspace_closed"], true);
@@ -11567,7 +11567,7 @@ fn last_surface_close_sources_match_workspace_lifecycle_contract() {
     let kept_close = rpc(
         &server.socket,
         "debug.shortcut.simulate",
-        json!({"combo": "ctrl+w"}),
+        json!({"combo": "ctrl+alt+w"}),
     );
     assert_eq!(kept_close["source"], "shortcut");
     assert_eq!(kept_close["workspace_closed"], false);
@@ -23931,7 +23931,7 @@ fn canvas_shortcuts_and_palette_share_the_user_action_dispatcher() {
     let toggled = rpc(
         &server.socket,
         "debug.shortcut.simulate",
-        json!({"combo": "ctrl+c"}),
+        json!({"combo": "ctrl+alt+shift+c"}),
     );
     assert_eq!(toggled["mode"], "canvas");
     assert_eq!(toggled["applied"], true);
@@ -30784,7 +30784,7 @@ fn transformed_ctrl_shift_defaults_replace_conflicting_terminal_aliases() {
     let split = rpc(
         &server.socket,
         "debug.shortcut.simulate",
-        json!({"combo": "ctrl+d"}),
+        json!({"combo": "ctrl+alt+shift+right"}),
     );
     assert!(split["pane_id"].is_string(), "response was {split}");
     let terminal = rpc(

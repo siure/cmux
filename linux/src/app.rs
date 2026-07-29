@@ -32491,11 +32491,7 @@ impl AppState {
         normalized_combo: &str,
         context: &ShortcutContext,
     ) -> Option<MatchedShortcut> {
-        if !self.shortcut_action_allowed(name, context)
-            || (context.bool("terminalFocus")
-                && self.shortcut_uses_default(name)
-                && terminal_control_sequence_combo(normalized_combo))
-        {
+        if !self.shortcut_action_allowed(name, context) {
             return None;
         }
         if is_numbered_shortcut_name(name) {
@@ -46970,7 +46966,7 @@ fn default_shortcut_combo(name: &str) -> Option<&'static str> {
         "close_other_tabs_in_pane" => Some("ctrl+alt+t"),
         "toggle_focused_workspace_group_collapsed" => Some("ctrl+."),
         "group_selected_workspaces" => Some("ctrl+shift+g"),
-        "split_right" => Some("ctrl+d"),
+        "split_right" => Some("ctrl+alt+shift+right"),
         "split_down" => Some("ctrl+shift+d"),
         "split_browser_right" => Some("ctrl+alt+d"),
         "split_browser_down" => Some("ctrl+alt+shift+d"),
@@ -46986,14 +46982,14 @@ fn default_shortcut_combo(name: &str) -> Option<&'static str> {
         "previous_surface" => Some("ctrl+shift+["),
         "select_surface_by_number" => Some("ctrl+1"),
         "select_workspace_by_number" => Some("ctrl+alt+shift+1"),
-        "toggle_canvas_layout" => Some("ctrl+c"),
+        "toggle_canvas_layout" => Some("ctrl+alt+shift+c"),
         "canvas_reveal_focused_pane" => Some("ctrl+alt+shift+r"),
         "canvas_overview" => Some("ctrl+alt+shift+o"),
         "canvas_zoom_in" => Some("ctrl+alt+="),
         "canvas_zoom_out" => Some("ctrl+alt+-"),
         "canvas_zoom_reset" => Some("ctrl+alt+0"),
         "canvas_tidy" => Some("ctrl+alt+shift+t"),
-        "close_surface" => Some("ctrl+w"),
+        "close_surface" => Some("ctrl+alt+w"),
         "open_browser" => Some("ctrl+shift+l"),
         "focus_browser_address_bar" => Some("ctrl+l"),
         "browser_back" => Some("ctrl+["),
@@ -47543,15 +47539,6 @@ fn numbered_shortcut_target<T>(values: &[T], digit: u8) -> Option<&T> {
     } else {
         values.get(digit.saturating_sub(1) as usize)
     }
-}
-
-fn terminal_control_sequence_combo(combo: &str) -> bool {
-    let Some(key) = combo.strip_prefix("ctrl+") else {
-        return false;
-    };
-    !key.contains('+')
-        && (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic()
-            || matches!(key, "space" | "@" | "[" | "\\" | "]" | "^" | "_" | "?"))
 }
 
 pub(crate) fn shifted_shortcut_base_key(key: &str) -> Option<&'static str> {
