@@ -18823,6 +18823,58 @@ mod tests {
     }
 
     #[test]
+    fn gtk_shifted_punctuation_events_match_configured_shortcut_keys() {
+        let ctrl_alt_shift = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK;
+        let ctrl_shift = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+
+        for (keyval, expected) in [
+            (gdk::Key::plus, "ctrl+opt+shift+="),
+            (gdk::Key::braceleft, "ctrl+opt+shift+["),
+            (gdk::Key::braceright, "ctrl+opt+shift+]"),
+        ] {
+            assert_eq!(
+                app_shortcut_combo_for_key(keyval, ctrl_alt_shift).as_deref(),
+                Some(expected)
+            );
+        }
+        for (keyval, expected) in [
+            (gdk::Key::less, "ctrl+shift+,"),
+            (gdk::Key::braceleft, "ctrl+shift+["),
+            (gdk::Key::braceright, "ctrl+shift+]"),
+        ] {
+            assert_eq!(
+                app_shortcut_combo_for_key(keyval, ctrl_shift).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn gtk_shifted_punctuation_canonicalizes_to_base_keys() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+        for (keyval, expected_key) in [
+            (gdk::Key::plus, "="),
+            (gdk::Key::braceleft, "["),
+            (gdk::Key::braceright, "]"),
+            (gdk::Key::less, ","),
+            (gdk::Key::greater, "."),
+            (gdk::Key::question, "/"),
+            (gdk::Key::colon, ";"),
+            (gdk::Key::quotedbl, "'"),
+            (gdk::Key::bar, "\\"),
+            (gdk::Key::underscore, "-"),
+            (gdk::Key::asciitilde, "`"),
+        ] {
+            assert_eq!(
+                app_shortcut_combo_for_key(keyval, modifiers).as_deref(),
+                Some(format!("ctrl+shift+{expected_key}").as_str())
+            );
+        }
+    }
+
+    #[test]
     fn gtk_omnibar_preserves_directional_pane_shortcuts() {
         assert_eq!(
             omnibar_pane_focus_combo(
