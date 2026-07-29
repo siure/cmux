@@ -14520,14 +14520,6 @@ fn connect_terminal_keys(
                     .is_some_and(|view| widget_is_or_descendant_of(focused, view.widget()))
             })
         });
-        if let Some(widget) = focused_ghostty_widget
-            .as_ref()
-            .filter(|widget| widget.copy_mode_active())
-        {
-            if widget.handle_keyboard_copy_mode_key(keyval, keycode, modifiers) {
-                return glib::Propagation::Stop;
-            }
-        }
         let text_view_focused = focused_widget
             .as_ref()
             .is_some_and(|widget| widget.is::<gtk::TextView>());
@@ -14626,6 +14618,14 @@ fn connect_terminal_keys(
                     &browser_controls,
                     previous_model_surface_id.as_deref(),
                 );
+                return glib::Propagation::Stop;
+            }
+        }
+        if let Some(widget) = focused_ghostty_widget
+            .as_ref()
+            .filter(|widget| widget.copy_mode_active())
+        {
+            if widget.handle_keyboard_copy_mode_key(keyval, keycode, modifiers) {
                 return glib::Propagation::Stop;
             }
         }

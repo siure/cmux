@@ -13902,7 +13902,7 @@ fn print_welcome() {
     println!("  Ctrl+P                 Go to workspace");
     println!("  Ctrl+B                 Toggle Left Sidebar");
     println!("  Ctrl+Alt+B             Toggle Right Sidebar");
-    println!("  Ctrl+D                 Split right");
+    println!("  Ctrl+Alt+Shift+Right   Split right");
     println!("  Ctrl+Shift+D           Split down");
     println!("  Ctrl+Shift+P           Command palette");
     println!("  Ctrl+Shift+R           Rename workspace");
