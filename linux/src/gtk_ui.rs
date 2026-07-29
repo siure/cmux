@@ -19623,6 +19623,49 @@ mod tests {
     }
 
     #[test]
+    fn gtk_shortcut_help_rows_use_bounded_vertical_scrolling() {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let rows = (0..40)
+            .map(|index| {
+                json!({
+                    "title": format!("Shortcut {index}"),
+                    "shortcut_label": format!("Super+{index}"),
+                    "description": format!("Description {index}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let snapshot = json!({
+            "shortcut_help": {
+                "visible": true,
+                "title": "Keyboard Shortcuts",
+                "rows": rows
+            }
+        });
+        let panel = shortcut_help_panel(&snapshot, None).expect("shortcut help panel");
+        let panel_widget = panel.clone().upcast::<gtk::Widget>();
+        let header = widget_descendant_with_css_class(&panel_widget, "cmux-shortcut-help-header")
+            .expect("fixed shortcut help header");
+        let scroller = widget_descendant_with_css_class(&panel_widget, "cmux-shortcut-help-scroll")
+            .expect("shortcut help row scroller")
+            .downcast::<gtk::ScrolledWindow>()
+            .expect("shortcut help rows use a scrolled window");
+        let rows = widget_descendant_with_css_class(&panel_widget, "cmux-shortcut-help-rows")
+            .expect("shortcut help rows container");
+
+        assert_eq!(header.parent().as_ref(), Some(&panel_widget));
+        assert_eq!(scroller.parent().as_ref(), Some(&panel_widget));
+        assert!(widget_is_or_descendant_of(&rows, scroller.upcast_ref()));
+        assert_eq!(scroller.hscrollbar_policy(), gtk::PolicyType::Never);
+        assert_eq!(scroller.vscrollbar_policy(), gtk::PolicyType::Automatic);
+        assert!(scroller.vexpands());
+        assert!(scroller.propagates_natural_height());
+        assert!(scroller.max_content_height() > 0);
+    }
+
+    #[test]
     fn gtk_shortcut_hints_use_linux_modifier_labels() {
         assert_eq!(linux_shortcut_hint_label("⌘T"), "Super+T");
         assert_eq!(linux_shortcut_hint_label("⇧⌘P"), "Shift+Super+P");
