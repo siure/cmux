@@ -17009,6 +17009,197 @@ mod tests {
         );
     }
 
+    fn gtk_tab_test_snapshot(selected_surface: &str, preview: &str) -> Value {
+        let tabs = ["surface-a", "surface-b"]
+            .into_iter()
+            .map(|surface_id| {
+                json!({
+                    "surface_id": surface_id,
+                    "title": if surface_id == "surface-a" { "Alpha" } else { "Beta" },
+                    "kind": "terminal",
+                    "selected": surface_id == selected_surface,
+                    "pinned": false,
+                    "unread": false
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "focused": {
+                "workspace_id": "workspace-a",
+                "pane_id": "pane-a",
+                "surface_id": selected_surface
+            },
+            "workspaces": [{
+                "workspace_id": "workspace-a",
+                "workspace_ref": "workspace:1",
+                "title": "Workspace",
+                "selected": true,
+                "pinned": false
+            }],
+            "surface_views": [{
+                "surface_id": selected_surface,
+                "surface_ref": selected_surface,
+                "workspace_id": "workspace-a",
+                "pane_id": "pane-a",
+                "kind": "terminal",
+                "title": if selected_surface == "surface-a" { "Alpha" } else { "Beta" },
+                "visible": true,
+                "focused": true,
+                "frame": {"x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0},
+                "tabs": tabs,
+                "preview": preview
+            }],
+            "window_surfaces": [{
+                "surface_id": "surface-a",
+                "type": "terminal"
+            }, {
+                "surface_id": "surface-b",
+                "type": "terminal"
+            }],
+            "canvas": {"mode": "splits", "panes": []},
+            "right_sidebar": {"visible": false, "mode": "files"},
+            "config": {"reload_generation": 0, "app": {}}
+        })
+    }
+
+    fn gtk_tab_button_with_tooltip(root: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
+        if let Ok(button) = root.clone().downcast::<gtk::Button>() {
+            if button.tooltip_text().as_deref() == Some(tooltip) {
+                return Some(button);
+            }
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = gtk_tab_button_with_tooltip(&widget, tooltip) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    #[test]
+    fn gtk_pane_tab_reconciliation_preserves_existing_widgets_and_scroll_position() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let first = gtk_tab_test_snapshot("surface-a", "alpha");
+        let first_view = &first["surface_views"][0];
+        let strip = pane_tab_strip(first_view, &app_state).expect("pane tab strip");
+        let strip_widget = strip.clone().upcast::<gtk::Widget>();
+        let scroller = widget_descendant_with_css_class(&strip_widget, "cmux-pane-tab-scroll")
+            .expect("tab scroller")
+            .downcast::<gtk::ScrolledWindow>()
+            .expect("tab scroller type");
+        let alpha = gtk_tab_button_with_tooltip(&strip_widget, "Alpha").expect("alpha tab");
+        let adjustment = scroller.hadjustment();
+        adjustment.configure(24.0, 0.0, 200.0, 1.0, 10.0, 50.0);
+
+        let second = gtk_tab_test_snapshot("surface-b", "beta");
+        populate_pane_tab_strip(&strip, &second["surface_views"][0], &app_state);
+
+        let current_scroller =
+            widget_descendant_with_css_class(&strip_widget, "cmux-pane-tab-scroll")
+                .expect("current tab scroller")
+                .downcast::<gtk::ScrolledWindow>()
+                .expect("current tab scroller type");
+        let current_alpha =
+            gtk_tab_button_with_tooltip(&strip_widget, "Alpha").expect("current alpha tab");
+        assert_eq!(
+            scroller, current_scroller,
+            "tab scroller must remain mounted"
+        );
+        assert_eq!(
+            alpha, current_alpha,
+            "unchanged tabs must retain their widgets"
+        );
+        assert_eq!(current_scroller.hadjustment(), adjustment);
+        assert!((current_scroller.hadjustment().value() - 24.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn gtk_selected_tab_changes_keep_main_tree_mounted_and_content_nonblank() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.tab-responsiveness")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let row = json!({
+            "window_id": "window-a",
+            "title": "Tab responsiveness",
+            "selected": true,
+            "fullscreen": false
+        });
+        let first = gtk_tab_test_snapshot("surface-a", "alpha content");
+        let mut host = create_gtk_window_host(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            "window-a",
+            &row,
+            &first,
+        );
+        let mounted_main = host
+            .snapshot_view
+            .main_slot
+            .first_child()
+            .expect("mounted main tree");
+
+        let second = gtk_tab_test_snapshot("surface-b", "beta content");
+        refresh_gtk_window_host(
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &second,
+        );
+        assert_eq!(
+            host.snapshot_view.main_slot.first_child().as_ref(),
+            Some(&mounted_main),
+            "selecting a tab must not replace the whole main tree"
+        );
+        let preview =
+            widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+                .expect("selected tab content")
+                .downcast::<gtk::Label>()
+                .expect("GTK preview label");
+        assert_eq!(preview.text(), "beta content");
+
+        refresh_gtk_window_host(
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &first,
+        );
+        assert_eq!(
+            host.snapshot_view.main_slot.first_child().as_ref(),
+            Some(&mounted_main),
+            "repeated tab changes must keep the main tree mounted"
+        );
+        let preview =
+            widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+                .expect("restored tab content")
+                .downcast::<gtk::Label>()
+                .expect("GTK preview label");
+        assert_eq!(preview.text(), "alpha content");
+        host.window.destroy();
+    }
+
     #[test]
     fn gtk_pane_tabs_extract_state_and_same_pane_create_params() {
         let view = json!({
