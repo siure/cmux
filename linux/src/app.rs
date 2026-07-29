@@ -47541,7 +47541,28 @@ fn numbered_shortcut_target<T>(values: &[T], digit: u8) -> Option<&T> {
     }
 }
 
+pub(crate) fn shifted_shortcut_base_key(key: &str) -> Option<&'static str> {
+    match key {
+        "+" => Some("="),
+        "{" => Some("["),
+        "}" => Some("]"),
+        "<" => Some(","),
+        ">" => Some("."),
+        "?" => Some("/"),
+        ":" => Some(";"),
+        "\"" => Some("'"),
+        "|" => Some("\\"),
+        "_" => Some("-"),
+        "~" => Some("`"),
+        _ => None,
+    }
+}
+
 fn normalize_shortcut_combo(combo: &str) -> String {
+    let trimmed = combo.trim();
+    let (combo, plus_key) = trimmed
+        .strip_suffix("++")
+        .map_or((trimmed, false), |prefix| (prefix, true));
     let mut cmd = false;
     let mut ctrl = false;
     let mut opt = false;
@@ -47560,6 +47581,16 @@ fn normalize_shortcut_combo(combo: &str) -> String {
             "arrowdown" => keys.push("down".to_string()),
             "" => {}
             other => keys.push(other.to_string()),
+        }
+    }
+    if plus_key {
+        keys.push("+".to_string());
+    }
+    if shift {
+        for key in &mut keys {
+            if let Some(base) = shifted_shortcut_base_key(key) {
+                *key = base.to_string();
+            }
         }
     }
     let mut parts = Vec::new();
@@ -47627,11 +47658,12 @@ fn normalize_shortcut_strokes_with_bare(
 #[cfg(test)]
 mod shortcut_combo_tests {
     use super::{
-        default_shortcut_combo, is_supported_shortcut_name, normalize_numbered_shortcut_binding,
-        normalize_shortcut_combo, normalize_shortcut_strokes, normalize_shortcut_strokes_for,
-        numbered_shortcut_digit, numbered_shortcut_target, shortcut_config_id,
-        shortcut_default_when, shortcut_dispatch_names, shortcut_name_for_config_id,
-        valid_normalized_shortcut_combo, ShortcutContext, ShortcutWhenClause,
+        default_shortcut_combo, is_supported_shortcut_name, linux_shortcut_label_from_hint,
+        normalize_numbered_shortcut_binding, normalize_shortcut_combo, normalize_shortcut_strokes,
+        normalize_shortcut_strokes_for, numbered_shortcut_digit, numbered_shortcut_target,
+        shortcut_config_id, shortcut_default_when, shortcut_dispatch_names,
+        shortcut_hint_from_combo, shortcut_name_for_config_id, valid_normalized_shortcut_combo,
+        ShortcutContext, ShortcutWhenClause,
     };
     use crate::config::ShortcutBinding;
     use std::collections::HashMap;
@@ -47748,6 +47780,32 @@ mod shortcut_combo_tests {
             "cmd+ctrl+left"
         );
         assert_eq!(normalize_shortcut_combo("command+return"), "cmd+enter");
+        for (shifted, base) in [
+            ("ctrl+alt+shift++", "ctrl+alt+shift+="),
+            ("super+shift+{", "super+shift+["),
+            ("super+shift+}", "super+shift+]"),
+            ("ctrl+shift+<", "ctrl+shift+,"),
+            ("ctrl+shift+>", "ctrl+shift+."),
+            ("ctrl+shift+?", "ctrl+shift+/"),
+            ("ctrl+shift+:", "ctrl+shift+;"),
+            ("ctrl+shift+\"", "ctrl+shift+'"),
+            ("ctrl+shift+|", "ctrl+shift+\\"),
+            ("ctrl+shift+_", "ctrl+shift+-"),
+            ("ctrl+shift+~", "ctrl+shift+`"),
+        ] {
+            assert_eq!(
+                normalize_shortcut_combo(shifted),
+                normalize_shortcut_combo(base)
+            );
+            assert_eq!(
+                normalize_shortcut_strokes(shifted),
+                normalize_shortcut_strokes(base)
+            );
+        }
+        let normalized = normalize_shortcut_combo("ctrl+alt+shift++");
+        let hint = shortcut_hint_from_combo(&normalized);
+        assert_eq!(hint, "⇧⌃⌥=");
+        assert_eq!(linux_shortcut_label_from_hint(&hint), "Shift+Ctrl+Alt+=");
     }
 
     #[test]

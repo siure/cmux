@@ -1,5 +1,5 @@
 use crate::{
-    app::{current_unix_millis, AppState, GlobalWindowCommand},
+    app::{current_unix_millis, shifted_shortcut_base_key, AppState, GlobalWindowCommand},
     browser_omnibar, config, diff_viewer,
     global_shortcuts::GlobalShortcutManager,
     renderer, ui,
@@ -15194,6 +15194,8 @@ fn app_shortcut_combo_for_key(keyval: gdk::Key, modifiers: gdk::ModifierType) ->
     if modifiers.contains(gdk::ModifierType::SHIFT_MASK) {
         if let Some(digit) = shifted_number_key_digit(&key) {
             key = digit.to_string();
+        } else if let Some(base) = shifted_shortcut_base_key(&key) {
+            key = base.to_string();
         }
     }
     let mut parts = Vec::new();
@@ -18769,7 +18771,7 @@ mod tests {
                 gdk::ModifierType::SUPER_MASK | gdk::ModifierType::SHIFT_MASK
             )
             .as_deref(),
-            Some("cmd+shift+{")
+            Some("cmd+shift+[")
         );
         let right_brace = gdk::Key::from_name("braceright").expect("right brace key");
         assert_eq!(
@@ -18778,7 +18780,7 @@ mod tests {
                 gdk::ModifierType::SUPER_MASK | gdk::ModifierType::SHIFT_MASK
             )
             .as_deref(),
-            Some("cmd+shift+}")
+            Some("cmd+shift+]")
         );
         let exclamation = gdk::Key::from_name("exclam").expect("exclamation key");
         assert_eq!(

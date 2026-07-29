@@ -14207,6 +14207,39 @@ fn super_shortcut_defaults_are_unhandled_but_explicit_overrides_dispatch_and_res
 }
 
 #[test]
+fn shifted_symbol_shortcut_overrides_match_base_key_events() {
+    let server = start_server();
+
+    let plus = rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "toggle_sidebar", "combo": "ctrl+shift++"}),
+    );
+    assert_eq!(plus["strokes"], json!(["ctrl+shift+="]));
+    assert_eq!(plus["shortcut_label"], "Shift+Ctrl+=");
+    let plus_event = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+shift+="}),
+    );
+    assert_eq!(plus_event["visible"], false);
+
+    let brace = rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "toggle_sidebar", "combo": "super+shift+{"}),
+    );
+    assert_eq!(brace["strokes"], json!(["cmd+shift+["]));
+    assert_eq!(brace["shortcut_label"], "Shift+Super+[");
+    let brace_event = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "super+shift+["}),
+    );
+    assert_eq!(brace_event["visible"], true);
+}
+
+#[test]
 fn browser_shortcuts_use_stable_actions_and_route_focused_browser_operations() {
     let server = start_server();
     let settings = rpc(&server.socket, "settings.shortcuts", json!({}));
