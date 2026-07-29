@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
@@ -238,7 +238,7 @@ struct GtkLocalRefresh {
     app_state: Arc<Mutex<AppState>>,
     renderer_mode: GtkRendererMode,
     ui_mode: GtkUiMode,
-    hosts: GtkWindowHosts,
+    hosts: Weak<RefCell<HashMap<String, GtkWindowHost>>>,
     desktop_notifications: Rc<RefCell<Option<DesktopNotificationTracker>>>,
     presented_model_window: Rc<RefCell<Option<String>>>,
     global_visibility: Rc<RefCell<GtkGlobalVisibilityState>>,
@@ -262,7 +262,7 @@ impl GtkLocalRefresh {
             app_state: Arc::clone(app_state),
             renderer_mode,
             ui_mode,
-            hosts: Rc::clone(hosts),
+            hosts: Rc::downgrade(hosts),
             desktop_notifications: Rc::clone(desktop_notifications),
             presented_model_window: Rc::clone(presented_model_window),
             global_visibility: Rc::clone(global_visibility),
@@ -277,12 +277,15 @@ impl GtkLocalRefresh {
         let refresh = self.clone();
         glib::idle_add_local_once(move || {
             refresh.pending.set(false);
+            let Some(hosts) = refresh.hosts.upgrade() else {
+                return;
+            };
             sync_gtk_window_hosts(
                 &refresh.application,
                 &refresh.app_state,
                 refresh.renderer_mode,
                 refresh.ui_mode,
-                &refresh.hosts,
+                &hosts,
                 &refresh.desktop_notifications,
                 &refresh.presented_model_window,
                 &refresh.global_visibility,
