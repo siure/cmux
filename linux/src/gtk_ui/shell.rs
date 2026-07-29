@@ -225,7 +225,7 @@ pub(super) fn refresh_overlay(
     if let Some(shortcuts) = shortcut_help_panel(snapshot, Some((app_state, window_id))) {
         shortcuts.add_css_class("cmux-shell-overlay-panel");
         shortcuts.set_halign(gtk::Align::Center);
-        shortcuts.set_valign(gtk::Align::Center);
+        configure_shortcut_help_overlay_panel(&shortcuts);
 
         let backdrop = gtk::Box::new(gtk::Orientation::Vertical, 0);
         backdrop.add_css_class("cmux-shortcut-help-backdrop");

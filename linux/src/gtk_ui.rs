@@ -8934,6 +8934,13 @@ fn shortcut_help_is_visible(app_state: &Arc<Mutex<AppState>>, window_id: &str) -
         .unwrap_or(false)
 }
 
+fn configure_shortcut_help_overlay_panel(panel: &gtk::Box) {
+    panel.set_valign(gtk::Align::Fill);
+    panel.set_vexpand(true);
+    panel.set_margin_top(24);
+    panel.set_margin_bottom(24);
+}
+
 fn shortcut_help_panel(
     snapshot: &Value,
     dismissal: Option<(&Arc<Mutex<AppState>>, &str)>,
@@ -8946,6 +8953,7 @@ fn shortcut_help_panel(
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.add_css_class("cmux-shortcut-help");
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    header.add_css_class("cmux-shortcut-help-header");
     let title = label(
         value_str(help, "title", "Keyboard Shortcuts"),
         "cmux-heading",
@@ -8974,6 +8982,8 @@ fn shortcut_help_panel(
     }
     panel.append(&header);
 
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    rows.add_css_class("cmux-shortcut-help-rows");
     for row_value in help
         .get("rows")
         .and_then(Value::as_array)
@@ -8995,8 +9005,21 @@ fn shortcut_help_panel(
             row.append(&label(description, "cmux-muted"));
         }
         row.set_hexpand(true);
-        panel.append(&row);
+        rows.append(&row);
     }
+
+    let scroll = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .min_content_height(120)
+        .max_content_height(520)
+        .propagate_natural_height(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .child(&rows)
+        .build();
+    scroll.add_css_class("cmux-shortcut-help-scroll");
+    panel.append(&scroll);
 
     Some(panel)
 }
@@ -19663,6 +19686,37 @@ mod tests {
         assert!(scroller.vexpands());
         assert!(scroller.propagates_natural_height());
         assert!(scroller.max_content_height() > 0);
+
+        configure_shortcut_help_overlay_panel(&panel);
+        let backdrop = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        backdrop.set_size_request(480, 240);
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&backdrop));
+        overlay.add_overlay(&panel);
+        overlay.set_measure_overlay(&panel, false);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(240)
+            .resizable(false)
+            .child(&overlay)
+            .build();
+        window.present();
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit_loop = main_loop.clone();
+        glib::timeout_add_local_once(Duration::from_millis(100), move || quit_loop.quit());
+        main_loop.run();
+        let adjustment = scroller.vadjustment();
+        assert!(
+            adjustment.upper() > adjustment.page_size(),
+            "scroll range upper={} page_size={} window_height={}",
+            adjustment.upper(),
+            adjustment.page_size(),
+            window.height()
+        );
+        let bottom = adjustment.upper() - adjustment.page_size();
+        adjustment.set_value(bottom);
+        assert!((adjustment.value() - bottom).abs() < f64::EPSILON);
+        window.close();
     }
 
     #[test]
