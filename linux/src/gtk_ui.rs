@@ -15217,14 +15217,7 @@ fn omnibar_pane_focus_combo(keyval: gdk::Key, modifiers: gdk::ModifierType) -> O
     let combo = app_shortcut_combo_for_key(keyval, modifiers)?;
     matches!(
         combo.as_str(),
-        "ctrl+shift+h"
-            | "ctrl+shift+j"
-            | "ctrl+shift+k"
-            | "ctrl+shift+l"
-            | "cmd+ctrl+h"
-            | "cmd+ctrl+j"
-            | "cmd+ctrl+k"
-            | "cmd+ctrl+l"
+        "ctrl+opt+left" | "ctrl+opt+right" | "ctrl+opt+up" | "ctrl+opt+down"
     )
     .then_some(combo)
 }
@@ -18831,17 +18824,16 @@ mod tests {
 
     #[test]
     fn gtk_omnibar_preserves_directional_pane_shortcuts() {
-        let h = gdk::Key::from_name("H").expect("shifted h key");
         assert_eq!(
             omnibar_pane_focus_combo(
-                h,
-                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+                gdk::Key::Left,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK
             )
             .as_deref(),
-            Some("ctrl+shift+h")
+            Some("ctrl+opt+left")
         );
         assert_eq!(
-            omnibar_pane_focus_combo(h, gdk::ModifierType::CONTROL_MASK),
+            omnibar_pane_focus_combo(gdk::Key::Left, gdk::ModifierType::CONTROL_MASK),
             None
         );
     }

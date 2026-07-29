@@ -619,15 +619,19 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   toolbar and shortcut actions for new workspaces, splits,
   terminals, browsers, and palette toggling, and forwards text, navigation, and
   Ctrl-letter key input to the focused PTY or command palette as appropriate. It
-  accepts Linux `Super`/`Meta` shortcut aliases while preserving the
-  macOS-compatible `cmd` socket/debug spelling, and renders shortcut hints with
-  Linux modifier labels in GTK, palette output, and plain text shortcut-help
-  rows. Runtime shortcut overrides drive the same dispatcher as GTK key input:
-  remapping disables the old default, clearing a binding lets the key continue
-  to the terminal, resetting restores the default, and modifier aliases/order
-  are canonicalized. Linux-only directional aliases remain active only while
-  their action uses its default binding. Layered `shortcuts.bindings` values
-  load from `cmux.json` at startup and on config reload; the native Keyboard
+  uses Ctrl-based built-in shortcuts with no Super/Meta defaults. Explicit
+  overrides still accept `Super`, `Meta`, and macOS-compatible `cmd` spellings
+  and render them with Linux modifier labels in GTK, palette output, and plain
+  text shortcut-help rows. Runtime shortcut overrides drive the same dispatcher
+  as GTK key input: remapping disables the old default, clearing a binding lets
+  the key continue to the terminal, resetting restores the Linux default, and
+  modifier aliases/order are canonicalized. Mechanical conversion conflicts
+  keep the common/contextual action direct; less-common actions move to
+  `Ctrl+Alt+Shift` (`closeWindow`, split equalize, focus history, numbered
+  workspaces, Canvas reveal/overview/tidy, and React Grab). `toggleFullScreen`
+  and `openDiffViewer` are unbound because their relocation keys are already
+  Hide Find and Split Browser Down. Layered `shortcuts.bindings` values load
+  from `cmux.json` at startup and on config reload; the native Keyboard
   Shortcuts settings surface edits, unbinds, and resets the primary file using
   the shared macOS action IDs. Two-stroke arrays and recorder object forms use
   the macOS immediate-next-key chord contract, including bare second strokes
@@ -653,9 +657,9 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   prefers the XDG GlobalShortcuts portal, falls back to passive X11 grabs, and
   rebinds both actions after a config reload without restarting the app. The
   Global Hotkey settings page exposes enablement, bindings, and backend status.
-  Right-sidebar
-  focus and visibility use the shared `focusRightSidebar` and
-  `toggleFileExplorer` IDs; `Ctrl+1` through `Ctrl+5` switch its modes while
+  Left-sidebar visibility uses `toggleSidebar` (`Ctrl+B`). Right-sidebar focus
+  and visibility use the shared `focusRightSidebar` (`Ctrl+Shift+E`) and
+  `toggleFileExplorer` (`Ctrl+Alt+B`) IDs; `Ctrl+1` through `Ctrl+5` switch its modes while
   sidebar focus owns the key event. Browser navigation, reload, page zoom,
   address focus, and WebKit inspector shortcuts use the shared macOS action
   IDs and dispatch to the live WebKitGTK control while browser focus owns the
@@ -668,8 +672,8 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   file attachments, shell-safe path insertion, Ctrl+Enter/send-button
   submission through the renderer-owned Ghostty input queue, two-step Escape
   hiding, and per-terminal draft/session restoration. `focusTextBoxInput`
-  (`Super+Shift+A`) toggles composer/terminal focus and `attachTextBoxFile`
-  (`Super+Alt+Shift+A`) opens the native multiple-file picker. The TextBox
+  (`Ctrl+Shift+A`) toggles composer/terminal focus and `attachTextBoxFile`
+  (`Ctrl+Alt+Shift+A`) opens the native multiple-file picker. The TextBox
   settings page edits `terminal.showTextBoxOnNewTerminals`,
   `terminal.focusTextBoxOnNewTerminals`, and `terminal.textBoxMaxLines`.
   The command palette also mirrors the macOS contextual workspace and tab
@@ -701,8 +705,8 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   or renderer-owned Ghostty queue. Shared Find actions drive Ghostty's live
   search state and GTK search controls for terminals, fall through to WebKit
   for browser-native find, and focus right-sidebar search for directory find.
-  `Super+[` and `Super+]` traverse a
-  per-window, 50-entry history of focused workspace surfaces; a new focus
+  `Ctrl+Alt+Shift+[` and `Ctrl+Alt+Shift+]` traverse a per-window, 50-entry
+  history of focused workspace surfaces; a new focus
   after navigating back truncates the
   forward branch, while closed surfaces resolve to the workspace's current
   surface. Socket snapshots expose both compatibility `shortcut_hint` glyphs and
@@ -770,10 +774,10 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   overview. Reveal scrolls only far enough to expose an offscreen pane with a
   24-point margin, while a second overview toggle restores the exact prior
   center and zoom, including across session restoration. Pane tabs cycle with
-  the macOS `Cmd+Shift+]` and `Cmd+Shift+[` shortcuts and wrap within the
-  focused pane without changing its Canvas position. The macOS Canvas defaults
-  for layout toggle, reveal, overview, zoom in/out/reset, and tidy are available
-  through Linux `Super` shortcuts and executable command-palette rows backed by
+  Linux `Ctrl+Shift+]` and `Ctrl+Shift+[` and wrap within the focused pane
+  without changing its Canvas position. Canvas layout toggle, reveal, overview,
+  zoom in/out/reset, and tidy use Ctrl-based Linux shortcuts and executable
+  command-palette rows backed by
   one dispatcher. The eight alignment, equalization, and distribution actions
   that are unbound by default on macOS are also executable palette rows on
   Linux and use that dispatcher. Canvas mode, pane frames,

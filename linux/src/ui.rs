@@ -1293,14 +1293,14 @@ fn execute_palette_shell_command(app: &mut AppState, rest: &str) -> Result<Shell
     let subcommand = parts.next().unwrap_or("results");
     match subcommand {
         "toggle" | "switcher" => {
-            let value = app_call(app, "debug.shortcut.simulate", json!({"combo": "cmd+p"}))?;
+            let value = app_call(app, "debug.shortcut.simulate", json!({"combo": "ctrl+p"}))?;
             Ok(shell_output(format_palette_visibility(&value)))
         }
         "commands" => {
             let value = app_call(
                 app,
                 "debug.shortcut.simulate",
-                json!({"combo": "cmd+shift+p"}),
+                json!({"combo": "ctrl+shift+p"}),
             )?;
             Ok(shell_output(format_palette_visibility(&value)))
         }
@@ -2899,11 +2899,11 @@ mod tests {
             "results": [{
                 "command_id": "palette.newTerminal",
                 "title": "New Terminal",
-                "shortcut_hint": "\u{2318}T"
+                "shortcut_hint": "\u{2303}T"
             }]
         }));
 
-        assert!(output.contains("palette.newTerminal\tNew Terminal\tSuper+T"));
+        assert!(output.contains("palette.newTerminal\tNew Terminal\tCtrl+T"));
     }
 
     #[test]

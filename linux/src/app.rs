@@ -2875,7 +2875,6 @@ enum ShortcutChordAdvance {
 enum MatchedShortcut {
     Action(&'static str),
     Numbered(&'static str, u8),
-    TerminalFind,
 }
 
 #[derive(Clone)]
@@ -8242,6 +8241,10 @@ impl AppState {
                     } else {
                         Ok(json!({"handled": false, "chord_cancelled": true}))
                     }
+                } else if let Some(result) =
+                    self.arm_overridden_shortcut_chord(&normalized, &shortcut_context)
+                {
+                    Ok(result)
                 } else if self.global_search_palette_visible()
                     && global_search_result_digit(&normalized).is_some()
                 {
@@ -8267,7 +8270,7 @@ impl AppState {
                     && self.shortcut_action_allowed("command_palette_commands", &shortcut_context)
                 {
                     self.command_palette_toggle_current(CommandPaletteMode::Commands)
-                } else if self.palette_visible_for_current_window() && normalized == "cmd+a" {
+                } else if self.palette_visible_for_current_window() && normalized == "ctrl+a" {
                     self.command_palette_select_all()
                 } else if self.palette_visible_for_current_window() && normalized == "backspace" {
                     self.command_palette_delete_backward_current()
@@ -8289,14 +8292,6 @@ impl AppState {
                     self.execute_matched_shortcut(shortcut)
                 } else if normalized == "ctrl+d" {
                     self.surface_send_key(&json!({"key": "ctrl-d"}))
-                } else if normalized == "cmd+opt+i" {
-                    let surface_id = self.current_surface_id()?;
-                    if let Some(surface) = self.surfaces.get_mut(&surface_id) {
-                        if surface.kind == SurfaceKind::Browser {
-                            surface.developer_tools_visible = !surface.developer_tools_visible;
-                        }
-                    }
-                    Ok(json!({}))
                 } else if let Some(result) = self.arm_shortcut_chord(&normalized, &shortcut_context)
                 {
                     Ok(result)
@@ -32233,7 +32228,7 @@ impl AppState {
                     row.as_object_mut().map(|object| {
                         object.insert(
                             "shortcut_label".to_string(),
-                            json!(format!("Super+{}", index + 1)),
+                            json!(format!("Ctrl+{}", index + 1)),
                         );
                     });
                 }
@@ -32334,6 +32329,26 @@ impl AppState {
         Ok(ShortcutChordAdvance::Completed(result))
     }
 
+    fn arm_overridden_shortcut_chord(
+        &mut self,
+        normalized_combo: &str,
+        context: &ShortcutContext,
+    ) -> Option<Value> {
+        let has_prefix = shortcut_dispatch_names().iter().any(|name| {
+            matches!(
+                self.shortcut_overrides.get(*name),
+                Some(config::ShortcutBinding::Chord(_, _))
+            ) && self
+                .shortcut_strokes(name)
+                .is_some_and(|strokes| strokes.len() == 2 && strokes[0] == normalized_combo)
+                && self.shortcut_action_allowed(name, context)
+        });
+        if !has_prefix {
+            return None;
+        }
+        self.arm_shortcut_chord(normalized_combo, context)
+    }
+
     fn arm_shortcut_chord(
         &mut self,
         normalized_combo: &str,
@@ -32384,37 +32399,13 @@ impl AppState {
                     })
             })
             .or_else(|| match normalized_combo {
-                "ctrl+shift+t"
-                    if self.shortcut_uses_default("new_terminal")
-                        && self.shortcut_action_allowed("new_terminal", context) =>
-                {
-                    Some(MatchedShortcut::Action("new_terminal"))
-                }
-                "ctrl+shift+w"
-                    if self.shortcut_uses_default("close_surface")
-                        && self.shortcut_action_allowed("close_surface", context) =>
-                {
-                    Some(MatchedShortcut::Action("close_surface"))
-                }
-                "ctrl+shift+o"
-                    if self.shortcut_uses_default("split_right")
-                        && self.shortcut_action_allowed("split_right", context) =>
-                {
-                    Some(MatchedShortcut::Action("split_right"))
-                }
-                "ctrl+shift+e"
-                    if self.shortcut_uses_default("split_down")
-                        && self.shortcut_action_allowed("split_down", context) =>
-                {
-                    Some(MatchedShortcut::Action("split_down"))
-                }
-                "cmd+shift+}"
+                "ctrl+shift+}"
                     if self.shortcut_uses_default("next_surface")
                         && self.shortcut_action_allowed("next_surface", context) =>
                 {
                     Some(MatchedShortcut::Action("next_surface"))
                 }
-                "cmd+shift+{"
+                "ctrl+shift+{"
                     if self.shortcut_uses_default("previous_surface")
                         && self.shortcut_action_allowed("previous_surface", context) =>
                 {
@@ -32431,30 +32422,6 @@ impl AppState {
                         && self.shortcut_action_allowed("previous_surface", context) =>
                 {
                     Some(MatchedShortcut::Action("previous_surface"))
-                }
-                "cmd+ctrl+h" | "ctrl+shift+h"
-                    if self.shortcut_uses_default("focus_left")
-                        && self.shortcut_action_allowed("focus_left", context) =>
-                {
-                    Some(MatchedShortcut::Action("focus_left"))
-                }
-                "cmd+ctrl+l" | "ctrl+shift+l"
-                    if self.shortcut_uses_default("focus_right")
-                        && self.shortcut_action_allowed("focus_right", context) =>
-                {
-                    Some(MatchedShortcut::Action("focus_right"))
-                }
-                "cmd+ctrl+k" | "ctrl+shift+k"
-                    if self.shortcut_uses_default("focus_up")
-                        && self.shortcut_action_allowed("focus_up", context) =>
-                {
-                    Some(MatchedShortcut::Action("focus_up"))
-                }
-                "cmd+ctrl+j" | "ctrl+shift+j"
-                    if self.shortcut_uses_default("focus_down")
-                        && self.shortcut_action_allowed("focus_down", context) =>
-                {
-                    Some(MatchedShortcut::Action("focus_down"))
                 }
                 "ctrl+shift+m"
                     if self.shortcut_uses_default("toggle_terminal_copy_mode")
@@ -32527,13 +32494,6 @@ impl AppState {
         if !self.shortcut_action_allowed(name, context) {
             return None;
         }
-        if name == "find"
-            && normalized_combo == "cmd+f"
-            && context.bool("browserFocus")
-            && self.shortcut_uses_default(name)
-        {
-            return Some(MatchedShortcut::TerminalFind);
-        }
         if is_numbered_shortcut_name(name) {
             let binding = self.effective_shortcut_combo(name)?;
             return numbered_shortcut_digit(&binding, normalized_combo)
@@ -32551,7 +32511,6 @@ impl AppState {
         let result = match shortcut {
             MatchedShortcut::Action(name) => self.execute_shortcut_name(name),
             MatchedShortcut::Numbered(name, digit) => self.execute_numbered_shortcut(name, digit),
-            MatchedShortcut::TerminalFind => self.start_terminal_find_shortcut(false),
         }?;
         if group_selected && result.get("handled").and_then(Value::as_bool) == Some(false) {
             let group_combo = self.effective_shortcut_combo("group_selected_workspaces");
@@ -32569,11 +32528,17 @@ impl AppState {
             return configured.clause.evaluate(context);
         }
         match name {
+            "command_palette" | "new_workspace" => !context.bool("commandPaletteVisible"),
+            "new_terminal" => !context.bool("browserFocus"),
             "command_palette_next" | "command_palette_previous" => {
                 context.bool("commandPaletteVisible")
             }
+            "next_workspace" | "previous_workspace" => !context.bool("browserFocus"),
+            "select_surface_by_number" => !context.bool("sidebarFocus"),
             "rename_workspace"
             | "rename_tab"
+            | "focus_text_box_input"
+            | "attach_text_box_file"
             | "send_ctrl_f_to_terminal"
             | "clear_screen_keep_scrollback" => {
                 !context.bool("browserFocus") && !context.bool("sidebarFocus")
@@ -46705,7 +46670,7 @@ fn global_search_query_tokens(query: &str) -> Vec<String> {
 }
 
 fn global_search_result_digit(combo: &str) -> Option<usize> {
-    let digit = combo.strip_prefix("cmd+")?.parse::<usize>().ok()?;
+    let digit = combo.strip_prefix("ctrl+")?.parse::<usize>().ok()?;
     (1..=9).contains(&digit).then_some(digit)
 }
 
@@ -46953,104 +46918,108 @@ fn linux_shortcut_label_from_hint(hint: &str) -> String {
 
 fn default_shortcut_combo(name: &str) -> Option<&'static str> {
     match name {
-        "new_window" => Some("cmd+shift+n"),
-        "close_window" => Some("cmd+ctrl+w"),
-        "toggle_full_screen" => Some("cmd+ctrl+f"),
-        "quit" => Some("cmd+q"),
-        "command_palette" => Some("cmd+p"),
-        "command_palette_commands" => Some("cmd+shift+p"),
+        "new_window" => Some("ctrl+shift+n"),
+        "close_window" => Some("ctrl+alt+shift+w"),
+        // Unbound: Ctrl+Alt+Shift+F is already Hide Find, so the transformed
+        // Ctrl+F conflict cannot be relocated without another overlap.
+        "toggle_full_screen" => None,
+        "quit" => Some("ctrl+q"),
+        "command_palette" => Some("ctrl+p"),
+        "command_palette_commands" => Some("ctrl+shift+p"),
         "command_palette_next" => Some("ctrl+n"),
         "command_palette_previous" => Some("ctrl+p"),
-        "global_search" => Some("cmd+opt+f"),
-        "show_hide_all_windows" => Some("cmd+ctrl+opt+."),
-        "new_workspace" => Some("cmd+n"),
-        "new_browser_workspace" => Some("cmd+opt+n"),
-        "reopen_previous_session" => Some("cmd+shift+o"),
-        "reopen_closed_browser_panel" => Some("cmd+shift+t"),
-        "new_terminal" => Some("cmd+t"),
-        "focus_text_box_input" => Some("cmd+shift+a"),
-        "attach_text_box_file" => Some("cmd+opt+shift+a"),
-        "clear_screen_keep_scrollback" => Some("cmd+shift+k"),
-        "toggle_terminal_copy_mode" => Some("cmd+shift+m"),
-        "find" => Some("cmd+f"),
-        "find_in_directory" => Some("cmd+shift+f"),
-        "find_next" => Some("cmd+g"),
-        "find_previous" => Some("cmd+opt+g"),
-        "hide_find" => Some("cmd+opt+shift+f"),
-        "use_selection_for_find" => Some("cmd+e"),
-        "save_file_preview" => Some("cmd+s"),
-        "claude_code" => Some("cmd+shift+c"),
-        "open_settings" => Some("cmd+,"),
-        "reload_configuration" => Some("cmd+shift+,"),
-        "show_notifications" => Some("cmd+i"),
-        "focus_right_sidebar" => Some("cmd+shift+e"),
+        "global_search" => Some("ctrl+alt+f"),
+        "show_hide_all_windows" => Some("ctrl+alt+."),
+        "new_workspace" => Some("ctrl+n"),
+        "new_browser_workspace" => Some("ctrl+alt+n"),
+        "reopen_previous_session" => Some("ctrl+shift+o"),
+        "reopen_closed_browser_panel" => Some("ctrl+shift+t"),
+        "new_terminal" => Some("ctrl+t"),
+        "focus_text_box_input" => Some("ctrl+shift+a"),
+        "attach_text_box_file" => Some("ctrl+alt+shift+a"),
+        "clear_screen_keep_scrollback" => Some("ctrl+shift+k"),
+        "toggle_terminal_copy_mode" => Some("ctrl+shift+m"),
+        "find" => Some("ctrl+f"),
+        "find_in_directory" => Some("ctrl+shift+f"),
+        "find_next" => Some("ctrl+g"),
+        "find_previous" => Some("ctrl+alt+g"),
+        "hide_find" => Some("ctrl+alt+shift+f"),
+        "use_selection_for_find" => Some("ctrl+e"),
+        "save_file_preview" => Some("ctrl+s"),
+        "claude_code" => Some("ctrl+shift+c"),
+        "open_settings" => Some("ctrl+,"),
+        "reload_configuration" => Some("ctrl+shift+,"),
+        "show_notifications" => Some("ctrl+i"),
+        "focus_right_sidebar" => Some("ctrl+shift+e"),
         "right_sidebar_files" => Some("ctrl+1"),
         "right_sidebar_find" => Some("ctrl+2"),
         "right_sidebar_sessions" => Some("ctrl+3"),
         "right_sidebar_feed" => Some("ctrl+4"),
         "right_sidebar_dock" => Some("ctrl+5"),
-        "toggle_right_sidebar" => Some("cmd+opt+b"),
-        "jump_to_unread" => Some("cmd+shift+u"),
-        "toggle_unread" => Some("cmd+opt+u"),
-        "mark_oldest_unread_and_jump_next" => Some("cmd+ctrl+u"),
-        "next_workspace" => Some("cmd+ctrl+]"),
-        "previous_workspace" => Some("cmd+ctrl+["),
-        "close_workspace" => Some("cmd+shift+w"),
-        "close_other_tabs_in_pane" => Some("cmd+opt+t"),
-        "toggle_focused_workspace_group_collapsed" => Some("cmd+ctrl+."),
-        "group_selected_workspaces" => Some("cmd+shift+g"),
-        "split_right" => Some("cmd+d"),
-        "split_down" => Some("cmd+shift+d"),
-        "split_browser_right" => Some("cmd+opt+d"),
-        "split_browser_down" => Some("cmd+opt+shift+d"),
-        "toggle_split_zoom" => Some("cmd+shift+enter"),
-        "equalize_splits" => Some("cmd+ctrl+="),
-        "focus_left" => Some("cmd+opt+left"),
-        "focus_right" => Some("cmd+opt+right"),
-        "focus_up" => Some("cmd+opt+up"),
-        "focus_down" => Some("cmd+opt+down"),
-        "focus_history_back" => Some("cmd+["),
-        "focus_history_forward" => Some("cmd+]"),
-        "next_surface" => Some("cmd+shift+]"),
-        "previous_surface" => Some("cmd+shift+["),
+        "toggle_right_sidebar" => Some("ctrl+alt+b"),
+        "jump_to_unread" => Some("ctrl+shift+u"),
+        "toggle_unread" => Some("ctrl+alt+u"),
+        "mark_oldest_unread_and_jump_next" => Some("ctrl+u"),
+        "next_workspace" => Some("ctrl+]"),
+        "previous_workspace" => Some("ctrl+["),
+        "close_workspace" => Some("ctrl+shift+w"),
+        "close_other_tabs_in_pane" => Some("ctrl+alt+t"),
+        "toggle_focused_workspace_group_collapsed" => Some("ctrl+."),
+        "group_selected_workspaces" => Some("ctrl+shift+g"),
+        "split_right" => Some("ctrl+d"),
+        "split_down" => Some("ctrl+shift+d"),
+        "split_browser_right" => Some("ctrl+alt+d"),
+        "split_browser_down" => Some("ctrl+alt+shift+d"),
+        "toggle_split_zoom" => Some("ctrl+shift+enter"),
+        "equalize_splits" => Some("ctrl+alt+shift+="),
+        "focus_left" => Some("ctrl+alt+left"),
+        "focus_right" => Some("ctrl+alt+right"),
+        "focus_up" => Some("ctrl+alt+up"),
+        "focus_down" => Some("ctrl+alt+down"),
+        "focus_history_back" => Some("ctrl+alt+shift+["),
+        "focus_history_forward" => Some("ctrl+alt+shift+]"),
+        "next_surface" => Some("ctrl+shift+]"),
+        "previous_surface" => Some("ctrl+shift+["),
         "select_surface_by_number" => Some("ctrl+1"),
-        "select_workspace_by_number" => Some("cmd+1"),
-        "toggle_canvas_layout" => Some("cmd+ctrl+c"),
-        "canvas_reveal_focused_pane" => Some("cmd+ctrl+r"),
-        "canvas_overview" => Some("cmd+ctrl+o"),
-        "canvas_zoom_in" => Some("cmd+opt+="),
-        "canvas_zoom_out" => Some("cmd+opt+-"),
-        "canvas_zoom_reset" => Some("cmd+opt+0"),
-        "canvas_tidy" => Some("cmd+ctrl+t"),
-        "close_surface" => Some("cmd+w"),
-        "open_browser" => Some("cmd+shift+l"),
-        "focus_browser_address_bar" => Some("cmd+l"),
-        "browser_back" => Some("cmd+["),
-        "browser_forward" => Some("cmd+]"),
-        "browser_reload" => Some("cmd+r"),
-        "browser_hard_reload" => Some("cmd+shift+r"),
-        "browser_zoom_in" => Some("cmd+="),
-        "browser_zoom_out" => Some("cmd+-"),
-        "browser_zoom_reset" => Some("cmd+0"),
-        "toggle_browser_focus_mode" => Some("cmd+opt+enter"),
-        "toggle_react_grab" => Some("cmd+shift+g"),
-        "markdown_zoom_in" => Some("cmd+="),
-        "markdown_zoom_out" => Some("cmd+-"),
-        "markdown_zoom_reset" => Some("cmd+0"),
-        "toggle_browser_developer_tools" => Some("cmd+opt+i"),
-        "show_browser_javascript_console" => Some("cmd+opt+c"),
-        "open_diff_viewer" => Some("cmd+ctrl+shift+d"),
+        "select_workspace_by_number" => Some("ctrl+alt+shift+1"),
+        "toggle_canvas_layout" => Some("ctrl+c"),
+        "canvas_reveal_focused_pane" => Some("ctrl+alt+shift+r"),
+        "canvas_overview" => Some("ctrl+alt+shift+o"),
+        "canvas_zoom_in" => Some("ctrl+alt+="),
+        "canvas_zoom_out" => Some("ctrl+alt+-"),
+        "canvas_zoom_reset" => Some("ctrl+alt+0"),
+        "canvas_tidy" => Some("ctrl+alt+shift+t"),
+        "close_surface" => Some("ctrl+w"),
+        "open_browser" => Some("ctrl+shift+l"),
+        "focus_browser_address_bar" => Some("ctrl+l"),
+        "browser_back" => Some("ctrl+["),
+        "browser_forward" => Some("ctrl+]"),
+        "browser_reload" => Some("ctrl+r"),
+        "browser_hard_reload" => Some("ctrl+shift+r"),
+        "browser_zoom_in" => Some("ctrl+="),
+        "browser_zoom_out" => Some("ctrl+-"),
+        "browser_zoom_reset" => Some("ctrl+0"),
+        "toggle_browser_focus_mode" => Some("ctrl+alt+enter"),
+        "toggle_react_grab" => Some("ctrl+alt+shift+g"),
+        "markdown_zoom_in" => Some("ctrl+="),
+        "markdown_zoom_out" => Some("ctrl+-"),
+        "markdown_zoom_reset" => Some("ctrl+0"),
+        "toggle_browser_developer_tools" => Some("ctrl+alt+i"),
+        "show_browser_javascript_console" => Some("ctrl+alt+c"),
+        // Unbound: Ctrl+Alt+Shift+D is already Split Browser Down, so the
+        // transformed Ctrl+Shift+D conflict has no free relocation.
+        "open_diff_viewer" => None,
         "diff_viewer_scroll_down" => Some("j"),
         "diff_viewer_scroll_up" => Some("k"),
         "diff_viewer_scroll_to_bottom" => Some("shift+g"),
         "diff_viewer_scroll_to_top" => Some("g g"),
         "diff_viewer_open_file_search" => Some("/"),
-        "rename_workspace" => Some("cmd+shift+r"),
-        "edit_workspace_description" => Some("cmd+opt+e"),
-        "rename_tab" => Some("cmd+r"),
-        "open_directory" => Some("cmd+o"),
-        "toggle_sidebar" => Some("cmd+b"),
-        "trigger_flash" => Some("cmd+shift+h"),
+        "rename_workspace" => Some("ctrl+shift+r"),
+        "edit_workspace_description" => Some("ctrl+alt+e"),
+        "rename_tab" => Some("ctrl+r"),
+        "open_directory" => Some("ctrl+o"),
+        "toggle_sidebar" => Some("ctrl+b"),
+        "trigger_flash" => Some("ctrl+shift+h"),
         _ => None,
     }
 }
@@ -47438,7 +47407,11 @@ fn configured_shortcut_when_overrides() -> HashMap<String, ConfiguredShortcutWhe
 
 fn shortcut_default_when(name: &str) -> Option<&'static str> {
     match name {
+        "command_palette" | "new_workspace" => Some("!commandPaletteVisible"),
+        "new_terminal" => Some("!browserFocus"),
         "command_palette_next" | "command_palette_previous" => Some("commandPaletteVisible"),
+        "next_workspace" | "previous_workspace" => Some("!browserFocus"),
+        "select_surface_by_number" => Some("!sidebarFocus"),
         "rename_workspace"
         | "rename_tab"
         | "focus_text_box_input"
@@ -47484,6 +47457,8 @@ fn is_supported_shortcut_name(name: &str) -> bool {
                 | "canvas_distribute_vertically"
                 | "send_ctrl_f_to_terminal"
                 | "send_feedback"
+                | "toggle_full_screen"
+                | "open_diff_viewer"
         )
 }
 
@@ -47740,6 +47715,29 @@ mod shortcut_combo_tests {
     }
 
     #[test]
+    fn linux_conflict_exceptions_and_sidebar_defaults_are_stable() {
+        for (name, combo) in [
+            ("close_window", "ctrl+alt+shift+w"),
+            ("equalize_splits", "ctrl+alt+shift+="),
+            ("focus_history_back", "ctrl+alt+shift+["),
+            ("focus_history_forward", "ctrl+alt+shift+]"),
+            ("select_workspace_by_number", "ctrl+alt+shift+1"),
+            ("canvas_reveal_focused_pane", "ctrl+alt+shift+r"),
+            ("canvas_overview", "ctrl+alt+shift+o"),
+            ("canvas_tidy", "ctrl+alt+shift+t"),
+            ("toggle_react_grab", "ctrl+alt+shift+g"),
+            ("toggle_sidebar", "ctrl+b"),
+            ("toggle_right_sidebar", "ctrl+alt+b"),
+        ] {
+            assert_eq!(default_shortcut_combo(name), Some(combo), "{name}");
+        }
+        for name in ["toggle_full_screen", "open_diff_viewer"] {
+            assert_eq!(default_shortcut_combo(name), None, "{name}");
+            assert!(is_supported_shortcut_name(name), "{name}");
+        }
+    }
+
+    #[test]
     fn shortcut_combos_canonicalize_modifier_aliases_and_order() {
         assert_eq!(
             normalize_shortcut_combo("Alt+SUPER+Shift+T"),
@@ -47787,7 +47785,7 @@ mod shortcut_combo_tests {
     #[test]
     fn right_sidebar_shortcuts_use_stable_macos_ids_defaults_and_contexts() {
         for (name, config_id, default_combo) in [
-            ("focus_right_sidebar", "focusRightSidebar", "cmd+shift+e"),
+            ("focus_right_sidebar", "focusRightSidebar", "ctrl+shift+e"),
             ("right_sidebar_files", "switchRightSidebarToFiles", "ctrl+1"),
             ("right_sidebar_find", "switchRightSidebarToFind", "ctrl+2"),
             (
@@ -47797,7 +47795,7 @@ mod shortcut_combo_tests {
             ),
             ("right_sidebar_feed", "switchRightSidebarToFeed", "ctrl+4"),
             ("right_sidebar_dock", "switchRightSidebarToDock", "ctrl+5"),
-            ("toggle_right_sidebar", "toggleFileExplorer", "cmd+opt+b"),
+            ("toggle_right_sidebar", "toggleFileExplorer", "ctrl+alt+b"),
         ] {
             assert_eq!(shortcut_config_id(name), Some(config_id));
             assert_eq!(shortcut_name_for_config_id(config_id), Some(name));
@@ -47813,9 +47811,9 @@ mod shortcut_combo_tests {
     #[test]
     fn browser_topology_shortcuts_use_stable_macos_ids_and_defaults() {
         for (name, config_id, default_combo) in [
-            ("new_browser_workspace", "newBrowserWorkspace", "cmd+opt+n"),
-            ("split_browser_right", "splitBrowserRight", "cmd+opt+d"),
-            ("split_browser_down", "splitBrowserDown", "cmd+opt+shift+d"),
+            ("new_browser_workspace", "newBrowserWorkspace", "ctrl+alt+n"),
+            ("split_browser_right", "splitBrowserRight", "ctrl+alt+d"),
+            ("split_browser_down", "splitBrowserDown", "ctrl+alt+shift+d"),
         ] {
             assert_eq!(shortcut_config_id(name), Some(config_id));
             assert_eq!(shortcut_name_for_config_id(config_id), Some(name));
@@ -47836,7 +47834,7 @@ mod shortcut_combo_tests {
         );
         assert_eq!(
             default_shortcut_combo("toggle_browser_focus_mode"),
-            Some("cmd+opt+enter")
+            Some("ctrl+alt+enter")
         );
         assert_eq!(
             shortcut_default_when("toggle_browser_focus_mode"),
@@ -47852,7 +47850,7 @@ mod shortcut_combo_tests {
         );
         assert_eq!(
             default_shortcut_combo("toggle_react_grab"),
-            Some("cmd+shift+g")
+            Some("ctrl+alt+shift+g")
         );
         assert_eq!(shortcut_default_when("toggle_react_grab"), None);
     }
@@ -47881,7 +47879,7 @@ mod shortcut_combo_tests {
         );
         assert_eq!(
             default_shortcut_combo("toggle_terminal_copy_mode"),
-            Some("cmd+shift+m")
+            Some("ctrl+shift+m")
         );
         assert_eq!(shortcut_default_when("toggle_terminal_copy_mode"), None);
     }
@@ -47893,7 +47891,7 @@ mod shortcut_combo_tests {
             shortcut_name_for_config_id("globalSearch"),
             Some("global_search")
         );
-        assert_eq!(default_shortcut_combo("global_search"), Some("cmd+opt+f"));
+        assert_eq!(default_shortcut_combo("global_search"), Some("ctrl+alt+f"));
         assert_eq!(shortcut_default_when("global_search"), None);
         assert!(is_supported_shortcut_name("global_search"));
     }
@@ -47910,7 +47908,7 @@ mod shortcut_combo_tests {
         );
         assert_eq!(
             default_shortcut_combo("show_hide_all_windows"),
-            Some("cmd+ctrl+opt+.")
+            Some("ctrl+alt+.")
         );
         assert_eq!(shortcut_default_when("show_hide_all_windows"), None);
         assert!(is_supported_shortcut_name("show_hide_all_windows"));
@@ -47928,7 +47926,7 @@ mod shortcut_combo_tests {
         );
         assert_eq!(
             default_shortcut_combo("reopen_previous_session"),
-            Some("cmd+shift+o")
+            Some("ctrl+shift+o")
         );
         assert_eq!(shortcut_default_when("reopen_previous_session"), None);
     }
@@ -47945,7 +47943,7 @@ mod shortcut_combo_tests {
         );
         assert_eq!(
             default_shortcut_combo("reopen_closed_browser_panel"),
-            Some("cmd+shift+t")
+            Some("ctrl+shift+t")
         );
         assert_eq!(shortcut_default_when("reopen_closed_browser_panel"), None);
         assert!(is_supported_shortcut_name("reopen_closed_browser_panel"));
@@ -59899,22 +59897,6 @@ mod embedded_terminal_action_tests {
             .expect("terminal context");
         assert_eq!(terminal_context["handled"], false);
 
-        let terminal_ctrl_l = app
-            .handle(
-                "debug.shortcut.simulate",
-                &json!({"combo": "ctrl+l", "context": {"browserFocus": false}}),
-            )
-            .expect("terminal Ctrl+L");
-        assert_eq!(terminal_ctrl_l["handled"], false);
-
-        let terminal_ctrl_w = app
-            .handle(
-                "debug.shortcut.simulate",
-                &json!({"combo": "ctrl+w", "context": {"browserFocus": false}}),
-            )
-            .expect("terminal Ctrl+W");
-        assert_eq!(terminal_ctrl_w["handled"], false);
-
         let browser_find = app
             .handle(
                 "debug.shortcut.simulate",
@@ -59943,14 +59925,6 @@ mod embedded_terminal_action_tests {
         app.set_shortcut(&json!({"name": "find", "combo": "reset"}))
             .expect("reset browser find binding");
 
-        let terminal_ctrl_f = app
-            .handle(
-                "debug.shortcut.simulate",
-                &json!({"combo": "ctrl+f", "context": {"browserFocus": false}}),
-            )
-            .expect("terminal Ctrl+F");
-        assert_eq!(terminal_ctrl_f["handled"], false);
-
         let browser_pane_id = app.surfaces[browser_id].pane_id.clone();
         let pane_count = app.panes.len();
         let tab_count = app.panes[&browser_pane_id].surfaces.len();
@@ -59978,7 +59952,8 @@ mod embedded_terminal_action_tests {
                 &json!({"combo": "ctrl+t", "context": {"browserFocus": false}}),
             )
             .expect("terminal Ctrl+T");
-        assert_eq!(terminal_ctrl_t["handled"], false);
+        let terminal_id = terminal_ctrl_t["surface_id"].as_str().expect("terminal id");
+        assert_eq!(app.surfaces[terminal_id].kind, SurfaceKind::Terminal);
 
         app.set_shortcut(&json!({"name": "browser_forward", "combo": "clear"}))
             .expect("clear browser forward binding");
@@ -60034,6 +60009,7 @@ mod embedded_terminal_action_tests {
 
         app.set_shortcut(&json!({"name": "close_surface", "combo": "reset"}))
             .expect("reset close-surface binding");
+        app.focus_surface(new_tab_id).expect("refocus browser tab");
         app.handle(
             "debug.shortcut.simulate",
             &json!({"combo": "ctrl+w", "context": {"browserFocus": true}}),
@@ -61185,10 +61161,10 @@ mod embedded_terminal_action_tests {
             "A deeper needle in a document",
             &tokens
         ));
-        assert_eq!(global_search_result_digit("cmd+1"), Some(1));
-        assert_eq!(global_search_result_digit("cmd+9"), Some(9));
-        assert_eq!(global_search_result_digit("cmd+0"), None);
-        assert_eq!(global_search_result_digit("cmd+shift+1"), None);
+        assert_eq!(global_search_result_digit("ctrl+1"), Some(1));
+        assert_eq!(global_search_result_digit("ctrl+9"), Some(9));
+        assert_eq!(global_search_result_digit("ctrl+0"), None);
+        assert_eq!(global_search_result_digit("ctrl+shift+1"), None);
     }
 
     #[test]
@@ -61396,10 +61372,7 @@ mod embedded_terminal_action_tests {
         assert!(rows.iter().all(|row| row["multi_selected"] == true));
 
         let grouped = app
-            .handle(
-                "debug.shortcut.simulate",
-                &json!({"combo": "super+shift+g"}),
-            )
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+g"}))
             .expect("group shortcut");
         assert_eq!(grouped["handled"], true);
         assert_eq!(grouped["action"], "groupSelectedWorkspaces");
@@ -61411,7 +61384,7 @@ mod embedded_terminal_action_tests {
     }
 
     #[test]
-    fn group_selected_shortcut_falls_through_to_react_grab_for_single_selection() {
+    fn relocated_react_grab_shortcut_handles_single_workspace_selection() {
         let (mut app, terminal_id, terminal_ref, _workspace_id) = app_with_current_surface();
         let browser_id = app
             .open_embedded_terminal_url(&terminal_ref, "https://example.test/react-fallback")
@@ -61425,9 +61398,9 @@ mod embedded_terminal_action_tests {
         let result = app
             .handle(
                 "debug.shortcut.simulate",
-                &json!({"combo": "super+shift+g"}),
+                &json!({"combo": "ctrl+alt+shift+g"}),
             )
-            .expect("shared shortcut");
+            .expect("React Grab shortcut");
         assert_eq!(result["handled"], true);
         assert_eq!(result["surface_id"], browser_id);
         assert_eq!(result["browser_shortcut_action"], "toggle_react_grab");
