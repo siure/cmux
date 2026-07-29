@@ -848,7 +848,8 @@ fn refresh_gtk_window_host(
             host.last_main_rebuild_key = rebuild_keys.main;
             host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
             host.last_pane_rebuild_keys = pane_rebuild_keys;
-        } else if host.last_main_structure_rebuild_key == main_structure_rebuild_key
+        } else if !main_rebuild_suppressed
+            && host.last_main_structure_rebuild_key == main_structure_rebuild_key
             && snapshot.pointer("/canvas/mode").and_then(Value::as_str) != Some("canvas")
             && sync_pane_surface_cards(
                 &host.window,

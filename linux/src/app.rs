@@ -32491,7 +32491,11 @@ impl AppState {
         normalized_combo: &str,
         context: &ShortcutContext,
     ) -> Option<MatchedShortcut> {
-        if !self.shortcut_action_allowed(name, context) {
+        if !self.shortcut_action_allowed(name, context)
+            || (context.bool("terminalFocus")
+                && self.shortcut_uses_default(name)
+                && terminal_control_sequence_combo(normalized_combo))
+        {
             return None;
         }
         if is_numbered_shortcut_name(name) {
@@ -47539,6 +47543,15 @@ fn numbered_shortcut_target<T>(values: &[T], digit: u8) -> Option<&T> {
     } else {
         values.get(digit.saturating_sub(1) as usize)
     }
+}
+
+fn terminal_control_sequence_combo(combo: &str) -> bool {
+    let Some(key) = combo.strip_prefix("ctrl+") else {
+        return false;
+    };
+    !key.contains('+')
+        && (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic()
+            || matches!(key, "space" | "@" | "[" | "\\" | "]" | "^" | "_" | "?"))
 }
 
 pub(crate) fn shifted_shortcut_base_key(key: &str) -> Option<&'static str> {
