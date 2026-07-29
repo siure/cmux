@@ -29,6 +29,7 @@ pub(super) fn build_snapshot_view(
     renderer_mode: GtkRendererMode,
     ui_mode: GtkUiMode,
     window_id: &str,
+    local_refresh: &GtkLocalRefresh,
 ) -> GtkSnapshotView {
     let left_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     left_slot.add_css_class("cmux-left-slot");
@@ -54,6 +55,7 @@ pub(super) fn build_snapshot_view(
         canvas_occlusion_states,
         renderer_mode,
         ui_mode,
+        local_refresh,
     ));
 
     let right_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);

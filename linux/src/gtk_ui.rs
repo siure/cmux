@@ -135,6 +135,16 @@ fn run_gtk_app_with_renderer(
             return;
         }
         activate_global_visibility.borrow_mut().hidden = false;
+        let local_refresh = GtkLocalRefresh::new(
+            application,
+            &app_state,
+            renderer_mode,
+            ui_mode,
+            &activate_window_hosts,
+            &activate_desktop_notifications,
+            &activate_presented_model_window,
+            &activate_global_visibility,
+        );
         if !sync_gtk_window_hosts(
             application,
             &app_state,
@@ -144,6 +154,7 @@ fn run_gtk_app_with_renderer(
             &activate_desktop_notifications,
             &activate_presented_model_window,
             &activate_global_visibility,
+            &local_refresh,
         ) {
             return;
         }
@@ -178,6 +189,7 @@ fn run_gtk_app_with_renderer(
         let sync_desktop_notifications = Rc::clone(&activate_desktop_notifications);
         let sync_presented_model_window = Rc::clone(&activate_presented_model_window);
         let sync_global_visibility = Rc::clone(&activate_global_visibility);
+        let sync_local_refresh = local_refresh.clone();
         glib::timeout_add_local(Duration::from_millis(500), move || {
             if !process_global_window_commands(
                 &sync_application,
@@ -196,6 +208,7 @@ fn run_gtk_app_with_renderer(
                 &sync_desktop_notifications,
                 &sync_presented_model_window,
                 &sync_global_visibility,
+                &sync_local_refresh,
             ) {
                 return glib::ControlFlow::Break;
             }
@@ -219,6 +232,66 @@ fn gtk_application_flags(single_instance: bool) -> gio::ApplicationFlags {
     }
 }
 
+#[derive(Clone)]
+struct GtkLocalRefresh {
+    application: gtk::Application,
+    app_state: Arc<Mutex<AppState>>,
+    renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
+    hosts: GtkWindowHosts,
+    desktop_notifications: Rc<RefCell<Option<DesktopNotificationTracker>>>,
+    presented_model_window: Rc<RefCell<Option<String>>>,
+    global_visibility: Rc<RefCell<GtkGlobalVisibilityState>>,
+    pending: Rc<Cell<bool>>,
+}
+
+impl GtkLocalRefresh {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        application: &gtk::Application,
+        app_state: &Arc<Mutex<AppState>>,
+        renderer_mode: GtkRendererMode,
+        ui_mode: GtkUiMode,
+        hosts: &GtkWindowHosts,
+        desktop_notifications: &Rc<RefCell<Option<DesktopNotificationTracker>>>,
+        presented_model_window: &Rc<RefCell<Option<String>>>,
+        global_visibility: &Rc<RefCell<GtkGlobalVisibilityState>>,
+    ) -> Self {
+        Self {
+            application: application.clone(),
+            app_state: Arc::clone(app_state),
+            renderer_mode,
+            ui_mode,
+            hosts: Rc::clone(hosts),
+            desktop_notifications: Rc::clone(desktop_notifications),
+            presented_model_window: Rc::clone(presented_model_window),
+            global_visibility: Rc::clone(global_visibility),
+            pending: Rc::new(Cell::new(false)),
+        }
+    }
+
+    fn schedule(&self) {
+        if self.pending.replace(true) {
+            return;
+        }
+        let refresh = self.clone();
+        glib::idle_add_local_once(move || {
+            refresh.pending.set(false);
+            sync_gtk_window_hosts(
+                &refresh.application,
+                &refresh.app_state,
+                refresh.renderer_mode,
+                refresh.ui_mode,
+                &refresh.hosts,
+                &refresh.desktop_notifications,
+                &refresh.presented_model_window,
+                &refresh.global_visibility,
+                &refresh,
+            );
+        });
+    }
+}
+
 struct GtkWindowHost {
     window: gtk::ApplicationWindow,
     snapshot_view: GtkSnapshotView,
@@ -236,6 +309,8 @@ struct GtkWindowHost {
     last_left_rebuild_key: Value,
     last_main_rebuild_key: Value,
     last_main_non_tab_rebuild_key: Value,
+    last_main_structure_rebuild_key: Value,
+    last_pane_rebuild_keys: HashMap<String, Value>,
     last_right_rebuild_key: Value,
     last_header_rebuild_key: Value,
     last_overlay_rebuild_key: Value,
@@ -462,6 +537,7 @@ fn sync_gtk_window_hosts(
     desktop_notifications: &Rc<RefCell<Option<DesktopNotificationTracker>>>,
     presented_model_window: &Rc<RefCell<Option<String>>>,
     global_visibility: &Rc<RefCell<GtkGlobalVisibilityState>>,
+    local_refresh: &GtkLocalRefresh,
 ) -> bool {
     let rows = model_window_rows(app_state);
     if rows.is_empty() {
@@ -509,13 +585,22 @@ fn sync_gtk_window_hosts(
                 &window_id,
                 &row,
                 &snapshot,
+                local_refresh,
             );
             if !global_visibility.borrow().hidden {
                 host.window.present();
             }
             hosts.borrow_mut().insert(window_id.clone(), host);
         } else if let Some(host) = hosts.borrow_mut().get_mut(&window_id) {
-            refresh_gtk_window_host(host, app_state, renderer_mode, ui_mode, &row, &snapshot);
+            refresh_gtk_window_host(
+                host,
+                app_state,
+                renderer_mode,
+                ui_mode,
+                &row,
+                &snapshot,
+                local_refresh,
+            );
         }
         if selected {
             selected_window_id = Some(window_id);
@@ -552,6 +637,7 @@ fn create_gtk_window_host(
     window_id: &str,
     row: &Value,
     snapshot: &Value,
+    local_refresh: &GtkLocalRefresh,
 ) -> GtkWindowHost {
     let pane_allocations = Rc::new(RefCell::new(HashMap::new()));
     let ghostty_widgets = Rc::new(RefCell::new(HashMap::new()));
@@ -592,6 +678,7 @@ fn create_gtk_window_host(
         renderer_mode,
         ui_mode,
         window_id,
+        local_refresh,
     );
     if let Some(titlebar) = snapshot_view.titlebar.as_ref() {
         window.set_titlebar(Some(titlebar));
@@ -675,6 +762,8 @@ fn create_gtk_window_host(
         last_left_rebuild_key: rebuild_keys.left,
         last_main_rebuild_key: rebuild_keys.main,
         last_main_non_tab_rebuild_key: rebuild_keys.main_without_tabs,
+        last_main_structure_rebuild_key: snapshot_main_structure_rebuild_key(snapshot),
+        last_pane_rebuild_keys: snapshot_pane_rebuild_keys(snapshot),
         last_right_rebuild_key: rebuild_keys.right,
         last_header_rebuild_key: shell::header_rebuild_key(snapshot),
         last_overlay_rebuild_key: shell::overlay_rebuild_key(snapshot),
@@ -692,6 +781,7 @@ fn refresh_gtk_window_host(
     ui_mode: GtkUiMode,
     row: &Value,
     snapshot: &Value,
+    local_refresh: &GtkLocalRefresh,
 ) {
     host.window.set_title(Some(model_window_title(row)));
     let fullscreen = model_window_fullscreen(row);
@@ -740,37 +830,75 @@ fn refresh_gtk_window_host(
     }
 
     let main_changed = host.last_main_rebuild_key != rebuild_keys.main;
-    if main_changed && host.last_main_non_tab_rebuild_key == rebuild_keys.main_without_tabs {
-        sync_pane_tab_strips(&host.window, snapshot, app_state);
-        host.last_main_rebuild_key = rebuild_keys.main;
-        host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
-    } else if main_changed && !main_rebuild_suppressed {
-        replace_snapshot_slot_child(
-            &host.snapshot_view.main_slot,
-            Some(
-                surface_area(
-                    snapshot,
-                    app_state,
-                    &host.pane_allocations,
-                    &host.ghostty_widgets,
-                    &host.browser_controls,
-                    &host.diff_controls,
-                    &host.terminal_search_controls,
-                    &host.terminal_text_box_controls,
-                    &host.canvas_minimap_states,
-                    &host.canvas_occlusion_states,
-                    renderer_mode,
-                    ui_mode,
-                )
-                .upcast(),
-            ),
-        );
-        flush_pending_browser_shortcut_actions(
-            &host.browser_controls,
-            &host.pending_browser_shortcut_actions,
-        );
-        host.last_main_rebuild_key = rebuild_keys.main;
-        host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
+    if main_changed {
+        let main_structure_rebuild_key = snapshot_main_structure_rebuild_key(snapshot);
+        let pane_rebuild_keys = snapshot_pane_rebuild_keys(snapshot);
+        if host.last_main_non_tab_rebuild_key == rebuild_keys.main_without_tabs {
+            sync_pane_tab_strips(
+                &host.window,
+                snapshot,
+                &host.last_pane_rebuild_keys,
+                &pane_rebuild_keys,
+                app_state,
+                local_refresh,
+            );
+            host.last_main_rebuild_key = rebuild_keys.main;
+            host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
+            host.last_pane_rebuild_keys = pane_rebuild_keys;
+        } else if host.last_main_structure_rebuild_key == main_structure_rebuild_key
+            && snapshot.pointer("/canvas/mode").and_then(Value::as_str) != Some("canvas")
+            && sync_pane_surface_cards(
+                &host.window,
+                snapshot,
+                &host.last_pane_rebuild_keys,
+                &pane_rebuild_keys,
+                app_state,
+                &host.pane_allocations,
+                &host.ghostty_widgets,
+                &host.browser_controls,
+                &host.diff_controls,
+                &host.terminal_search_controls,
+                &host.terminal_text_box_controls,
+                renderer_mode,
+                ui_mode,
+                local_refresh,
+            )
+        {
+            host.last_main_rebuild_key = rebuild_keys.main;
+            host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
+            host.last_main_structure_rebuild_key = main_structure_rebuild_key;
+            host.last_pane_rebuild_keys = pane_rebuild_keys;
+        } else if !main_rebuild_suppressed {
+            replace_snapshot_slot_child(
+                &host.snapshot_view.main_slot,
+                Some(
+                    surface_area(
+                        snapshot,
+                        app_state,
+                        &host.pane_allocations,
+                        &host.ghostty_widgets,
+                        &host.browser_controls,
+                        &host.diff_controls,
+                        &host.terminal_search_controls,
+                        &host.terminal_text_box_controls,
+                        &host.canvas_minimap_states,
+                        &host.canvas_occlusion_states,
+                        renderer_mode,
+                        ui_mode,
+                        local_refresh,
+                    )
+                    .upcast(),
+                ),
+            );
+            flush_pending_browser_shortcut_actions(
+                &host.browser_controls,
+                &host.pending_browser_shortcut_actions,
+            );
+            host.last_main_rebuild_key = rebuild_keys.main;
+            host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
+            host.last_main_structure_rebuild_key = main_structure_rebuild_key;
+            host.last_pane_rebuild_keys = pane_rebuild_keys;
+        }
     }
     if host.last_right_rebuild_key != rebuild_keys.right && !right_rebuild_suppressed {
         let sidebar = right_sidebar_visible(snapshot)
@@ -1831,20 +1959,7 @@ fn snapshot_main_rebuild_key(
             })
         })
         .collect::<Vec<_>>();
-    let mut canvas = snapshot.get("canvas").cloned().unwrap_or(Value::Null);
-    if !include_tabs {
-        for pane in canvas
-            .get_mut("panes")
-            .and_then(Value::as_array_mut)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(pane) = pane.as_object_mut() {
-                pane.remove("surface_ids");
-                pane.remove("surface_refs");
-            }
-        }
-    }
+    let canvas = snapshot_canvas_rebuild_key(snapshot, include_tabs, true);
     json!({
         "workspaces": workspaces,
         "surfaces": surfaces,
@@ -1852,6 +1967,83 @@ fn snapshot_main_rebuild_key(
         "shortcut_help": include_overlays.then(|| snapshot.get("shortcut_help")).flatten(),
         "canvas": canvas,
         "app_config": snapshot.pointer("/config/app"),
+        "config_reload_generation": snapshot.pointer("/config/reload_generation")
+    })
+}
+
+fn snapshot_canvas_rebuild_key(
+    snapshot: &Value,
+    include_tab_lists: bool,
+    include_selection: bool,
+) -> Value {
+    let mut canvas = snapshot.get("canvas").cloned().unwrap_or(Value::Null);
+    for pane in canvas
+        .get_mut("panes")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let Some(pane) = pane.as_object_mut() else {
+            continue;
+        };
+        if !include_tab_lists {
+            pane.remove("surface_ids");
+            pane.remove("surface_refs");
+        }
+        if !include_selection {
+            for key in [
+                "surface_id",
+                "surface_ref",
+                "selected_surface_id",
+                "selected_surface_ref",
+            ] {
+                pane.remove(key);
+            }
+        }
+    }
+    canvas
+}
+
+fn snapshot_pane_rebuild_keys(snapshot: &Value) -> HashMap<String, Value> {
+    let config = json!({
+        "app": snapshot.pointer("/config/app"),
+        "reload_generation": snapshot.pointer("/config/reload_generation")
+    });
+    snapshot
+        .get("surface_views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|view| value_bool_or(view, "visible", true))
+        .filter_map(|view| {
+            Some((
+                pane_id_or_ref(view)?,
+                json!({"view": view, "config": config}),
+            ))
+        })
+        .collect()
+}
+
+fn snapshot_main_structure_rebuild_key(snapshot: &Value) -> Value {
+    let panes = snapshot
+        .get("surface_views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|view| value_bool_or(view, "visible", true))
+        .map(|view| {
+            json!({
+                "pane_id": view.get("pane_id"),
+                "pane_ref": view.get("pane_ref"),
+                "workspace_id": view.get("workspace_id"),
+                "frame": view.get("frame")
+            })
+        })
+        .collect::<Vec<_>>();
+    let canvas = snapshot_canvas_rebuild_key(snapshot, false, false);
+    json!({
+        "panes": panes,
+        "canvas": canvas,
         "config_reload_generation": snapshot.pointer("/config/reload_generation")
     })
 }
@@ -6187,6 +6379,7 @@ fn surface_area(
     canvas_occlusion_states: &GtkCanvasOcclusionStates,
     renderer_mode: GtkRendererMode,
     ui_mode: GtkUiMode,
+    local_refresh: &GtkLocalRefresh,
 ) -> gtk::Box {
     let main = gtk::Box::new(
         gtk::Orientation::Vertical,
@@ -6272,12 +6465,8 @@ fn surface_area(
             renderer_mode,
             config_reload_generation,
             ui_mode,
+            local_refresh,
         );
-        let margin = if ui_mode.is_next() { 0 } else { 6 };
-        card.set_margin_start(margin);
-        card.set_margin_end(margin);
-        card.set_margin_top(margin);
-        card.set_margin_bottom(margin);
         cards.insert(view_index, card);
     }
     if renderer_mode == GtkRendererMode::Ghostty {
@@ -9155,7 +9344,11 @@ fn pane_tab_close_button_visible(tab_count: usize, hidden: bool) -> bool {
     tab_count > 0 && !hidden
 }
 
-fn pane_tab_strip(view: &Value, app_state: &Arc<Mutex<AppState>>) -> Option<gtk::Box> {
+fn pane_tab_strip(
+    view: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    local_refresh: Option<&GtkLocalRefresh>,
+) -> Option<gtk::Box> {
     let tabs = pane_tabs(view);
     if tabs.is_empty() {
         return None;
@@ -9166,58 +9359,120 @@ fn pane_tab_strip(view: &Value, app_state: &Arc<Mutex<AppState>>) -> Option<gtk:
     root.add_css_class("cmux-pane-tabs");
     root.set_hexpand(true);
     root.set_widget_name(&pane_id);
-    populate_pane_tab_strip(&root, view, app_state);
+    populate_pane_tab_strip(&root, view, app_state, local_refresh);
     Some(root)
 }
 
-fn populate_pane_tab_strip(root: &gtk::Box, view: &Value, app_state: &Arc<Mutex<AppState>>) {
-    while let Some(child) = root.first_child() {
-        root.remove(&child);
-    }
-    let tabs = pane_tabs(view);
-    if tabs.is_empty() {
-        return;
-    }
-    let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-    for tab in &tabs {
+fn configure_pane_tab_button(button: &gtk::Button, tab: &GtkPaneTab) {
+    let current_title =
+        widget_descendant_with_css_class(button.upcast_ref(), "cmux-pane-tab-title")
+            .and_then(|widget| widget.downcast::<gtk::Label>().ok())
+            .map(|label| label.text());
+    if current_title.as_deref() != Some(tab.title.as_str()) {
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         content.append(&gtk::Image::from_icon_name(pane_tab_icon(&tab.kind)));
         let title = label(&tab.title, "cmux-pane-tab-title");
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title.set_max_width_chars(18);
         content.append(&title);
-        let button = gtk::Button::builder().child(&content).build();
-        button.add_css_class("cmux-pane-tab");
-        button.set_focusable(false);
-        button.set_tooltip_text(Some(&tab.title));
-        if tab.selected {
-            button.add_css_class("cmux-pane-tab-selected");
-        }
-        if tab.unread {
-            button.add_css_class("cmux-pane-tab-unread");
-        }
-        if tab.pinned {
-            button.set_tooltip_text(Some(&format!("{} (Pinned)", tab.title)));
-        }
-        let surface_id = tab.surface_id.clone();
-        let app_state = Arc::clone(app_state);
-        button.connect_clicked(move |_| {
-            call_app(
-                &app_state,
-                "surface.focus",
-                json!({"surface_id": surface_id}),
-            );
-        });
-        tab_row.append(&button);
+        button.set_child(Some(&content));
     }
-    let scroll = gtk::ScrolledWindow::builder()
+    button.set_focusable(false);
+    button.set_widget_name(&tab.surface_id);
+    let tooltip = if tab.pinned {
+        format!("{} (Pinned)", tab.title)
+    } else {
+        tab.title.clone()
+    };
+    button.set_tooltip_text(Some(&tooltip));
+    if tab.selected {
+        button.add_css_class("cmux-pane-tab-selected");
+    } else {
+        button.remove_css_class("cmux-pane-tab-selected");
+    }
+    if tab.unread {
+        button.add_css_class("cmux-pane-tab-unread");
+    } else {
+        button.remove_css_class("cmux-pane-tab-unread");
+    }
+}
+
+fn pane_tab_scroller(root: &gtk::Box) -> (gtk::ScrolledWindow, gtk::Box) {
+    if let Some(scroller) = root
+        .first_child()
+        .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok())
+    {
+        if let Some(row) =
+            widget_descendant_with_css_class(scroller.upcast_ref(), "cmux-pane-tab-row")
+                .and_then(|child| child.downcast::<gtk::Box>().ok())
+        {
+            return (scroller, row);
+        }
+    }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    row.add_css_class("cmux-pane-tab-row");
+    let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vscrollbar_policy(gtk::PolicyType::Never)
-        .child(&tab_row)
+        .child(&row)
         .build();
-    root.append(&scroll);
+    scroller.add_css_class("cmux-pane-tab-scroll");
+    root.prepend(&scroller);
+    (scroller, row)
+}
 
+fn populate_pane_tab_strip(
+    root: &gtk::Box,
+    view: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    local_refresh: Option<&GtkLocalRefresh>,
+) {
+    let tabs = pane_tabs(view);
+    let (scroller, tab_row) = pane_tab_scroller(root);
+    let mut existing = HashMap::new();
+    let mut child = tab_row.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if let Ok(button) = widget.downcast::<gtk::Button>() {
+            existing.insert(button.widget_name().to_string(), button);
+        }
+    }
+    let mut previous = None;
+    for tab in &tabs {
+        let button = existing.remove(&tab.surface_id).unwrap_or_else(|| {
+            let button = gtk::Button::new();
+            button.add_css_class("cmux-pane-tab");
+            let surface_id = tab.surface_id.clone();
+            let app_state = Arc::clone(app_state);
+            let local_refresh = local_refresh.cloned();
+            button.connect_clicked(move |_| {
+                if call_app(
+                    &app_state,
+                    "surface.focus",
+                    json!({"surface_id": surface_id}),
+                ) {
+                    if let Some(local_refresh) = local_refresh.as_ref() {
+                        local_refresh.schedule();
+                    }
+                }
+            });
+            tab_row.append(&button);
+            button
+        });
+        configure_pane_tab_button(&button, tab);
+        tab_row.reorder_child_after(&button, previous.as_ref());
+        previous = Some(button);
+    }
+    for button in existing.into_values() {
+        tab_row.remove(&button);
+    }
+
+    let mut child = scroller.next_sibling();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        root.remove(&widget);
+    }
     let hide_close_button = app_state
         .lock()
         .ok()
@@ -9238,12 +9493,17 @@ fn populate_pane_tab_strip(root: &gtk::Box, view: &Value, app_state: &Arc<Mutex<
             close.set_tooltip_text(Some("Close Tab"));
             let surface_id = selected.surface_id.clone();
             let app_state = Arc::clone(app_state);
+            let local_refresh = local_refresh.cloned();
             close.connect_clicked(move |_| {
-                call_app(
+                if call_app(
                     &app_state,
                     "surface.close",
                     json!({"surface_id": surface_id, "source": "tab_button"}),
-                );
+                ) {
+                    if let Some(local_refresh) = local_refresh.as_ref() {
+                        local_refresh.schedule();
+                    }
+                }
             });
             root.append(&close);
         }
@@ -9256,8 +9516,13 @@ fn populate_pane_tab_strip(root: &gtk::Box, view: &Value, app_state: &Arc<Mutex<
         add.set_focusable(false);
         add.set_tooltip_text(Some("New Terminal Tab"));
         let app_state = Arc::clone(app_state);
+        let local_refresh = local_refresh.cloned();
         add.connect_clicked(move |_| {
-            call_app(&app_state, "surface.create", params.clone());
+            if call_app(&app_state, "surface.create", params.clone()) {
+                if let Some(local_refresh) = local_refresh.as_ref() {
+                    local_refresh.schedule();
+                }
+            }
         });
         root.append(&add);
     }
@@ -9266,7 +9531,10 @@ fn populate_pane_tab_strip(root: &gtk::Box, view: &Value, app_state: &Arc<Mutex<
 fn sync_pane_tab_strips(
     window: &gtk::ApplicationWindow,
     snapshot: &Value,
+    previous_keys: &HashMap<String, Value>,
+    next_keys: &HashMap<String, Value>,
     app_state: &Arc<Mutex<AppState>>,
+    local_refresh: &GtkLocalRefresh,
 ) {
     let Some(root) = window.child() else {
         return;
@@ -9281,16 +9549,23 @@ fn sync_pane_tab_strips(
         let Some(pane_id) = pane_id_or_ref(view) else {
             continue;
         };
+        if previous_keys.get(&pane_id) == next_keys.get(&pane_id) {
+            continue;
+        }
         if let Some(strip) = find_pane_tab_strip(&root, &pane_id) {
-            populate_pane_tab_strip(&strip, view, app_state);
+            populate_pane_tab_strip(&strip, view, app_state, Some(local_refresh));
         }
     }
 }
 
-fn find_pane_tab_strip(root: &gtk::Widget, pane_id: &str) -> Option<gtk::Box> {
+fn find_named_box_with_css_class(
+    root: &gtk::Widget,
+    css_class: &str,
+    widget_name: &str,
+) -> Option<gtk::Box> {
     let mut pending = vec![root.clone()];
     while let Some(widget) = pending.pop() {
-        if widget.has_css_class("cmux-pane-tabs") && widget.widget_name() == pane_id {
+        if widget.has_css_class(css_class) && widget.widget_name() == widget_name {
             return widget.downcast::<gtk::Box>().ok();
         }
         let mut child = widget.first_child();
@@ -9300,6 +9575,124 @@ fn find_pane_tab_strip(root: &gtk::Widget, pane_id: &str) -> Option<gtk::Box> {
         }
     }
     None
+}
+
+fn find_pane_tab_strip(root: &gtk::Widget, pane_id: &str) -> Option<gtk::Box> {
+    find_named_box_with_css_class(root, "cmux-pane-tabs", pane_id)
+}
+
+fn find_pane_surface_card(root: &gtk::Widget, pane_id: &str) -> Option<gtk::Box> {
+    find_named_box_with_css_class(root, "cmux-surface", pane_id)
+}
+
+fn replace_pane_surface_card(old: &gtk::Box, new: &gtk::Box) -> bool {
+    let Some(parent) = old.parent() else {
+        return false;
+    };
+    if let Ok(paned) = parent.clone().downcast::<gtk::Paned>() {
+        if paned.start_child().as_ref() == Some(old.upcast_ref()) {
+            paned.set_start_child(Some(new));
+            return true;
+        }
+        if paned.end_child().as_ref() == Some(old.upcast_ref()) {
+            paned.set_end_child(Some(new));
+            return true;
+        }
+        return false;
+    }
+    if let Ok(grid) = parent.clone().downcast::<gtk::Grid>() {
+        let (column, row, width, height) = grid.query_child(old);
+        grid.remove(old);
+        grid.attach(new, column, row, width, height);
+        return true;
+    }
+    if let Ok(scroller) = parent.clone().downcast::<gtk::ScrolledWindow>() {
+        scroller.set_child(Some(new));
+        return true;
+    }
+    if let Ok(viewport) = parent.clone().downcast::<gtk::Viewport>() {
+        viewport.set_child(Some(new));
+        return true;
+    }
+    if let Ok(parent_box) = parent.downcast::<gtk::Box>() {
+        let previous = old.prev_sibling();
+        parent_box.remove(old);
+        parent_box.insert_child_after(new, previous.as_ref());
+        return true;
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_pane_surface_cards(
+    window: &gtk::ApplicationWindow,
+    snapshot: &Value,
+    previous_keys: &HashMap<String, Value>,
+    next_keys: &HashMap<String, Value>,
+    app_state: &Arc<Mutex<AppState>>,
+    pane_allocations: &PaneAllocations,
+    ghostty_widgets: &GhosttySurfaceWidgets,
+    browser_controls: &BrowserSurfaceControlsCache,
+    diff_controls: &DiffSurfaceControlsCache,
+    terminal_search_controls: &TerminalSearchControlsCache,
+    terminal_text_box_controls: &TerminalTextBoxControlsCache,
+    renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
+    local_refresh: &GtkLocalRefresh,
+) -> bool {
+    let Some(root) = window.child() else {
+        return false;
+    };
+    let config_reload_generation = config_reload_generation(snapshot);
+    for view in snapshot
+        .get("surface_views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|view| value_bool_or(view, "visible", true))
+    {
+        let Some(pane_id) = pane_id_or_ref(view) else {
+            return false;
+        };
+        if previous_keys.get(&pane_id) == next_keys.get(&pane_id) {
+            continue;
+        }
+        let Some(old_card) = find_pane_surface_card(&root, &pane_id) else {
+            return false;
+        };
+        let new_card = surface_card(
+            view,
+            app_state,
+            pane_allocations,
+            ghostty_widgets,
+            browser_controls,
+            diff_controls,
+            terminal_search_controls,
+            terminal_text_box_controls,
+            renderer_mode,
+            config_reload_generation,
+            ui_mode,
+            local_refresh,
+        );
+        if let (Some(old_strip), Some(new_strip)) = (
+            find_pane_tab_strip(old_card.upcast_ref(), &pane_id),
+            find_pane_tab_strip(new_card.upcast_ref(), &pane_id),
+        ) {
+            new_card.remove(&new_strip);
+            old_card.remove(&old_strip);
+            populate_pane_tab_strip(&old_strip, view, app_state, Some(local_refresh));
+            new_card.prepend(&old_strip);
+        }
+        for widget in ghostty_widgets.borrow().values() {
+            if widget_is_or_descendant_of(widget.root().upcast_ref(), old_card.upcast_ref()) {
+                detach_widget(widget.root());
+            }
+        }
+        if !replace_pane_surface_card(&old_card, &new_card) {
+            return false;
+        }
+    }
+    true
 }
 
 fn pango_escape(text: &str) -> String {
@@ -13468,12 +13861,16 @@ fn surface_card(
     renderer_mode: GtkRendererMode,
     config_reload_generation: u64,
     ui_mode: GtkUiMode,
+    local_refresh: &GtkLocalRefresh,
 ) -> gtk::Box {
     let card = gtk::Box::new(
         gtk::Orientation::Vertical,
         if ui_mode.is_next() { 0 } else { 8 },
     );
     card.add_css_class("cmux-surface");
+    if let Some(pane_id) = pane_id_or_ref(view) {
+        card.set_widget_name(&pane_id);
+    }
     let kind = value_str(view, "kind", "terminal");
     card.add_css_class(match kind {
         "browser" => "cmux-surface-browser",
@@ -13490,9 +13887,14 @@ fn surface_card(
     }
     card.set_hexpand(true);
     card.set_vexpand(true);
+    let margin = if ui_mode.is_next() { 0 } else { 6 };
+    card.set_margin_start(margin);
+    card.set_margin_end(margin);
+    card.set_margin_top(margin);
+    card.set_margin_bottom(margin);
 
     let title = value_str(view, "title", "Terminal");
-    if let Some(tab_strip) = pane_tab_strip(view, app_state) {
+    if let Some(tab_strip) = pane_tab_strip(view, app_state, Some(local_refresh)) {
         card.append(&tab_strip);
     } else {
         card.append(&label(title, "cmux-heading"));
@@ -17078,17 +17480,13 @@ mod tests {
         None
     }
 
-    #[test]
-    fn gtk_pane_tab_reconciliation_preserves_existing_widgets_and_scroll_position() {
-        if gtk::init().is_err() {
-            return;
-        }
+    fn assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position() {
         let app_state = Arc::new(Mutex::new(
             AppState::with_paths(None, None).expect("app state"),
         ));
         let first = gtk_tab_test_snapshot("surface-a", "alpha");
         let first_view = &first["surface_views"][0];
-        let strip = pane_tab_strip(first_view, &app_state).expect("pane tab strip");
+        let strip = pane_tab_strip(first_view, &app_state, None).expect("pane tab strip");
         let strip_widget = strip.clone().upcast::<gtk::Widget>();
         let scroller = widget_descendant_with_css_class(&strip_widget, "cmux-pane-tab-scroll")
             .expect("tab scroller")
@@ -17099,7 +17497,7 @@ mod tests {
         adjustment.configure(24.0, 0.0, 200.0, 1.0, 10.0, 50.0);
 
         let second = gtk_tab_test_snapshot("surface-b", "beta");
-        populate_pane_tab_strip(&strip, &second["surface_views"][0], &app_state);
+        populate_pane_tab_strip(&strip, &second["surface_views"][0], &app_state, None);
 
         let current_scroller =
             widget_descendant_with_css_class(&strip_widget, "cmux-pane-tab-scroll")
@@ -17120,11 +17518,117 @@ mod tests {
         assert!((current_scroller.hadjustment().value() - 24.0).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn gtk_selected_tab_changes_keep_main_tree_mounted_and_content_nonblank() {
-        if gtk::init().is_err() {
-            return;
+    fn gtk_count_widgets_with_css_class(root: &gtk::Widget, class: &str) -> usize {
+        let mut count = usize::from(root.has_css_class(class));
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            count += gtk_count_widgets_with_css_class(&widget, class);
+            child = widget.next_sibling();
         }
+        count
+    }
+
+    fn gtk_run_main_loop_for(duration: Duration) {
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit_loop = main_loop.clone();
+        glib::timeout_add_local_once(duration, move || quit_loop.quit());
+        main_loop.run();
+    }
+
+    fn gtk_test_local_refresh(
+        application: &gtk::Application,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> GtkLocalRefresh {
+        GtkLocalRefresh::new(
+            application,
+            app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(None)),
+            &Rc::new(RefCell::new(None)),
+            &Rc::new(RefCell::new(GtkGlobalVisibilityState::default())),
+        )
+    }
+
+    fn assert_gtk_tab_create_focus_and_close_refresh_before_fallback_poll() {
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.tab-refresh")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        assert!(sync_gtk_window_hosts(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+            &local_refresh,
+        ));
+        let window = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .window
+            .clone();
+        let root = window.child().expect("GTK window content");
+        let first_tab = widget_descendant_with_css_class(&root, "cmux-pane-tab")
+            .expect("initial pane tab")
+            .downcast::<gtk::Button>()
+            .expect("initial tab button");
+        let add = gtk_tab_button_with_tooltip(&root, "New Terminal Tab").expect("add tab button");
+        add.emit_clicked();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert_eq!(
+            gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"),
+            2,
+            "GTK-created tabs must reconcile before the 500ms fallback poll"
+        );
+
+        first_tab.emit_clicked();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert!(
+            first_tab.has_css_class("cmux-pane-tab-selected"),
+            "GTK-focused tabs must reconcile before the fallback poll"
+        );
+
+        let close = gtk_tab_button_with_tooltip(&root, "Close Tab").expect("close tab button");
+        close.emit_clicked();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert_eq!(
+            gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"),
+            1,
+            "GTK-closed tabs must reconcile before the fallback poll"
+        );
+        for host in hosts.borrow_mut().values_mut() {
+            host.window.destroy();
+        }
+    }
+
+    fn assert_gtk_selected_tab_changes_keep_main_tree_mounted_and_content_nonblank() {
         let application = gtk::Application::builder()
             .application_id("ai.manaflow.cmux.tests.tab-responsiveness")
             .flags(gio::ApplicationFlags::NON_UNIQUE)
@@ -17142,6 +17646,7 @@ mod tests {
             "fullscreen": false
         });
         let first = gtk_tab_test_snapshot("surface-a", "alpha content");
+        let local_refresh = gtk_test_local_refresh(&application, &app_state);
         let mut host = create_gtk_window_host(
             &application,
             &app_state,
@@ -17150,6 +17655,7 @@ mod tests {
             "window-a",
             &row,
             &first,
+            &local_refresh,
         );
         let mounted_main = host
             .snapshot_view
@@ -17165,6 +17671,7 @@ mod tests {
             GtkUiMode::Next,
             &row,
             &second,
+            &local_refresh,
         );
         assert_eq!(
             host.snapshot_view.main_slot.first_child().as_ref(),
@@ -17185,6 +17692,7 @@ mod tests {
             GtkUiMode::Next,
             &row,
             &first,
+            &local_refresh,
         );
         assert_eq!(
             host.snapshot_view.main_slot.first_child().as_ref(),
@@ -19837,10 +20345,13 @@ mod tests {
     }
 
     #[test]
-    fn gtk_shortcut_help_rows_use_bounded_vertical_scrolling() {
+    fn gtk_runtime_widget_regressions() {
         if gtk::init().is_err() {
             return;
         }
+        assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position();
+        assert_gtk_tab_create_focus_and_close_refresh_before_fallback_poll();
+        assert_gtk_selected_tab_changes_keep_main_tree_mounted_and_content_nonblank();
 
         let rows = (0..40)
             .map(|index| {
@@ -19892,10 +20403,7 @@ mod tests {
             .child(&overlay)
             .build();
         window.present();
-        let main_loop = glib::MainLoop::new(None, false);
-        let quit_loop = main_loop.clone();
-        glib::timeout_add_local_once(Duration::from_millis(100), move || quit_loop.quit());
-        main_loop.run();
+        gtk_run_main_loop_for(Duration::from_millis(100));
         let adjustment = scroller.vadjustment();
         assert!(
             adjustment.upper() > adjustment.page_size(),
