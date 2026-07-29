@@ -15189,6 +15189,7 @@ fn app_shortcut_combo_for_key(keyval: gdk::Key, modifiers: gdk::ModifierType) ->
     }
     let mut key = shortcut_key_name(keyval)?;
     let layout_consumed_shift_for_digit = modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+        && !modifiers.contains(gdk::ModifierType::ALT_MASK)
         && key.len() == 1
         && key.as_bytes()[0].is_ascii_digit();
     if modifiers.contains(gdk::ModifierType::SHIFT_MASK) {
@@ -18799,6 +18800,16 @@ mod tests {
             )
             .as_deref(),
             Some("ctrl+2")
+        );
+        assert_eq!(
+            app_shortcut_combo_for_key(
+                digit,
+                gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SHIFT_MASK
+            )
+            .as_deref(),
+            Some("ctrl+opt+shift+2")
         );
         assert_eq!(
             app_shortcut_combo_for_key(c, gdk::ModifierType::empty()),
