@@ -249,7 +249,7 @@ windows because it comes from the persisted window UUID.
 
 Controls when cmux asks before quitting:
 
-- `always`: show the quit confirmation on Cmd+Q, Super+Q, or app quit.
+- `always`: show the quit confirmation on Cmd+Q, Ctrl+Q, or app quit.
 - `dirty-only`: show it only when a workspace has a terminal or panel that reports close confirmation is needed.
 - `never`: quit immediately.
 
@@ -410,7 +410,7 @@ Opt-in Agent Hibernation. cmux kills idle background agent processes to free RAM
 - `maxLiveTerminals`: how many live restorable agent terminals to keep before cmux hibernates the oldest idle background ones. Nothing hibernates while you are at or under this count. Default: `12`. Range: `1`-`256`.
 - `confirmationSeconds`: additional time the terminal output and scoped process set must remain unchanged before cmux terminates the agent. Default: `60`. Range: `1`-`600`.
 
-Enable it from the command palette (`⌘⇧P` on macOS or `Super+Shift+P` on Linux -> Enable Agent Hibernation), from **Settings > Terminal > Agent Hibernation**, or with `cmux agent-hibernation on`.
+Enable it from the command palette (`⌘⇧P` on macOS or `Ctrl+Shift+P` on Linux -> Enable Agent Hibernation), from **Settings > Terminal > Agent Hibernation**, or with `cmux agent-hibernation on`.
 
 ## `sidebar.showAgentActivity`
 
@@ -630,9 +630,9 @@ These values are also available from **Settings > General > Canvas** on Linux.
 ## `app.systemWideHotkeyEnabled`
 
 Linux and macOS default this setting to `false`. When enabled, cmux registers
-`showHideAllWindows` system-wide; its default is `Super+Ctrl+Alt+.` on Linux.
+`showHideAllWindows` system-wide; its default is `Ctrl+Alt+.` on Linux.
 `globalSearch` remains system-wide regardless of this flag and defaults to
-`Super+Alt+F`. Both bindings use the stable IDs in `shortcuts.bindings`, so the
+`Ctrl+Alt+F`. Both bindings use the stable IDs in `shortcuts.bindings`, so the
 Global Hotkey and Keyboard Shortcuts settings pages edit the same values.
 
 The Linux GTK shell prefers the XDG GlobalShortcuts portal and falls back to
@@ -659,10 +659,29 @@ the native **Settings > Keyboard Shortcuts** editor writes the primary
 }
 ```
 
-Linux accepts `super`, `meta`, `cmd`, or `command` for the desktop command
-modifier and canonicalizes modifier order. Set a binding to `null`, an empty
-string, `none`, `clear`, `unbound`, or `disabled` to unbind it. Removing the
-action entry restores its built-in default.
+Linux built-ins never use Super. Explicit overrides still accept `super`,
+`meta`, `cmd`, or `command` and display them as Super. Set a binding to `null`,
+an empty string, `none`, `clear`, `unbound`, or `disabled` to unbind it.
+Removing the action entry restores its built-in Linux default.
+
+The mechanical Command-to-Ctrl conversion keeps the direct binding for the
+common or focus-specific action. Conflicting less-common actions use these
+Linux exceptions:
+
+- `closeWindow`: `Ctrl+Alt+Shift+W`
+- `equalizeSplits`: `Ctrl+Alt+Shift+=`
+- `focusHistoryBack` / `focusHistoryForward`: `Ctrl+Alt+Shift+[` / `]`
+- `selectWorkspaceByNumber`: `Ctrl+Alt+Shift+1…9`
+- `canvasRevealFocusedPane`, `canvasOverview`, and `canvasTidy`:
+  `Ctrl+Alt+Shift+R`, `Ctrl+Alt+Shift+O`, and `Ctrl+Alt+Shift+T`
+- `toggleReactGrab`: `Ctrl+Alt+Shift+G`
+- `toggleFullScreen`: unbound because `Ctrl+Alt+Shift+F` is Hide Find
+- `openDiffViewer`: unbound because `Ctrl+Alt+Shift+D` is Split Browser Down
+
+Context-specific duplicates remain direct only where their focus contexts do
+not overlap: command-palette navigation versus opening/creating, browser versus
+Markdown zoom, browser navigation versus workspace navigation, browser reload
+versus rename, and right-sidebar modes versus numbered surface selection.
 
 The Linux dispatcher includes the shared workspace, split-layout,
 configuration, and notification action IDs, including `nextSidebarTab`,
@@ -671,15 +690,17 @@ configuration, and notification action IDs, including `nextSidebarTab`,
 `markOldestUnreadAndJumpNext`. On Linux, `showNotifications` reveals the
 notification feed in the right sidebar.
 
-App/window actions use `toggleFullScreen` (`Super+Ctrl+F`) and `quit`
-(`Super+Q`). Fullscreen state is maintained per model window, persisted with
+App/window actions use `quit` (`Ctrl+Q`). `toggleFullScreen` is configurable
+but unbound by default on Linux; its mechanical `Ctrl+F` mapping conflicts with
+Find, and the `Ctrl+Alt+Shift+F` relocation is already used by Hide Find.
+Fullscreen state is maintained per model window, persisted with
 the Linux session, and synchronized bidirectionally with GTK. Quit checks all
 windows for embedded terminals requiring confirmation before GTK exits.
-`reopenPreviousSession` (`Super+Shift+O`) opens a new copy of every window from
+`reopenPreviousSession` (`Ctrl+Shift+O`) opens a new copy of every window from
 the snapshot captured at process launch, preserving the windows created or
 changed during the current launch. The command is also available as **Restore
 Previous App Launch** in the command palette.
-`reopenClosedBrowserPanel` (`Super+Shift+T`) restores the most recently closed
+`reopenClosedBrowserPanel` (`Ctrl+Shift+T`) restores the most recently closed
 browser panel. Linux keeps the latest 100 browser closes in LIFO order,
 including URL, title, navigation history, page zoom, owning workspace, pane,
 and tab index. A surviving original pane is reused; otherwise cmux recreates
@@ -687,87 +708,89 @@ the removed split beside its surviving neighbor and falls back to the focused
 pane if that neighbor is gone. Entries for deleted workspaces are discarded.
 The same operation is exposed as **Reopen Last Closed** in the command palette
 and as `history.reopen_closed` on the socket API.
-`globalSearch` (`Super+Alt+F`) opens **Search All Windows**, a dedicated live
+`globalSearch` (`Ctrl+Alt+F`) opens **Search All Windows**, a dedicated live
 search over every open window and panel. Empty-query results browse open
 panels; typed queries use prefix-token AND matching over window, workspace,
 and panel titles plus browser page text/URLs and Markdown contents/paths.
 Results include the matching snippet and location, and selecting one focuses
 its window, workspace, pane, and surface. Browser and Markdown content hits
-also select the first matching inline-search needle. `Super+1` through
-`Super+9` activate the corresponding visible result.
+also select the first matching inline-search needle. `Ctrl+1` through
+`Ctrl+9` activate the corresponding visible result.
 `commandPaletteNext` (`Ctrl+N`) and `commandPalettePrevious` (`Ctrl+P`) are
 active only while the palette is visible; unbinding either action lets that
 control key reach the focused terminal.
 
 Focused topology and terminal actions also use the shared IDs.
-`closeOtherTabsInPane` (`Super+Alt+T`) closes unpinned sibling tabs in the
+`closeOtherTabsInPane` (`Ctrl+Alt+T`) closes unpinned sibling tabs in the
 focused pane, while `toggleFocusedWorkspaceGroupCollapsed`
-(`Super+Ctrl+.`) expands or collapses the focused workspace's group and lets
+(`Ctrl+.`) expands or collapses the focused workspace's group and lets
 the chord propagate when that workspace is ungrouped.
-`groupSelectedWorkspaces` (`Super+Shift+G`) creates a group from two or more
-sidebar-selected workspaces. It shares React Grab's default binding and falls
-through to `toggleReactGrab` when the explicit sidebar selection is too small.
+`groupSelectedWorkspaces` (`Ctrl+Shift+G`) creates a group from two or more
+sidebar-selected workspaces. `toggleReactGrab` moved to `Ctrl+Alt+Shift+G` so
+the two actions no longer overlap.
 `clearScreenKeepScrollback`
-(`Super+Shift+K`) sends Ctrl-L to the focused terminal, preserving scrollback.
+(`Ctrl+Shift+K`) sends Ctrl-L to the focused terminal, preserving scrollback.
 `sendCtrlFToTerminal` is unbound by default and can be assigned as an escape
 hatch for TUIs that consume Ctrl-F. Both terminal actions route through the
 live core PTY or the renderer-owned Ghostty input queue.
 
-The beta terminal TextBox uses `focusTextBoxInput` (`Super+Shift+A`) to move
+The beta terminal TextBox uses `focusTextBoxInput` (`Ctrl+Shift+A`) to move
 between its multiline composer and the focused terminal, and
-`attachTextBoxFile` (`Super+Alt+Shift+A`) to open the multiple-file picker.
+`attachTextBoxFile` (`Ctrl+Alt+Shift+A`) to open the multiple-file picker.
 Text and ordered attachment paths are submitted through the same Ghostty input
 queue as direct terminal paste/key events. Drafts persist per terminal in the
 Linux session snapshot. Configure startup visibility/focus and composer height
 with `terminal.showTextBoxOnNewTerminals`,
 `terminal.focusTextBoxOnNewTerminals`, and `terminal.textBoxMaxLines`.
 
-`toggleTerminalCopyMode` (`Super+Shift+M`) enters the focused Ghostty terminal's
+`toggleTerminalCopyMode` (`Ctrl+Shift+M`) enters the focused Ghostty terminal's
 keyboard copy mode. Use `h`/`j`/`k`/`l` or the arrow keys to move, numeric
 prefixes to repeat, `v` to start or clear visual selection, `y` to copy a
 visual selection, and `yy` or `Shift+Y` to copy full lines. `gg`/`Shift+G`,
 page and half-page controls, prompt jumps, and `/` plus `n`/`Shift+N` match the
-macOS behavior. `Escape` or `q` exits; Super shortcuts continue to reach the
+macOS behavior. `Escape` or `q` exits; Ctrl shortcuts continue to reach the
 application while the mode is active.
 
-Find actions use `find` (`Super+F`), `findInDirectory` (`Super+Shift+F`),
-`findNext` (`Super+G`), `findPrevious` (`Super+Alt+G`), `hideFind`
-(`Super+Alt+Shift+F`), and `useSelectionForFind` (`Super+E`). On a terminal,
+Find actions use `find` (`Ctrl+F`), `findInDirectory` (`Ctrl+Shift+F`),
+`findNext` (`Ctrl+G`), `findPrevious` (`Ctrl+Alt+G`), `hideFind`
+(`Ctrl+Alt+Shift+F`), and `useSelectionForFind` (`Ctrl+E`). On a terminal,
 Linux opens the GTK search bar and routes navigation, selection, and close
 through Ghostty binding actions. A focused browser returns these shortcuts to
 WebKit so its native find handling remains authoritative. Directory search
 opens and focuses the right sidebar's Find mode.
 
-Right-sidebar actions use the same stable IDs and defaults as macOS:
-`focusRightSidebar` (`Super+Shift+E`), `toggleFileExplorer` (`Super+Alt+B`),
+`toggleSidebar` uses `Ctrl+B` for the left workspace sidebar. Right-sidebar
+actions use the same stable IDs as macOS with Linux Ctrl-based defaults:
+`focusRightSidebar` (`Ctrl+Shift+E`), `toggleFileExplorer`
+(`Ctrl+Alt+B`),
 and `switchRightSidebarToFiles`, `switchRightSidebarToFind`,
 `switchRightSidebarToSessions`, `switchRightSidebarToFeed`, and
 `switchRightSidebarToDock` (`Ctrl+1` through `Ctrl+5`). The mode shortcuts are
 active while keyboard focus is in the right sidebar unless their
 `shortcuts.when` predicate is overridden.
 
-Browser shortcuts also share the macOS action IDs and Safari-style defaults.
-`openBrowser` uses `Super+Shift+L`; `newBrowserWorkspace` uses `Super+Alt+N`,
-and `splitBrowserRight` and `splitBrowserDown` use `Super+Alt+D` and
-`Super+Alt+Shift+D`. The workspace action creates a browser-only workspace;
+Browser shortcuts share the macOS action IDs with Linux Ctrl-based defaults.
+`openBrowser` uses `Ctrl+Shift+L`; `newBrowserWorkspace` uses `Ctrl+Alt+N`,
+and `splitBrowserRight` and `splitBrowserDown` use `Ctrl+Alt+D` and
+`Ctrl+Alt+Shift+D`. The workspace action creates a browser-only workspace;
 the split actions create a browser in the exact requested direction. All three
 focus the new browser's address bar. `focusBrowserAddressBar`, `browserBack`,
 `browserForward`, `browserReload`, `browserHardReload`, `browserZoomIn`,
-`browserZoomOut`, and `browserZoomReset` use `Super+L`, `Super+[`, `Super+]`,
-`Super+R`, `Super+Shift+R`, `Super+=`, `Super+-`, and `Super+0` respectively.
+`browserZoomOut`, and `browserZoomReset` use `Ctrl+L`, `Ctrl+[`, `Ctrl+]`,
+`Ctrl+R`, `Ctrl+Shift+R`, `Ctrl+=`, `Ctrl+-`, and `Ctrl+0` respectively.
 `toggleBrowserDeveloperTools` and `showBrowserJavaScriptConsole` use
-`Super+Alt+I` and `Super+Alt+C`. Browser-only actions default to
+`Ctrl+Alt+I` and `Ctrl+Alt+C`. Browser-only actions default to
 `browserFocus`, and Linux routes them to the live WebKitGTK view rather than
 updating only the browser model.
 
 Markdown viewer zoom uses the shared `markdownZoomIn`, `markdownZoomOut`, and
-`markdownZoomReset` IDs with `Super+=`, `Super+-`, and `Super+0`. These actions
+`markdownZoomReset` IDs with `Ctrl+=`, `Ctrl+-`, and `Ctrl+0`. These actions
 default to `markdownFocus`, adjust the native viewer in one-point steps across
 the macOS-compatible 8–96 point range, and reset to 15 points.
-`saveFilePreview` uses `Super+S` and saves the focused native file or Markdown
+`saveFilePreview` uses `Ctrl+S` and saves the focused native file or Markdown
 text editor from its live GTK buffer; rebinding or unbinding the action removes
 the old key path rather than leaving a hardcoded editor shortcut active.
-`editWorkspaceDescription` uses `Super+Alt+E` and opens the focused workspace's
+`editWorkspaceDescription` uses `Ctrl+Alt+E` and opens the focused workspace's
 persisted Markdown description in the command palette. Enter saves,
 `Shift+Enter` inserts a line break, empty input clears the description, and
 closing the palette cancels the draft.
@@ -783,7 +806,7 @@ matches changed paths case-insensitively and Enter advances through matches.
 `selectSurfaceByNumber` and `selectWorkspaceByNumber` are shortcut families.
 Their stored key is normalized to `1`, but the binding covers all digits from
 `1` through `9`; digit `9` selects the last surface or workspace. Defaults are
-`Ctrl+1…9` for surfaces in the focused pane and `Super+1…9` for workspaces.
+`Ctrl+1…9` for surfaces in the focused pane and `Ctrl+Alt+Shift+1…9` for workspaces.
 Two-stroke bindings are supported as well, with the second-stroke digit
 normalized to `1`. While the right sidebar is focused, its priority
 `Ctrl+1` through `Ctrl+5` mode actions win; outside that context the same keys

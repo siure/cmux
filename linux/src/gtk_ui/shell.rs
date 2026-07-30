@@ -28,6 +28,8 @@ pub(super) fn build_snapshot_view(
     canvas_occlusion_states: &GtkCanvasOcclusionStates,
     renderer_mode: GtkRendererMode,
     ui_mode: GtkUiMode,
+    window_id: &str,
+    local_refresh: &GtkLocalRefresh,
 ) -> GtkSnapshotView {
     let left_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     left_slot.add_css_class("cmux-left-slot");
@@ -53,6 +55,7 @@ pub(super) fn build_snapshot_view(
         canvas_occlusion_states,
         renderer_mode,
         ui_mode,
+        local_refresh,
     ));
 
     let right_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -95,10 +98,10 @@ pub(super) fn build_snapshot_view(
 
     let overlay_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
     overlay_slot.add_css_class("cmux-shell-overlay-slot");
-    overlay_slot.set_halign(gtk::Align::Center);
-    overlay_slot.set_valign(gtk::Align::Start);
-    overlay_slot.set_hexpand(false);
-    overlay_slot.set_vexpand(false);
+    overlay_slot.set_halign(gtk::Align::Fill);
+    overlay_slot.set_valign(gtk::Align::Fill);
+    overlay_slot.set_hexpand(true);
+    overlay_slot.set_vexpand(true);
     overlay.add_overlay(&overlay_slot);
 
     let titlebar = gtk::HeaderBar::new();
@@ -137,7 +140,7 @@ pub(super) fn build_snapshot_view(
         actions: Some(actions),
     };
     refresh_header(&view, snapshot, app_state);
-    refresh_overlay(&view, snapshot);
+    refresh_overlay(&view, snapshot, app_state, window_id);
     view
 }
 
@@ -203,7 +206,12 @@ pub(super) fn refresh_header(
     append_header_actions(actions, snapshot, app_state);
 }
 
-pub(super) fn refresh_overlay(view: &GtkSnapshotView, snapshot: &Value) {
+pub(super) fn refresh_overlay(
+    view: &GtkSnapshotView,
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    window_id: &str,
+) {
     let Some(slot) = view.overlay_slot.as_ref() else {
         return;
     };
@@ -212,11 +220,37 @@ pub(super) fn refresh_overlay(view: &GtkSnapshotView, snapshot: &Value) {
     }
     if let Some(palette) = command_palette_panel(snapshot) {
         palette.add_css_class("cmux-shell-overlay-panel");
+        palette.set_halign(gtk::Align::Center);
+        palette.set_valign(gtk::Align::Start);
         slot.append(&palette);
     }
-    if let Some(shortcuts) = shortcut_help_panel(snapshot) {
+    if let Some(shortcuts) = shortcut_help_panel(snapshot, Some((app_state, window_id))) {
         shortcuts.add_css_class("cmux-shell-overlay-panel");
-        slot.append(&shortcuts);
+        shortcuts.set_halign(gtk::Align::Center);
+        configure_shortcut_help_overlay_panel(&shortcuts);
+
+        let backdrop = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        backdrop.add_css_class("cmux-shortcut-help-backdrop");
+        backdrop.set_hexpand(true);
+        backdrop.set_vexpand(true);
+        let click = gtk::GestureClick::new();
+        let app_state = Arc::clone(app_state);
+        let window_id = window_id.to_string();
+        click.connect_pressed(move |_, _, _, _| {
+            handle_shortcut_help_dismissal(
+                &app_state,
+                &window_id,
+                ShortcutHelpDismissInteraction::BackdropPress,
+            );
+        });
+        backdrop.add_controller(click);
+
+        let overlay = gtk::Overlay::new();
+        overlay.set_hexpand(true);
+        overlay.set_vexpand(true);
+        overlay.set_child(Some(&backdrop));
+        overlay.add_overlay(&shortcuts);
+        slot.append(&overlay);
     }
     slot.set_visible(slot.first_child().is_some());
 }

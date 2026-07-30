@@ -5,6 +5,7 @@
   "header.command_palette": "コマンドパレット",
   "header.shortcut_help": "キーボードショートカット",
   "header.more_actions": "その他の操作",
+  "shortcut_help.close": "キーボードショートカットを閉じる",
   "action.split_right": "右に分割",
   "action.split_down": "下に分割",
   "action.new_terminal": "新しいターミナル",
