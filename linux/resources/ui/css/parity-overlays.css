@@ -1,0 +1,183 @@
+/* Compact command, shortcut, context, and notification overlays. */
+.cmux-ui-next .cmux-shell-overlay-panel,
+.cmux-ui-next.cmux-shell-overlay-panel {
+  min-width: 400px;
+  margin-top: 7px;
+  border: 1px solid @cmux_separator_strong;
+  border-radius: 7px;
+  background: @cmux_surface_overlay;
+  box-shadow: 0 12px 32px alpha(@cmux_shadow, 0.52);
+}
+
+.cmux-ui-next .cmux-shortcut-help-backdrop,
+.cmux-ui-next.cmux-shortcut-help-backdrop {
+  background: alpha(@cmux_shadow, 0.5);
+}
+
+.cmux-ui-next .cmux-shortcut-help-close,
+.cmux-ui-next.cmux-shortcut-help-close {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: @cmux_text_secondary;
+}
+
+.cmux-ui-next .cmux-shortcut-help-close:hover,
+.cmux-ui-next .cmux-shortcut-help-close:focus,
+.cmux-ui-next.cmux-shortcut-help-close:hover,
+.cmux-ui-next.cmux-shortcut-help-close:focus {
+  background: @cmux_surface_hover;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-overflow-menu,
+.cmux-ui-next.cmux-overflow-menu {
+  padding: 4px;
+  border: 1px solid @cmux_separator;
+  border-radius: 6px;
+  background: @cmux_surface_overlay;
+  box-shadow: 0 8px 24px alpha(@cmux_shadow, 0.46);
+}
+
+.cmux-ui-next .cmux-overflow-menu button,
+.cmux-ui-next.cmux-overflow-menu button {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: @cmux_text;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-overflow-menu button:hover,
+.cmux-ui-next .cmux-overflow-menu button:focus,
+.cmux-ui-next.cmux-overflow-menu button:hover,
+.cmux-ui-next.cmux-overflow-menu button:focus {
+  background: @cmux_selection;
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-context-menu,
+.cmux-ui-next.cmux-context-menu,
+.cmux-ui-next .cmux-palette,
+.cmux-ui-next.cmux-palette,
+.cmux-ui-next .cmux-shortcut-help,
+.cmux-ui-next.cmux-shortcut-help {
+  padding: 6px;
+  border: 1px solid @cmux_separator_strong;
+  border-radius: 6px;
+  background: @cmux_surface_overlay;
+  color: @cmux_text;
+  box-shadow: 0 12px 32px alpha(@cmux_shadow, 0.5);
+}
+
+.cmux-ui-next .cmux-context-item,
+.cmux-ui-next.cmux-context-item {
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: transparent;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-context-item:hover,
+.cmux-ui-next .cmux-context-item:focus,
+.cmux-ui-next.cmux-context-item:hover,
+.cmux-ui-next.cmux-context-item:focus {
+  background: @cmux_selection;
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-palette-query,
+.cmux-ui-next.cmux-palette-query {
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid @cmux_separator;
+  border-radius: 5px;
+  background: @cmux_surface;
+  color: @cmux_text;
+  font-weight: 600;
+}
+
+.cmux-ui-next .cmux-palette-results,
+.cmux-ui-next.cmux-palette-results {
+  padding-top: 2px;
+}
+
+.cmux-ui-next .cmux-palette-scroll,
+.cmux-ui-next.cmux-palette-scroll {
+  background: transparent;
+}
+
+.cmux-ui-next .cmux-palette-row,
+.cmux-ui-next.cmux-palette-row {
+  min-height: 28px;
+  padding: 4px 7px;
+  border-radius: 4px;
+}
+
+.cmux-ui-next .cmux-palette-selected,
+.cmux-ui-next.cmux-palette-selected {
+  background: @cmux_selection;
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-notification,
+.cmux-ui-next.cmux-notification {
+  padding: 6px 7px;
+  border: 1px solid alpha(@cmux_warning, 0.32);
+  border-left: 2px solid @cmux_warning;
+  border-radius: 5px;
+  background: alpha(@cmux_warning, 0.12);
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-notification-button,
+.cmux-ui-next.cmux-notification-button {
+  padding: 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-notification-button:hover,
+.cmux-ui-next .cmux-notification-button:focus,
+.cmux-ui-next.cmux-notification-button:hover,
+.cmux-ui-next.cmux-notification-button:focus {
+  outline: 1px solid @cmux_focus;
+  outline-offset: 1px;
+}
+
+.cmux-ui-next .cmux-shortcut-help-header {
+  min-height: 28px;
+  padding: 0 2px 4px;
+  border-bottom: 1px solid @cmux_separator;
+}
+
+.cmux-ui-next .cmux-shortcut-help-rows {
+  padding: 3px 0 0;
+}
+
+.cmux-ui-next .cmux-shortcut-help-scroll {
+  background: transparent;
+}
+
+.cmux-ui-next .cmux-palette-input {
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid @cmux_separator;
+  border-radius: 5px;
+  background: @cmux_surface;
+  color: @cmux_text;
+  caret-color: @cmux_text;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-palette-input:focus {
+  border-color: @cmux_focus;
+}

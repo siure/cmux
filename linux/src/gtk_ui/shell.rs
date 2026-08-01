@@ -2,6 +2,7 @@ use super::mode::GtkUiMode;
 use super::strings;
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct GtkSnapshotView {
     pub(super) root: gtk::Widget,
     pub(super) left_slot: gtk::Box,
@@ -9,9 +10,12 @@ pub(super) struct GtkSnapshotView {
     pub(super) right_slot: gtk::Box,
     pub(super) overlay_slot: Option<gtk::Box>,
     pub(super) titlebar: Option<gtk::HeaderBar>,
+    shell_body: Option<gtk::Box>,
+    right_drawer: Option<gtk::Box>,
+    compact: Rc<Cell<bool>>,
     title: Option<gtk::Label>,
-    context: Option<gtk::Label>,
-    actions: Option<gtk::Box>,
+    start_actions: Option<gtk::Box>,
+    end_actions: Option<gtk::Box>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,7 +65,7 @@ pub(super) fn build_snapshot_view(
     let right_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     right_slot.add_css_class("cmux-right-slot");
     if right_sidebar_visible(snapshot) {
-        right_slot.append(&app_chrome_sidebar(snapshot, app_state));
+        right_slot.append(&app_chrome_sidebar(snapshot, app_state, ui_mode));
     }
     right_slot.set_visible(right_sidebar_visible(snapshot));
 
@@ -79,9 +83,12 @@ pub(super) fn build_snapshot_view(
             right_slot,
             overlay_slot: None,
             titlebar: None,
+            shell_body: None,
+            right_drawer: None,
+            compact: Rc::new(Cell::new(false)),
             title: None,
-            context: None,
-            actions: None,
+            start_actions: None,
+            end_actions: None,
         };
     }
 
@@ -96,6 +103,14 @@ pub(super) fn build_snapshot_view(
     overlay.add_css_class(ui_mode.root_css_class());
     overlay.set_child(Some(&body));
 
+    let right_drawer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    right_drawer.add_css_class("cmux-right-drawer");
+    right_drawer.set_halign(gtk::Align::End);
+    right_drawer.set_valign(gtk::Align::Fill);
+    right_drawer.set_vexpand(true);
+    right_drawer.set_visible(false);
+    overlay.add_overlay(&right_drawer);
+
     let overlay_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
     overlay_slot.add_css_class("cmux-shell-overlay-slot");
     overlay_slot.set_halign(gtk::Align::Fill);
@@ -107,26 +122,23 @@ pub(super) fn build_snapshot_view(
     let titlebar = gtk::HeaderBar::new();
     titlebar.add_css_class(ui_mode.root_css_class());
     titlebar.add_css_class("cmux-headerbar");
+    titlebar.set_height_request(super::metrics::HEADER_HEIGHT);
     titlebar.set_show_title_buttons(true);
 
-    let title_stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    title_stack.set_halign(gtk::Align::Center);
-    title_stack.set_valign(gtk::Align::Center);
     let title = gtk::Label::new(None);
     title.add_css_class("cmux-header-title");
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    title.set_max_width_chars(48);
-    let context = gtk::Label::new(None);
-    context.add_css_class("cmux-header-context");
-    context.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    context.set_max_width_chars(64);
-    title_stack.append(&title);
-    title_stack.append(&context);
-    titlebar.set_title_widget(Some(&title_stack));
+    title.set_max_width_chars(56);
+    title.set_halign(gtk::Align::Center);
+    titlebar.set_title_widget(Some(&title));
 
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-    actions.set_valign(gtk::Align::Center);
-    titlebar.pack_end(&actions);
+    let start_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    start_actions.set_valign(gtk::Align::Center);
+    titlebar.pack_start(&start_actions);
+
+    let end_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    end_actions.set_valign(gtk::Align::Center);
+    titlebar.pack_end(&end_actions);
 
     let view = GtkSnapshotView {
         root: overlay.upcast(),
@@ -135,9 +147,12 @@ pub(super) fn build_snapshot_view(
         right_slot,
         overlay_slot: Some(overlay_slot),
         titlebar: Some(titlebar),
+        shell_body: Some(body),
+        right_drawer: Some(right_drawer),
+        compact: Rc::new(Cell::new(false)),
         title: Some(title),
-        context: Some(context),
-        actions: Some(actions),
+        start_actions: Some(start_actions),
+        end_actions: Some(end_actions),
     };
     refresh_header(&view, snapshot, app_state);
     refresh_overlay(&view, snapshot, app_state, window_id);
@@ -192,18 +207,65 @@ pub(super) fn refresh_header(
             .filter(|value| !value.is_empty())
             .unwrap_or("cmux"),
     );
-    if let Some(context_label) = view.context.as_ref() {
-        let context = workspace_context(selected);
-        context_label.set_text(&context);
-        context_label.set_visible(!context.is_empty());
-    }
-    let Some(actions) = view.actions.as_ref() else {
+    let context = workspace_context(selected);
+    title.set_tooltip_text((!context.is_empty()).then_some(context.as_str()));
+    let (Some(start_actions), Some(end_actions)) =
+        (view.start_actions.as_ref(), view.end_actions.as_ref())
+    else {
         return;
     };
-    while let Some(child) = actions.first_child() {
-        actions.remove(&child);
+    while let Some(child) = start_actions.first_child() {
+        start_actions.remove(&child);
     }
-    append_header_actions(actions, snapshot, app_state);
+    while let Some(child) = end_actions.first_child() {
+        end_actions.remove(&child);
+    }
+    append_header_actions(start_actions, end_actions, snapshot, app_state);
+}
+
+pub(super) fn set_compact_layout(view: &GtkSnapshotView, compact: bool) {
+    let changed = view.compact.replace(compact) != compact;
+    let (Some(body), Some(drawer)) = (view.shell_body.as_ref(), view.right_drawer.as_ref()) else {
+        return;
+    };
+    if let Some(sidebar) = view.left_slot.first_child() {
+        let width = if compact {
+            super::metrics::COMPACT_SIDEBAR_WIDTH
+        } else {
+            super::metrics::SIDEBAR_WIDTH
+        };
+        sidebar.set_width_request(width);
+        if let Some(viewport) = sidebar
+            .first_child()
+            .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok())
+        {
+            viewport.set_max_content_width(-1);
+            viewport.set_min_content_width(width);
+            viewport.set_max_content_width(width);
+        }
+    }
+    if changed {
+        if let Some(parent) = view.right_slot.parent() {
+            if let Ok(parent) = parent.downcast::<gtk::Box>() {
+                parent.remove(&view.right_slot);
+            }
+        }
+        if compact {
+            view.root.add_css_class("cmux-layout-compact");
+            drawer.append(&view.right_slot);
+        } else {
+            view.root.remove_css_class("cmux-layout-compact");
+            body.append(&view.right_slot);
+        }
+    }
+    drawer.set_visible(compact && view.right_slot.is_visible());
+}
+
+pub(super) fn set_right_sidebar_visible(view: &GtkSnapshotView, visible: bool) {
+    view.right_slot.set_visible(visible);
+    if let Some(drawer) = view.right_drawer.as_ref() {
+        drawer.set_visible(view.compact.get() && visible);
+    }
 }
 
 pub(super) fn refresh_overlay(
@@ -255,44 +317,35 @@ pub(super) fn refresh_overlay(
     slot.set_visible(slot.first_child().is_some());
 }
 
-fn append_header_actions(actions: &gtk::Box, snapshot: &Value, app_state: &Arc<Mutex<AppState>>) {
+fn append_header_actions(
+    start_actions: &gtk::Box,
+    end_actions: &gtk::Box,
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+) {
     let (new_workspace_method, new_workspace_params) = new_workspace_request_for_snapshot(snapshot);
-    actions.append(&header_icon_button(
+    start_actions.append(&header_icon_button(
         "list-add-symbolic",
         &strings::text("header.new_workspace"),
         app_state,
         new_workspace_method,
         new_workspace_params,
     ));
-    actions.append(&header_icon_button(
-        BROWSER_TOOLBAR_ICON,
-        &strings::text("header.open_browser"),
-        app_state,
-        "browser.open_split",
-        json!({"url": "about:blank", "focus": true}),
-    ));
-    actions.append(&header_icon_button(
-        "sidebar-show-right-symbolic",
-        &strings::text("header.toggle_right_sidebar"),
-        app_state,
-        "sidebar.right",
-        json!({"action": "toggle", "no_focus": true}),
-    ));
-    actions.append(&header_icon_button(
+    end_actions.append(&header_icon_button(
         "system-search-symbolic",
         &strings::text("header.command_palette"),
         app_state,
         "debug.command_palette.toggle",
         json!({}),
     ));
-    actions.append(&header_icon_button(
-        "help-browser-symbolic",
-        &strings::text("header.shortcut_help"),
+    end_actions.append(&header_icon_button(
+        "sidebar-show-right-symbolic",
+        &strings::text("header.toggle_right_sidebar"),
         app_state,
-        "help.shortcuts.toggle",
-        json!({}),
+        "sidebar.right",
+        json!({"action": "toggle", "no_focus": true}),
     ));
-    actions.append(&overflow_button(snapshot, app_state));
+    end_actions.append(&overflow_button(snapshot, app_state));
 }
 
 fn header_icon_button(
@@ -344,6 +397,16 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
     menu.add_css_class("cmux-overflow-menu");
     for (key, method, params) in [
         (
+            "action.new_terminal",
+            "surface.create",
+            json!({"type": "terminal", "focus": true}),
+        ),
+        (
+            "header.open_browser",
+            "browser.open_split",
+            json!({"url": "about:blank", "focus": true}),
+        ),
+        (
             "action.split_right",
             "surface.split",
             json!({"direction": "right"}),
@@ -353,11 +416,7 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
             "surface.split",
             json!({"direction": "down"}),
         ),
-        (
-            "action.new_terminal",
-            "surface.create",
-            json!({"type": "terminal", "focus": true}),
-        ),
+        ("header.shortcut_help", "help.shortcuts.toggle", json!({})),
     ] {
         menu.append(&overflow_action_button(
             &strings::text(key),

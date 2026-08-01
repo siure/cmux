@@ -1,3 +1,7 @@
 @import url("tokens.css");
 @import url("legacy.css");
 @import url("next.css");
+@import url("parity-sidebar.css");
+@import url("parity-panes.css");
+@import url("parity-panels.css");
+@import url("parity-overlays.css");

@@ -21,10 +21,14 @@ if [[ "${1:-}" == "--capture" ]]; then
   export XDG_CONFIG_HOME="$state_root/config"
   export XDG_STATE_HOME="$state_root/state"
   export XDG_CACHE_HOME="$state_root/cache"
-  export CMUX_LINUX_UI=next
+  unset CMUX_LINUX_UI
   export GDK_BACKEND=x11
   export GSK_RENDERER=cairo
-  export GDK_SCALE=1
+  if [[ "$fixture" == "scale2" ]]; then
+    export GDK_SCALE=2
+  else
+    export GDK_SCALE=1
+  fi
   export GTK_THEME=Adwaita:dark
   export GTK_A11Y=none
   export NO_AT_BRIDGE=1
@@ -88,20 +92,48 @@ if [[ "${1:-}" == "--capture" ]]; then
   rpc surface.send_key '{"surface_id":"surface:2","key":"enter"}'
 
   expected_surfaces=2
-  if [[ "$fixture" == "dense" ]]; then
-    rpc surface.split '{"direction":"down"}'
-    rpc surface.send_text '{"surface_id":"surface:3","text":"echo THIRD-PANE; echo notification-ready"}'
-    rpc surface.send_key '{"surface_id":"surface:3","key":"enter"}'
-    rpc surface.create '{"type":"terminal","focus":true}'
-    rpc surface.send_text '{"surface_id":"surface:4","text":"echo SECOND-TAB; echo stable-surface-host"}'
-    rpc surface.send_key '{"surface_id":"surface:4","key":"enter"}'
-    rpc surface.focus '{"surface_id":"surface:3"}'
-    rpc sidebar.right '{"action":"hide"}'
-    expected_surfaces=4
-  else
-    rpc sidebar.right '{"action":"show","mode":"files","no_focus":true}'
-    rpc debug.command_palette.toggle '{}'
-  fi
+  case "$fixture" in
+    dense)
+      rpc surface.split '{"direction":"down"}'
+      rpc surface.send_text '{"surface_id":"surface:3","text":"echo THIRD-PANE; echo notification-ready"}'
+      rpc surface.send_key '{"surface_id":"surface:3","key":"enter"}'
+      rpc surface.create '{"type":"terminal","focus":true}'
+      rpc surface.send_text '{"surface_id":"surface:4","text":"echo SECOND-TAB; echo stable-surface-host"}'
+      rpc surface.send_key '{"surface_id":"surface:4","key":"enter"}'
+      rpc surface.focus '{"surface_id":"surface:3"}'
+      rpc sidebar.right '{"action":"hide"}'
+      expected_surfaces=4
+      ;;
+    narrow|scale2)
+      rpc sidebar.right '{"action":"show","mode":"files","no_focus":true}'
+      rpc debug.command_palette.toggle '{}'
+      ;;
+    attention)
+      rpc workspace.create '{"title":"posthog analytics","focus":false}'
+      expected_surfaces=3
+      rpc notification.create '{"workspace_id":"workspace:2","title":"Agent finished","body":"Review the latest metrics changes"}'
+      rpc notification.create_for_surface '{"workspace_id":"workspace:1","surface_id":"surface:2","title":"Needs input","body":"The right pane is waiting"}'
+      rpc surface.action '{"surface_id":"surface:2","action":"mark_unread"}'
+      rpc surface.focus '{"surface_id":"surface:1"}'
+      rpc sidebar.right '{"action":"hide"}'
+      ;;
+    browser)
+      rpc surface.split '{"surface_id":"surface:2","direction":"down","type":"browser","url":"data:text/html,<title>cmux parity</title><body style=background:%23101113;color:%23f4f0e8;font-family:sans-serif;padding:32px><h1>cmux browser</h1><p>Browser panes share the same compact tab and split chrome.</p></body>","focus":true}'
+      rpc sidebar.right '{"action":"hide"}'
+      expected_surfaces=3
+      ;;
+    settings)
+      rpc surface.close '{"surface_id":"surface:2","force":true}'
+      rpc surface.focus '{"surface_id":"surface:1"}'
+      rpc settings.open '{"target":"general"}'
+      rpc sidebar.right '{"action":"hide"}'
+      expected_surfaces=2
+      ;;
+    *)
+      echo "unknown GTK visual fixture: $fixture" >&2
+      exit 1
+      ;;
+  esac
 
   for _ in $(seq 1 100); do
     count="$($cmux --socket "$socket" tree --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(w.get("panes", [])) for window in d.get("windows", []) for w in window.get("workspaces", [])))' 2>/dev/null || printf '0')"
@@ -120,10 +152,24 @@ surfaces = snapshot.get("window_surfaces", snapshot.get("surfaces", []))
 if len(surfaces) != expected:
     raise SystemExit(f"expected {expected} surfaces, got {len(surfaces)}")
 right_visible = bool(snapshot.get("right_sidebar", {}).get("visible"))
-if right_visible != (fixture == "narrow"):
+compact_overlay_fixture = fixture in ("narrow", "scale2")
+if right_visible != compact_overlay_fixture:
     raise SystemExit(f"unexpected right sidebar visibility: {right_visible}")
-if fixture == "narrow" and not snapshot.get("command_palette", {}).get("visible"):
+if compact_overlay_fixture and not snapshot.get("command_palette", {}).get("visible"):
     raise SystemExit("command palette is not visible in narrow fixture")
+if fixture == "attention":
+    workspaces = snapshot.get("workspaces", [])
+    if len(workspaces) < 2 or not any(row.get("unread") for row in workspaces):
+        raise SystemExit("attention fixture is missing workspace unread state")
+    views = snapshot.get("surface_views", [])
+    if not any(any(tab.get("unread") for tab in view.get("tabs", [])) for view in views):
+        raise SystemExit("attention fixture is missing pane tab unread state")
+if fixture == "browser":
+    if not any((surface.get("kind") or surface.get("type")) == "browser" for surface in surfaces):
+        raise SystemExit("browser fixture is missing a browser surface")
+if fixture == "settings":
+    if not any((surface.get("kind") or surface.get("type")) == "settings" for surface in surfaces):
+        raise SystemExit("settings fixture is missing a settings surface")
 PY
 
   python3 - "$actual" "$width" "$height" <<'PY'
@@ -197,5 +243,9 @@ PY
 }
 
 run_fixture dense 1180 760
+run_fixture attention 1180 760
+run_fixture browser 1180 760
+run_fixture settings 1180 760
 run_fixture narrow 900 700
-printf 'GTK next-shell screenshots: %s\n' "$output_dir"
+run_fixture scale2 1800 1400
+printf 'GTK parity screenshots: %s\n' "$output_dir"

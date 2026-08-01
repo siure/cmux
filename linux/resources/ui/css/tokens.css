@@ -1,11 +1,29 @@
-@define-color cmux_window #151719;
-@define-color cmux_chrome #202326;
-@define-color cmux_surface #0f1113;
-@define-color cmux_surface_raised #181b1e;
-@define-color cmux_separator #34383d;
-@define-color cmux_text #f4f0e8;
-@define-color cmux_muted #a7b0b8;
-@define-color cmux_accent #3d8ef7;
-@define-color cmux_accent_hover #55a0ff;
-@define-color cmux_selection #347fdb;
-@define-color cmux_warning #d4a93a;
+/* Warm, near-black application chrome. Keep all next-mode color decisions here. */
+@define-color cmux_window #12110f;
+@define-color cmux_chrome #191815;
+@define-color cmux_sidebar #1c1b18;
+@define-color cmux_surface #0d0d0c;
+@define-color cmux_surface_raised #171613;
+@define-color cmux_surface_overlay #211f1b;
+@define-color cmux_surface_hover #2a2823;
+@define-color cmux_surface_active #34312b;
+
+@define-color cmux_separator #302e29;
+@define-color cmux_separator_strong #46423a;
+
+@define-color cmux_text #eee9df;
+@define-color cmux_text_secondary #aaa49a;
+@define-color cmux_text_dim #79736a;
+@define-color cmux_text_inverse #ffffff;
+
+@define-color cmux_accent #4b93ff;
+@define-color cmux_accent_hover #68a5ff;
+@define-color cmux_selection #1f5fa9;
+@define-color cmux_selection_hover #286dbb;
+@define-color cmux_focus #57a0ff;
+@define-color cmux_unread #64a8ff;
+
+@define-color cmux_warning #d7a84b;
+@define-color cmux_danger #ef7771;
+@define-color cmux_success #63c174;
+@define-color cmux_shadow #000000;
