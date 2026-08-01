@@ -14226,7 +14226,7 @@ fn surface_card(
     if is_terminal && renderer_mode == GtkRendererMode::Ghostty {
         if let Some(ghostty) = ghostty.as_ref() {
             detach_widget(ghostty.root());
-            ghostty.root().add_css_class("cmux-terminal-preview");
+            ghostty.root().add_css_class("cmux-terminal-native");
             card.append(ghostty.root());
         } else {
             card.append(&label("Ghostty surface missing id", "cmux-muted"));

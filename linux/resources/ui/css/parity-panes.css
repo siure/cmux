@@ -143,6 +143,14 @@
   color: @cmux_text;
 }
 
+.cmux-ui-next .cmux-terminal-native {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: @cmux_surface;
+}
+
 .cmux-ui-next .cmux-terminal-preview,
 .cmux-ui-next .cmux-surface-preview {
   margin: 0;
