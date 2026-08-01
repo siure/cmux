@@ -2090,10 +2090,7 @@ fn snapshot_pane_chrome_rebuild_keys(snapshot: &Value) -> HashMap<String, Value>
                 pane_id_or_ref(view)?,
                 json!({
                     "focused": view.get("focused"),
-                    "unread_count": unread_count,
-                    "selected_tab_unread": tabs.iter().any(|tab| {
-                        value_bool(tab, "selected") && value_bool(tab, "unread")
-                    })
+                    "unread_count": unread_count
                 }),
             ))
         })
@@ -21143,7 +21140,6 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
         });
         let original = snapshot_pane_chrome_rebuild_keys(&snapshot);
         assert_eq!(original["pane:1"]["unread_count"], 0);
-        assert_eq!(original["pane:1"]["selected_tab_unread"], false);
 
         let mut focused = snapshot.clone();
         focused["surface_views"][0]["focused"] = json!(true);
@@ -21153,7 +21149,6 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
         unread["surface_views"][0]["tabs"][0]["unread"] = json!(true);
         let unread_keys = snapshot_pane_chrome_rebuild_keys(&unread);
         assert_eq!(unread_keys["pane:1"]["unread_count"], 1);
-        assert_eq!(unread_keys["pane:1"]["selected_tab_unread"], true);
     }
 
     #[test]
