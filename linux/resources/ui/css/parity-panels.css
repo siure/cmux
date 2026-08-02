@@ -1,0 +1,192 @@
+/* Compact settings, project, document, and agent side panels. */
+.cmux-ui-next .cmux-settings,
+.cmux-ui-next .cmux-project,
+.cmux-ui-next .cmux-document,
+.cmux-ui-next .cmux-agent-session {
+  border-top: 1px solid @cmux_separator;
+  background: @cmux_window;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-settings-nav {
+  min-width: 176px;
+  padding: 6px;
+  border-right: 1px solid @cmux_separator;
+  background: @cmux_chrome;
+}
+
+.cmux-ui-next .cmux-settings-nav button {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: @cmux_text_secondary;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-settings-nav button:hover {
+  background: @cmux_surface_hover;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-settings-nav button:checked {
+  background: @cmux_selection;
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-settings-content {
+  padding: 16px 18px;
+  background: @cmux_window;
+}
+
+.cmux-ui-next .cmux-settings-row {
+  padding: 9px 0;
+  border-bottom: 1px solid @cmux_separator;
+}
+
+.cmux-ui-next .cmux-settings-control {
+  min-width: 0;
+}
+
+.cmux-ui-next switch.cmux-settings-control {
+  min-width: 42px;
+  min-height: 22px;
+}
+
+.cmux-ui-next combobox.cmux-settings-control,
+.cmux-ui-next spinbutton.cmux-settings-control,
+.cmux-ui-next entry.cmux-settings-control {
+  min-width: 150px;
+}
+
+.cmux-ui-next .cmux-project-toolbar,
+.cmux-ui-next .cmux-document-toolbar,
+.cmux-ui-next .cmux-agent-session-toolbar,
+.cmux-ui-next .cmux-agent-session-composer {
+  min-height: 30px;
+  padding: 4px 7px;
+  border-bottom: 1px solid @cmux_separator;
+  background: @cmux_chrome;
+}
+
+.cmux-ui-next .cmux-project-content {
+  padding: 8px 9px;
+}
+
+.cmux-ui-next .cmux-project-row {
+  min-height: 27px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: @cmux_text;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-project-row:hover {
+  background: @cmux_surface_hover;
+}
+
+.cmux-ui-next .cmux-project-row:checked {
+  background: @cmux_selection;
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-project-setting {
+  padding: 5px 3px;
+  border-bottom: 1px solid @cmux_separator;
+}
+
+.cmux-ui-next .cmux-document-content {
+  padding: 13px 15px;
+}
+
+.cmux-ui-next .cmux-document-text,
+.cmux-ui-next .cmux-document-text text {
+  background: @cmux_window;
+  color: @cmux_text;
+  caret-color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-document-annotation {
+  padding: 6px 8px;
+  border-left: 2px solid @cmux_accent;
+  background: alpha(@cmux_accent, 0.09);
+}
+
+.cmux-ui-next .cmux-diff-split-grid {
+  border-bottom: 1px solid @cmux_separator;
+}
+
+.cmux-ui-next .cmux-diff-split-line-numbers {
+  padding: 0 4px;
+  color: @cmux_text_dim;
+}
+
+.cmux-ui-next .cmux-diff-split-code {
+  min-width: 320px;
+}
+
+.cmux-ui-next .cmux-diff-split-divider {
+  background: @cmux_separator;
+}
+
+.cmux-ui-next .cmux-agent-session-composer {
+  border-top: 1px solid @cmux_separator;
+  border-bottom: 0;
+}
+
+.cmux-ui-next .cmux-agent-session-attachments {
+  padding: 4px 7px 0;
+  background: @cmux_chrome;
+}
+
+.cmux-ui-next .cmux-agent-session-attachment {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: @cmux_surface_active;
+}
+
+.cmux-ui-next .cmux-agent-session-attachment button {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 1px;
+}
+
+.cmux-ui-next .cmux-agent-session-editor {
+  padding: 4px 6px;
+  background: @cmux_window;
+  color: @cmux_text;
+  caret-color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-agent-session-transcript,
+.cmux-ui-next .cmux-agent-session-transcript text {
+  background: @cmux_window;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-agent-session-error {
+  padding: 5px 7px;
+  background: alpha(@cmux_danger, 0.13);
+  color: @cmux_danger;
+}
+
+.cmux-ui-next .cmux-agent-session-permissions {
+  min-width: 140px;
+}
+
+.cmux-ui-next .cmux-status-row,
+.cmux-ui-next .cmux-log-row {
+  padding: 6px;
+  border-radius: 4px;
+}
+
+.cmux-ui-next .cmux-status-row {
+  background: @cmux_surface_hover;
+}
+
+.cmux-ui-next .cmux-log-row {
+  background: @cmux_surface;
+}

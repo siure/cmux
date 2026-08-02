@@ -51,14 +51,57 @@ pub(super) fn register_resources() -> Result<()> {
 mod tests {
     use super::*;
 
+    const STYLESHEET_NAMES: &[&str] = &[
+        "tokens.css",
+        "legacy.css",
+        "next.css",
+        "parity-sidebar.css",
+        "parity-panes.css",
+        "parity-panels.css",
+        "parity-overlays.css",
+    ];
+
+    const PARITY_STYLESHEET_NAMES: &[&str] = &[
+        "parity-sidebar.css",
+        "parity-panes.css",
+        "parity-panels.css",
+        "parity-overlays.css",
+    ];
+
+    fn resource_text(path: &str) -> String {
+        let data = gio::resources_lookup_data(path, gio::ResourceLookupFlags::NONE).unwrap();
+        std::str::from_utf8(data.as_ref()).unwrap().to_owned()
+    }
+
     #[test]
-    fn compiled_gtk_stylesheet_is_registered() {
+    fn compiled_gtk_stylesheet_imports_registered_layers() {
         register_resources().unwrap();
-        let data = gio::resources_lookup_data(STYLESHEET_RESOURCE, gio::ResourceLookupFlags::NONE)
-            .unwrap();
-        let stylesheet = std::str::from_utf8(data.as_ref()).unwrap();
-        assert!(stylesheet.contains("tokens.css"));
-        assert!(stylesheet.contains("legacy.css"));
-        assert!(stylesheet.contains("next.css"));
+        let stylesheet = resource_text(STYLESHEET_RESOURCE);
+
+        for name in STYLESHEET_NAMES {
+            assert!(
+                stylesheet.contains(&format!("@import url(\"{name}\");")),
+                "compiled GTK stylesheet does not import {name}"
+            );
+            let path = format!("/ai/manaflow/cmux/ui/css/{name}");
+            assert!(
+                !resource_text(&path).trim().is_empty(),
+                "compiled GTK resource is empty: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn parity_stylesheet_resources_are_registered_and_scoped() {
+        register_resources().unwrap();
+
+        for name in PARITY_STYLESHEET_NAMES {
+            let path = format!("/ai/manaflow/cmux/ui/css/{name}");
+            let stylesheet = resource_text(&path);
+            assert!(
+                stylesheet.contains(".cmux-ui-next"),
+                "{name} must remain scoped to next mode"
+            );
+        }
     }
 }

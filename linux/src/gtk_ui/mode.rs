@@ -4,8 +4,8 @@ pub(super) const UI_MODE_ENV: &str = "CMUX_LINUX_UI";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum GtkUiMode {
-    #[default]
     Legacy,
+    #[default]
     Next,
 }
 
@@ -16,10 +16,10 @@ impl GtkUiMode {
 
     fn parse(value: Option<&str>) -> Result<Self> {
         match value.map(str::trim).filter(|value| !value.is_empty()) {
-            None | Some("legacy") => Ok(Self::Legacy),
-            Some("next") => Ok(Self::Next),
+            None | Some("next") | Some("parity") => Ok(Self::Next),
+            Some("legacy") => Ok(Self::Legacy),
             Some(value) => Err(anyhow!(
-                "{UI_MODE_ENV} requires legacy or next (got: {value})"
+                "{UI_MODE_ENV} requires parity, next, or legacy (got: {value})"
             )),
         }
     }
@@ -41,21 +41,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gtk_ui_mode_defaults_to_legacy() {
-        assert_eq!(GtkUiMode::parse(None).unwrap(), GtkUiMode::Legacy);
-        assert_eq!(GtkUiMode::parse(Some("")).unwrap(), GtkUiMode::Legacy);
+    fn gtk_ui_mode_defaults_to_parity() {
+        assert_eq!(GtkUiMode::parse(None).unwrap(), GtkUiMode::Next);
+        assert_eq!(GtkUiMode::parse(Some("")).unwrap(), GtkUiMode::Next);
     }
 
     #[test]
     fn gtk_ui_mode_accepts_known_modes() {
         assert_eq!(GtkUiMode::parse(Some("legacy")).unwrap(), GtkUiMode::Legacy);
         assert_eq!(GtkUiMode::parse(Some("next")).unwrap(), GtkUiMode::Next);
+        assert_eq!(GtkUiMode::parse(Some("parity")).unwrap(), GtkUiMode::Next);
     }
 
     #[test]
     fn gtk_ui_mode_rejects_unknown_modes() {
         let error = GtkUiMode::parse(Some("future")).unwrap_err().to_string();
         assert!(error.contains(UI_MODE_ENV));
-        assert!(error.contains("legacy or next"));
+        assert!(error.contains("parity, next, or legacy"));
     }
 }

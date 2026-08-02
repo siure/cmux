@@ -24,6 +24,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+mod metrics;
 mod mode;
 mod shell;
 mod strings;
@@ -314,6 +315,7 @@ struct GtkWindowHost {
     last_main_non_tab_rebuild_key: Value,
     last_main_structure_rebuild_key: Value,
     last_pane_rebuild_keys: HashMap<String, Value>,
+    last_pane_chrome_rebuild_keys: HashMap<String, Value>,
     last_right_rebuild_key: Value,
     last_header_rebuild_key: Value,
     last_overlay_rebuild_key: Value,
@@ -687,6 +689,29 @@ fn create_gtk_window_host(
         window.set_titlebar(Some(titlebar));
     }
     window.set_child(Some(&snapshot_view.root));
+    if ui_mode.is_next() {
+        let responsive_view = snapshot_view.clone();
+        let resize_connected = Rc::new(Cell::new(false));
+        window.connect_map(move |window| {
+            let Some(surface) = window.surface() else {
+                return;
+            };
+            shell::set_compact_layout(
+                &responsive_view,
+                metrics::compact_layout_for_width(surface.width()),
+            );
+            if resize_connected.replace(true) {
+                return;
+            }
+            let responsive_view = responsive_view.clone();
+            surface.connect_width_notify(move |surface| {
+                shell::set_compact_layout(
+                    &responsive_view,
+                    metrics::compact_layout_for_width(surface.width()),
+                );
+            });
+        });
+    }
 
     let focus_app_state = Arc::clone(app_state);
     let focus_application = application.clone();
@@ -767,6 +792,7 @@ fn create_gtk_window_host(
         last_main_non_tab_rebuild_key: rebuild_keys.main_without_tabs,
         last_main_structure_rebuild_key: snapshot_main_structure_rebuild_key(snapshot),
         last_pane_rebuild_keys: snapshot_pane_rebuild_keys(snapshot),
+        last_pane_chrome_rebuild_keys: snapshot_pane_chrome_rebuild_keys(snapshot),
         last_right_rebuild_key: rebuild_keys.right,
         last_header_rebuild_key: shell::header_rebuild_key(snapshot),
         last_overlay_rebuild_key: shell::overlay_rebuild_key(snapshot),
@@ -829,7 +855,24 @@ fn refresh_gtk_window_host(
             &host.snapshot_view.left_slot,
             Some(workspace_sidebar(snapshot, app_state, ui_mode).upcast()),
         );
+        if ui_mode.is_next() {
+            let compact = host
+                .window
+                .surface()
+                .is_some_and(|surface| metrics::compact_layout_for_width(surface.width()));
+            shell::set_compact_layout(&host.snapshot_view, compact);
+        }
         host.last_left_rebuild_key = rebuild_keys.left;
+    }
+
+    let pane_chrome_rebuild_keys = snapshot_pane_chrome_rebuild_keys(snapshot);
+    if host.last_pane_chrome_rebuild_keys != pane_chrome_rebuild_keys {
+        sync_pane_chrome_states(
+            &host.window,
+            &host.last_pane_chrome_rebuild_keys,
+            &pane_chrome_rebuild_keys,
+        );
+        host.last_pane_chrome_rebuild_keys = pane_chrome_rebuild_keys;
     }
 
     let main_changed = host.last_main_rebuild_key != rebuild_keys.main;
@@ -906,8 +949,9 @@ fn refresh_gtk_window_host(
     }
     if host.last_right_rebuild_key != rebuild_keys.right && !right_rebuild_suppressed {
         let sidebar = right_sidebar_visible(snapshot)
-            .then(|| app_chrome_sidebar(snapshot, app_state).upcast());
+            .then(|| app_chrome_sidebar(snapshot, app_state, ui_mode).upcast());
         replace_snapshot_slot_child(&host.snapshot_view.right_slot, sidebar);
+        shell::set_right_sidebar_visible(&host.snapshot_view, right_sidebar_visible(snapshot));
         host.last_right_rebuild_key = rebuild_keys.right;
     }
 
@@ -2028,6 +2072,31 @@ fn snapshot_pane_rebuild_keys(snapshot: &Value) -> HashMap<String, Value> {
         .collect()
 }
 
+fn snapshot_pane_chrome_rebuild_keys(snapshot: &Value) -> HashMap<String, Value> {
+    snapshot
+        .get("surface_views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|view| value_bool_or(view, "visible", true))
+        .filter_map(|view| {
+            let tabs = view
+                .get("tabs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let unread_count = tabs.iter().filter(|tab| value_bool(tab, "unread")).count();
+            Some((
+                pane_id_or_ref(view)?,
+                json!({
+                    "focused": view.get("focused"),
+                    "unread_count": unread_count
+                }),
+            ))
+        })
+        .collect()
+}
+
 fn snapshot_main_structure_rebuild_key(snapshot: &Value) -> Value {
     let panes = snapshot
         .get("surface_views")
@@ -2163,7 +2232,11 @@ fn workspace_sidebar(
     app_state: &Arc<Mutex<AppState>>,
     ui_mode: GtkUiMode,
 ) -> gtk::Box {
-    let width = if ui_mode.is_next() { 228 } else { 260 };
+    let width = if ui_mode.is_next() {
+        metrics::SIDEBAR_WIDTH
+    } else {
+        260
+    };
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
     sidebar.add_css_class("cmux-sidebar");
     sidebar.set_hexpand(true);
@@ -2174,7 +2247,7 @@ fn workspace_sidebar(
     }
 
     let custom_sidebar = snapshot.get("custom_sidebar").unwrap_or(&Value::Null);
-    sidebar.append(&custom_sidebar_header(custom_sidebar, app_state));
+    sidebar.append(&custom_sidebar_header(custom_sidebar, app_state, ui_mode));
     if custom_sidebar
         .get("selected_provider_id")
         .and_then(Value::as_str)
@@ -2236,17 +2309,28 @@ fn bounded_workspace_sidebar(sidebar: gtk::Box, width: i32) -> gtk::Box {
     frame
 }
 
-fn custom_sidebar_header(custom_sidebar: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::Box {
+fn custom_sidebar_header(
+    custom_sidebar: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    ui_mode: GtkUiMode,
+) -> gtk::Box {
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    header.add_css_class("cmux-sidebar-provider-header");
     header.set_hexpand(true);
-    let title = custom_sidebar
-        .get("selected_name")
+    let default_provider = custom_sidebar
+        .get("selected_provider_id")
         .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Workspaces");
-    let heading = label(title, "cmux-heading");
-    configure_workspace_bounded_label(&heading);
-    header.append(&heading);
+        .is_none_or(|provider| provider == "cmux.sidebar.workspaces");
+    if !ui_mode.is_next() || !default_provider {
+        let title = custom_sidebar
+            .get("selected_name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Workspaces");
+        let heading = label(title, "cmux-heading");
+        configure_workspace_bounded_label(&heading);
+        header.append(&heading);
+    }
 
     if !custom_sidebar
         .get("enabled")
@@ -2256,9 +2340,14 @@ fn custom_sidebar_header(custom_sidebar: &Value, app_state: &Arc<Mutex<AppState>
         return header;
     }
 
+    if ui_mode.is_next() && default_provider {
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        header.append(&spacer);
+    }
     let menu_button = gtk::MenuButton::new();
     menu_button.set_icon_name("view-more-symbolic");
-    menu_button.set_tooltip_text(Some("Choose Sidebar"));
+    menu_button.set_tooltip_text(Some(&strings::text("sidebar.choose")));
     menu_button.add_css_class("cmux-icon-action");
     let popover = gtk::Popover::new();
     let choices = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -2267,7 +2356,7 @@ fn custom_sidebar_header(custom_sidebar: &Value, app_state: &Arc<Mutex<AppState>
     choices.set_margin_start(6);
     choices.set_margin_end(6);
 
-    let workspaces = gtk::Button::with_label("Workspaces");
+    let workspaces = gtk::Button::with_label(&strings::text("sidebar.workspaces"));
     workspaces.add_css_class("cmux-sidebar-provider");
     workspaces.set_halign(gtk::Align::Fill);
     let default_app_state = Arc::clone(app_state);
@@ -3417,23 +3506,28 @@ fn workspace_sidebar_row(
     apply_workspace_color_style(&row, row_model, color_settings);
     row.set_hexpand(true);
     let title_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    if row_model.unread {
+        let unread = label(
+            &row_model.unread_count.max(1).min(99).to_string(),
+            "cmux-workspace-unread",
+        );
+        let unread_text = strings::text("workspace.unread_notifications");
+        unread.set_tooltip_text(Some(&unread_text));
+        unread.update_property(&[gtk::accessible::Property::Label(&unread_text)]);
+        if let Some(color) = color_settings.notification_badge_color.as_deref() {
+            install_custom_sidebar_style(unread.upcast_ref(), &format!("background: {color};"));
+        }
+        title_row.append(&unread);
+    }
     let title = label(&row_model.title, "cmux-heading");
     configure_workspace_title_label(&title, sidebar_settings.wrap_workspace_titles);
     title.set_hexpand(true);
     title_row.append(&title);
-    if row_model.unread {
-        let unread = label("●", "cmux-workspace-unread");
-        unread.set_tooltip_text(Some("Unread notification"));
-        if let Some(color) = color_settings.notification_badge_color.as_deref() {
-            install_custom_sidebar_style(unread.upcast_ref(), &format!("color: {color};"));
-        }
-        title_row.append(&unread);
-    }
     row.append(&title_row);
     append_workspace_sidebar_details(&row, row_model, sidebar_settings, app_state);
     let button = gtk::Button::builder().child(&row).build();
     button.add_css_class("cmux-workspace-select");
-    button.set_focusable(false);
+    button.set_focusable(true);
     button.set_hexpand(true);
     let click_modifiers = Rc::new(Cell::new(gdk::ModifierType::empty()));
     let gesture = gtk::GestureClick::new();
@@ -3462,9 +3556,14 @@ fn workspace_sidebar_row(
     row_container.append(&button);
 
     if row_model.close_visible {
-        let close = gtk::Button::with_label("x");
+        let close_text = strings::text("workspace.close");
+        let close = gtk::Button::builder()
+            .child(&gtk::Image::from_icon_name("window-close-symbolic"))
+            .build();
         close.add_css_class("cmux-workspace-close");
-        close.set_focusable(false);
+        close.set_focusable(true);
+        close.set_tooltip_text(Some(&close_text));
+        close.update_property(&[gtk::accessible::Property::Label(&close_text)]);
         let target = row_model.target.clone();
         let app_state = Arc::clone(app_state);
         close.connect_clicked(move |_| {
@@ -3491,9 +3590,20 @@ fn workspace_group_sidebar_row(
     row_container.add_css_class("cmux-workspace-row");
     row_container.set_hexpand(true);
 
-    let toggle = gtk::Button::with_label(if row_model.collapsed { ">" } else { "v" });
+    let toggle = gtk::Button::builder()
+        .child(&gtk::Image::from_icon_name(if row_model.collapsed {
+            "pan-end-symbolic"
+        } else {
+            "pan-down-symbolic"
+        }))
+        .build();
     toggle.add_css_class("cmux-group-toggle");
-    toggle.set_focusable(false);
+    toggle.set_focusable(true);
+    toggle.set_tooltip_text(Some(&strings::text(if row_model.collapsed {
+        "workspace_group.expand"
+    } else {
+        "workspace_group.collapse"
+    })));
     let group_target = row_model.target.clone();
     let method = if row_model.collapsed {
         "workspace.group.expand"
@@ -3527,7 +3637,7 @@ fn workspace_group_sidebar_row(
 
     let button = gtk::Button::builder().child(&row).build();
     button.add_css_class("cmux-workspace-select");
-    button.set_focusable(false);
+    button.set_focusable(true);
     button.set_hexpand(true);
     let group_target = row_model.target.clone();
     let focus_app_state = Arc::clone(app_state);
@@ -3543,10 +3653,14 @@ fn workspace_group_sidebar_row(
     attach_workspace_drop_target(&button, row_model, drag_state);
     row_container.append(&button);
 
-    let add = gtk::Button::with_label("+");
+    let add_text = strings::text("workspace_group.new_workspace");
+    let add = gtk::Button::builder()
+        .child(&gtk::Image::from_icon_name("list-add-symbolic"))
+        .build();
     add.add_css_class("cmux-group-add");
-    add.set_focusable(false);
-    add.set_tooltip_text(Some("New Workspace in Group"));
+    add.set_focusable(true);
+    add.set_tooltip_text(Some(&add_text));
+    add.update_property(&[gtk::accessible::Property::Label(&add_text)]);
     let group_target = row_model.target.clone();
     let add_app_state = Arc::clone(app_state);
     add.connect_clicked(move |_| {
@@ -3973,6 +4087,7 @@ struct GtkWorkspaceSidebarRow {
     custom_title: bool,
     is_pinned: bool,
     unread: bool,
+    unread_count: u64,
     icon_symbol: String,
     tint_hex: Option<String>,
     description: Option<String>,
@@ -4389,6 +4504,10 @@ fn workspace_sidebar_model(
         custom_title: value_bool(workspace, "custom_title"),
         is_pinned: value_bool(workspace, "pinned"),
         unread: value_bool(workspace, "unread"),
+        unread_count: workspace
+            .get("unread_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| u64::from(value_bool(workspace, "unread"))),
         icon_symbol: String::new(),
         tint_hex: value_string(workspace, "effective_color")
             .or_else(|| value_string(workspace, "custom_color"))
@@ -4493,6 +4612,7 @@ fn workspace_group_sidebar_model(
         custom_title: false,
         is_pinned: value_bool(group, "is_pinned"),
         unread: false,
+        unread_count: 0,
         icon_symbol: value_string(group, "effective_icon_symbol")
             .or_else(|| value_string(group, "icon_symbol"))
             .unwrap_or_else(|| "folder.fill".to_string()),
@@ -6506,8 +6626,8 @@ fn surface_area(
             })
             .unwrap_or_else(|| fallback_surface_grid(cards).upcast())
     };
-    scroll.set_child(Some(&content));
     if let Some(layout) = canvas_layout.as_ref() {
+        scroll.set_child(Some(&content));
         configure_canvas_viewport(
             &scroll,
             layout,
@@ -6517,17 +6637,17 @@ fn surface_area(
             browser_controls,
             canvas_occlusion_states,
         );
-    }
-    if let Some(minimap) = minimap {
-        let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&scroll));
-        overlay.add_overlay(&minimap.area);
-        if let Some(layout) = canvas_layout.as_ref() {
+        if let Some(minimap) = minimap {
+            let overlay = gtk::Overlay::new();
+            overlay.set_child(Some(&scroll));
+            overlay.add_overlay(&minimap.area);
             attach_canvas_pointer_navigation(&overlay, &scroll, layout, app_state, Some(&minimap));
+            main.append(&overlay);
+        } else {
+            main.append(&scroll);
         }
-        main.append(&overlay);
     } else {
-        main.append(&scroll);
+        main.append(&content);
     }
     main
 }
@@ -8343,8 +8463,8 @@ fn fallback_surface_grid(mut cards: HashMap<usize, gtk::Box>) -> gtk::Grid {
     let grid = gtk::Grid::new();
     grid.set_hexpand(true);
     grid.set_vexpand(true);
-    grid.set_column_spacing(12);
-    grid.set_row_spacing(12);
+    grid.set_column_spacing(0);
+    grid.set_row_spacing(0);
     let mut cards = cards.drain().collect::<Vec<_>>();
     cards.sort_by_key(|(index, _)| *index);
     let columns = if cards.len() <= 1 { 1 } else { 2 };
@@ -8548,13 +8668,21 @@ fn selected_workspace_group_target(snapshot: &Value) -> Option<String> {
         })
 }
 
-fn app_chrome_sidebar(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::Box {
+fn app_chrome_sidebar(
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    ui_mode: GtkUiMode,
+) -> gtk::Box {
     let chrome = gtk::Box::new(gtk::Orientation::Vertical, 10);
     chrome.add_css_class("cmux-chrome");
     chrome.set_focusable(true);
     let configured_width = config::sidebar_settings()
         .right_max_width
-        .unwrap_or(300.0)
+        .unwrap_or(if ui_mode.is_next() {
+            metrics::RIGHT_SIDEBAR_WIDTH as f64
+        } else {
+            300.0
+        })
         .clamp(276.0, 4096.0);
     chrome.set_width_request(configured_width.round() as i32);
     chrome.set_vexpand(true);
@@ -8562,7 +8690,6 @@ fn app_chrome_sidebar(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk
     let mode = right_sidebar_mode(snapshot);
     let right_sidebar = snapshot.get("right_sidebar").unwrap_or(&Value::Null);
     chrome.append(&right_sidebar_mode_toolbar(&mode, right_sidebar, app_state));
-    chrome.append(&label(right_sidebar_mode_label(&mode), "cmux-heading"));
     let sidebar = snapshot.get("sidebar").unwrap_or(&Value::Null);
     match mode.as_str() {
         "files" => append_right_sidebar_files(&chrome, sidebar, app_state, false),
@@ -8596,14 +8723,14 @@ fn right_sidebar_mode(snapshot: &Value) -> String {
     }
 }
 
-fn right_sidebar_mode_label(mode: &str) -> &'static str {
-    match mode {
-        "find" => "Find",
-        "sessions" => "Vault",
-        "feed" => "Feed",
-        "dock" => "Dock",
-        _ => "Files",
-    }
+fn right_sidebar_mode_label(mode: &str) -> String {
+    strings::text(match mode {
+        "find" => "right_sidebar.find",
+        "sessions" => "right_sidebar.sessions",
+        "feed" => "right_sidebar.feed",
+        "dock" => "right_sidebar.dock",
+        _ => "right_sidebar.files",
+    })
 }
 
 fn right_sidebar_mode_toolbar(
@@ -8613,6 +8740,10 @@ fn right_sidebar_mode_toolbar(
 ) -> gtk::Box {
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     toolbar.add_css_class("cmux-sidebar-modes");
+    let title = label(&right_sidebar_mode_label(mode), "cmux-heading");
+    title.set_hexpand(true);
+    title.set_xalign(0.0);
+    toolbar.append(&title);
     let available_modes = right_sidebar
         .get("available_modes")
         .and_then(Value::as_array)
@@ -8622,12 +8753,12 @@ fn right_sidebar_mode_toolbar(
                 .filter_map(Value::as_str)
                 .collect::<HashSet<_>>()
         });
-    for (target, icon, tooltip) in [
-        ("files", "folder-symbolic", "Files"),
-        ("find", "edit-find-symbolic", "Find"),
-        ("sessions", "view-list-symbolic", "Vault"),
-        ("feed", "mail-unread-symbolic", "Feed"),
-        ("dock", "utilities-terminal-symbolic", "Dock"),
+    for (target, icon, tooltip_key) in [
+        ("files", "folder-symbolic", "right_sidebar.files"),
+        ("find", "edit-find-symbolic", "right_sidebar.find"),
+        ("sessions", "view-list-symbolic", "right_sidebar.sessions"),
+        ("feed", "mail-unread-symbolic", "right_sidebar.feed"),
+        ("dock", "utilities-terminal-symbolic", "right_sidebar.dock"),
     ] {
         if available_modes
             .as_ref()
@@ -8637,7 +8768,7 @@ fn right_sidebar_mode_toolbar(
         }
         let button = icon_action_button(
             icon,
-            tooltip,
+            &strings::text(tooltip_key),
             app_state,
             "sidebar.right",
             json!({"action": "set", "mode": target, "no_focus": true}),
@@ -9013,16 +9144,20 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
     panel.add_css_class("cmux-palette");
     let query = value_str(palette, "query", "");
     let mode = value_str(palette, "mode", "commands");
-    let heading = if mode == "global_search" {
-        if query.is_empty() {
-            "Search all windows, panels, browser tabs...".to_string()
+    let heading = if query.is_empty() {
+        strings::text(if mode == "global_search" {
+            "palette.search_placeholder"
         } else {
-            format!("Search all windows: {query}")
-        }
+            "palette.command_placeholder"
+        })
     } else {
-        format!("{mode}: {query}")
+        format!("> {query}")
     };
-    panel.append(&label(&heading, "cmux-heading"));
+    let query_label = label(&heading, "cmux-palette-query");
+    query_label.set_xalign(0.0);
+    panel.append(&query_label);
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    rows.add_css_class("cmux-palette-results");
 
     let selected = palette
         .get("selected_index")
@@ -9088,8 +9223,19 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
             row.append(&label(&hint, "cmux-muted"));
         }
         row.set_hexpand(true);
-        panel.append(&row);
+        rows.append(&row);
     }
+    let scroll = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .min_content_height(120)
+        .max_content_height(520)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .child(&rows)
+        .build();
+    scroll.add_css_class("cmux-palette-scroll");
+    panel.append(&scroll);
 
     Some(panel)
 }
@@ -9361,43 +9507,99 @@ fn pane_tab_strip(
 
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     root.add_css_class("cmux-pane-tabs");
+    root.set_height_request(metrics::PANE_TAB_HEIGHT);
     root.set_hexpand(true);
     root.set_widget_name(&pane_id);
     populate_pane_tab_strip(&root, view, app_state, local_refresh);
     Some(root)
 }
 
-fn configure_pane_tab_button(button: &gtk::Button, tab: &GtkPaneTab) {
-    let current_title =
-        widget_descendant_with_css_class(button.upcast_ref(), "cmux-pane-tab-title")
-            .and_then(|widget| widget.downcast::<gtk::Label>().ok())
-            .map(|label| label.text());
-    if current_title.as_deref() != Some(tab.title.as_str()) {
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        content.append(&gtk::Image::from_icon_name(pane_tab_icon(&tab.kind)));
-        let title = label(&tab.title, "cmux-pane-tab-title");
-        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        title.set_max_width_chars(18);
-        content.append(&title);
-        button.set_child(Some(&content));
-    }
-    button.set_focusable(false);
-    button.set_widget_name(&tab.surface_id);
-    let tooltip = if tab.pinned {
-        format!("{} (Pinned)", tab.title)
-    } else {
-        tab.title.clone()
-    };
-    button.set_tooltip_text(Some(&tooltip));
+fn configure_pane_tab_widget(
+    root: &gtk::Box,
+    tab: &GtkPaneTab,
+    hide_close_button: bool,
+    app_state: &Arc<Mutex<AppState>>,
+    local_refresh: Option<&GtkLocalRefresh>,
+) {
+    root.set_widget_name(&tab.surface_id);
+    let select = root
+        .first_child()
+        .and_then(|child| child.downcast::<gtk::Button>().ok())
+        .expect("pane tab select button");
     if tab.selected {
-        button.add_css_class("cmux-pane-tab-selected");
+        select.add_css_class("cmux-pane-tab-selected");
     } else {
-        button.remove_css_class("cmux-pane-tab-selected");
+        select.remove_css_class("cmux-pane-tab-selected");
     }
     if tab.unread {
-        button.add_css_class("cmux-pane-tab-unread");
+        select.add_css_class("cmux-pane-tab-unread");
     } else {
-        button.remove_css_class("cmux-pane-tab-unread");
+        select.remove_css_class("cmux-pane-tab-unread");
+    }
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    content.append(&gtk::Image::from_icon_name(pane_tab_icon(&tab.kind)));
+    if tab.unread {
+        let unread = label("●", "cmux-pane-tab-unread-dot");
+        unread.set_tooltip_text(Some(&strings::text("tab.unread")));
+        content.append(&unread);
+    }
+    if tab.pinned {
+        let pin = gtk::Image::from_icon_name("view-pin-symbolic");
+        pin.add_css_class("cmux-pane-tab-pin");
+        pin.set_tooltip_text(Some(&strings::text("tab.pinned")));
+        content.append(&pin);
+    }
+    let title = label(&tab.title, "cmux-pane-tab-title");
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    title.set_max_width_chars(18);
+    content.append(&title);
+    select.set_child(Some(&content));
+
+    let mut states = Vec::new();
+    if tab.pinned {
+        states.push(strings::text("tab.pinned"));
+    }
+    if tab.unread {
+        states.push(strings::text("tab.unread"));
+    }
+    let tooltip = if states.is_empty() {
+        tab.title.clone()
+    } else {
+        format!("{} — {}", tab.title, states.join(", "))
+    };
+    select.set_tooltip_text(Some(&tooltip));
+    select.update_property(&[gtk::accessible::Property::Label(&tooltip)]);
+
+    let mut child = select.next_sibling();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        root.remove(&widget);
+    }
+
+    if tab.selected && pane_tab_close_button_visible(1, hide_close_button) {
+        let close_text = strings::text("tab.close");
+        let close = gtk::Button::builder()
+            .child(&gtk::Image::from_icon_name("window-close-symbolic"))
+            .build();
+        close.add_css_class("cmux-pane-tab-close");
+        close.set_focusable(true);
+        close.set_tooltip_text(Some(&close_text));
+        close.update_property(&[gtk::accessible::Property::Label(&close_text)]);
+        let surface_id = tab.surface_id.clone();
+        let close_app_state = Arc::clone(app_state);
+        let close_refresh = local_refresh.cloned();
+        close.connect_clicked(move |_| {
+            if call_app(
+                &close_app_state,
+                "surface.close",
+                json!({"surface_id": surface_id, "source": "tab_button"}),
+            ) {
+                if let Some(local_refresh) = close_refresh.as_ref() {
+                    local_refresh.schedule();
+                }
+            }
+        });
+        root.append(&close);
     }
 }
 
@@ -9433,50 +9635,6 @@ fn populate_pane_tab_strip(
     local_refresh: Option<&GtkLocalRefresh>,
 ) {
     let tabs = pane_tabs(view);
-    let (scroller, tab_row) = pane_tab_scroller(root);
-    let mut existing = HashMap::new();
-    let mut child = tab_row.first_child();
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-        if let Ok(button) = widget.downcast::<gtk::Button>() {
-            existing.insert(button.widget_name().to_string(), button);
-        }
-    }
-    let mut previous = None;
-    for tab in &tabs {
-        let button = existing.remove(&tab.surface_id).unwrap_or_else(|| {
-            let button = gtk::Button::new();
-            button.add_css_class("cmux-pane-tab");
-            let surface_id = tab.surface_id.clone();
-            let app_state = Arc::clone(app_state);
-            let local_refresh = local_refresh.cloned();
-            button.connect_clicked(move |_| {
-                if call_app(
-                    &app_state,
-                    "surface.focus",
-                    json!({"surface_id": surface_id}),
-                ) {
-                    if let Some(local_refresh) = local_refresh.as_ref() {
-                        local_refresh.schedule();
-                    }
-                }
-            });
-            tab_row.append(&button);
-            button
-        });
-        configure_pane_tab_button(&button, tab);
-        tab_row.reorder_child_after(&button, previous.as_ref());
-        previous = Some(button);
-    }
-    for button in existing.into_values() {
-        tab_row.remove(&button);
-    }
-
-    let mut child = scroller.next_sibling();
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-        root.remove(&widget);
-    }
     let hide_close_button = app_state
         .lock()
         .ok()
@@ -9487,48 +9645,125 @@ fn populate_pane_tab_strip(
                 .unwrap_or(false)
         })
         .unwrap_or(false);
-    if pane_tab_close_button_visible(tabs.len(), hide_close_button) {
-        if let Some(selected) = tabs.iter().find(|tab| tab.selected) {
-            let close = gtk::Button::builder()
-                .child(&gtk::Image::from_icon_name("window-close-symbolic"))
-                .build();
-            close.add_css_class("cmux-pane-tab-tool");
-            close.set_focusable(false);
-            close.set_tooltip_text(Some("Close Tab"));
-            let surface_id = selected.surface_id.clone();
+    let (scroller, tab_row) = pane_tab_scroller(root);
+    let mut existing = HashMap::new();
+    let mut child = tab_row.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if let Ok(tab_widget) = widget.downcast::<gtk::Box>() {
+            existing.insert(tab_widget.widget_name().to_string(), tab_widget);
+        }
+    }
+    let mut previous = None;
+    for tab in &tabs {
+        let tab_widget = existing.remove(&tab.surface_id).unwrap_or_else(|| {
+            let tab_widget = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            tab_widget.add_css_class("cmux-pane-tab-container");
+            let select = gtk::Button::new();
+            select.add_css_class("cmux-pane-tab");
+            select.add_css_class("cmux-pane-tab-select");
+            select.set_focusable(true);
+            select.set_focus_on_click(false);
+            select.set_hexpand(true);
+            let surface_id = tab.surface_id.clone();
+            let select_app_state = Arc::clone(app_state);
+            let select_refresh = local_refresh.cloned();
+            select.connect_clicked(move |_| {
+                if call_app(
+                    &select_app_state,
+                    "surface.focus",
+                    json!({"surface_id": surface_id}),
+                ) {
+                    if let Some(local_refresh) = select_refresh.as_ref() {
+                        local_refresh.schedule();
+                    }
+                }
+            });
+            tab_widget.append(&select);
+            let middle_click = gtk::GestureClick::new();
+            middle_click.set_button(gdk::BUTTON_MIDDLE);
+            let surface_id = tab.surface_id.clone();
             let app_state = Arc::clone(app_state);
             let local_refresh = local_refresh.cloned();
-            close.connect_clicked(move |_| {
+            middle_click.connect_released(move |gesture, _, _, _| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
                 if call_app(
                     &app_state,
                     "surface.close",
-                    json!({"surface_id": surface_id, "source": "tab_button"}),
+                    json!({"surface_id": surface_id, "source": "tab_middle_click"}),
                 ) {
                     if let Some(local_refresh) = local_refresh.as_ref() {
                         local_refresh.schedule();
                     }
                 }
             });
-            root.append(&close);
-        }
+            tab_widget.add_controller(middle_click);
+            tab_row.append(&tab_widget);
+            tab_widget
+        });
+        configure_pane_tab_widget(
+            &tab_widget,
+            tab,
+            hide_close_button,
+            app_state,
+            local_refresh,
+        );
+        tab_row.reorder_child_after(&tab_widget, previous.as_ref());
+        previous = Some(tab_widget);
     }
-    if let Some(params) = pane_new_terminal_params(view) {
-        let add = gtk::Button::builder()
-            .child(&gtk::Image::from_icon_name("list-add-symbolic"))
+    for tab_widget in existing.into_values() {
+        tab_row.remove(&tab_widget);
+    }
+
+    let mut child = scroller.next_sibling();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        root.remove(&widget);
+    }
+    let append_tool = |icon: &str, tooltip_key: &str, method: &'static str, params: Value| {
+        let tooltip = strings::text(tooltip_key);
+        let button = gtk::Button::builder()
+            .child(&gtk::Image::from_icon_name(icon))
             .build();
-        add.add_css_class("cmux-pane-tab-tool");
-        add.set_focusable(false);
-        add.set_tooltip_text(Some("New Terminal Tab"));
+        button.add_css_class("cmux-pane-tab-tool");
+        button.set_focusable(true);
+        button.set_tooltip_text(Some(&tooltip));
+        button.update_property(&[gtk::accessible::Property::Label(&tooltip)]);
         let app_state = Arc::clone(app_state);
         let local_refresh = local_refresh.cloned();
-        add.connect_clicked(move |_| {
-            if call_app(&app_state, "surface.create", params.clone()) {
+        button.connect_clicked(move |_| {
+            let handled = call_app(&app_state, method, params.clone());
+            if handled {
                 if let Some(local_refresh) = local_refresh.as_ref() {
                     local_refresh.schedule();
                 }
             }
         });
-        root.append(&add);
+        root.append(&button);
+    };
+    if let Some(params) = pane_new_terminal_params(view) {
+        append_tool(
+            "list-add-symbolic",
+            "tab.new_terminal",
+            "surface.create",
+            params,
+        );
+    }
+    if let Some(surface_id) = surface_id_or_ref(view) {
+        append_tool(
+            "go-next-symbolic",
+            "tab.split_right",
+            "surface.split",
+            json!({"surface_id": surface_id, "direction": "right", "focus": true}),
+        );
+    }
+    if let Some(surface_id) = surface_id_or_ref(view) {
+        append_tool(
+            "go-down-symbolic",
+            "tab.split_down",
+            "surface.split",
+            json!({"surface_id": surface_id, "direction": "down", "focus": true}),
+        );
     }
 }
 
@@ -9587,6 +9822,47 @@ fn find_pane_tab_strip(root: &gtk::Widget, pane_id: &str) -> Option<gtk::Box> {
 
 fn find_pane_surface_card(root: &gtk::Widget, pane_id: &str) -> Option<gtk::Box> {
     find_named_box_with_css_class(root, "cmux-surface", pane_id)
+}
+
+fn sync_pane_chrome_states(
+    window: &gtk::ApplicationWindow,
+    previous_keys: &HashMap<String, Value>,
+    next_keys: &HashMap<String, Value>,
+) {
+    let Some(root) = window.child() else {
+        return;
+    };
+    for (pane_id, state) in next_keys {
+        if previous_keys.get(pane_id) == Some(state) {
+            continue;
+        }
+        let Some(card) = find_pane_surface_card(&root, pane_id) else {
+            continue;
+        };
+        let focused = state
+            .get("focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let unread_count = state
+            .get("unread_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if focused {
+            card.add_css_class("cmux-surface-focused");
+        } else {
+            card.remove_css_class("cmux-surface-focused");
+        }
+        if unread_count > 0 {
+            card.add_css_class("cmux-surface-unread");
+            card.set_tooltip_text(Some(&format!(
+                "{}: {unread_count}",
+                strings::text("pane.unread_notifications")
+            )));
+        } else {
+            card.remove_css_class("cmux-surface-unread");
+            card.set_tooltip_text(None);
+        }
+    }
 }
 
 fn replace_pane_surface_card(old: &gtk::Box, new: &gtk::Box) -> bool {
@@ -13889,6 +14165,9 @@ fn surface_card(
     {
         card.add_css_class("cmux-surface-focused");
     }
+    if pane_tabs(view).iter().any(|tab| tab.unread) {
+        card.add_css_class("cmux-surface-unread");
+    }
     card.set_hexpand(true);
     card.set_vexpand(true);
     let margin = if ui_mode.is_next() { 0 } else { 6 };
@@ -13944,7 +14223,7 @@ fn surface_card(
     if is_terminal && renderer_mode == GtkRendererMode::Ghostty {
         if let Some(ghostty) = ghostty.as_ref() {
             detach_widget(ghostty.root());
-            ghostty.root().add_css_class("cmux-terminal-preview");
+            ghostty.root().add_css_class("cmux-terminal-native");
             card.append(ghostty.root());
         } else {
             card.append(&label("Ghostty surface missing id", "cmux-muted"));
@@ -19653,6 +19932,7 @@ mod tests {
             custom_title: false,
             is_pinned: false,
             unread: false,
+            unread_count: 0,
             icon_symbol: "folder.fill".to_string(),
             tint_hex: Some("#abcdef".to_string()),
             description: None,
@@ -20842,6 +21122,33 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
                 cancel_label: "Keep Open".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn gtk_pane_chrome_keys_track_focus_and_local_unread_state() {
+        let snapshot = json!({
+            "surface_views": [{
+                "pane_id": "pane:1",
+                "visible": true,
+                "focused": false,
+                "tabs": [{
+                    "surface_id": "surface:1",
+                    "selected": true,
+                    "unread": false
+                }]
+            }]
+        });
+        let original = snapshot_pane_chrome_rebuild_keys(&snapshot);
+        assert_eq!(original["pane:1"]["unread_count"], 0);
+
+        let mut focused = snapshot.clone();
+        focused["surface_views"][0]["focused"] = json!(true);
+        assert_ne!(original, snapshot_pane_chrome_rebuild_keys(&focused));
+
+        let mut unread = snapshot;
+        unread["surface_views"][0]["tabs"][0]["unread"] = json!(true);
+        let unread_keys = snapshot_pane_chrome_rebuild_keys(&unread);
+        assert_eq!(unread_keys["pane:1"]["unread_count"], 1);
     }
 
     #[test]

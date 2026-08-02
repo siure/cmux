@@ -1,0 +1,255 @@
+/* Dense 240px workspace rail and compact right-side chrome. */
+.cmux-ui-next .cmux-sidebar {
+  min-width: 0;
+  padding: 5px 5px 6px;
+  border-right: 1px solid @cmux_separator;
+  background: @cmux_sidebar;
+}
+
+.cmux-ui-next .cmux-sidebar-provider-header {
+  min-height: 26px;
+  margin-bottom: 2px;
+}
+
+.cmux-ui-next .cmux-sidebar-modes {
+  margin: 0 0 4px;
+}
+
+.cmux-ui-next .cmux-sidebar-provider,
+.cmux-ui-next .cmux-sidebar-file {
+  min-height: 26px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: @cmux_text_secondary;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-sidebar-provider:hover,
+.cmux-ui-next .cmux-sidebar-provider:focus,
+.cmux-ui-next .cmux-sidebar-file:hover,
+.cmux-ui-next .cmux-sidebar-file:focus {
+  background: @cmux_surface_hover;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-sidebar-provider-invalid {
+  color: @cmux_warning;
+}
+
+.cmux-ui-next .cmux-sidebar-mode-active {
+  background: @cmux_surface_active;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-custom-sidebar-button {
+  min-height: 27px;
+}
+
+.cmux-ui-next .cmux-custom-sidebar-error {
+  padding: 6px 7px;
+  border: 1px solid alpha(@cmux_warning, 0.48);
+  border-radius: 5px;
+  background: alpha(@cmux_warning, 0.12);
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-workspace,
+.cmux-ui-next .cmux-workspace-row {
+  border-radius: 6px;
+}
+
+.cmux-ui-next .cmux-workspace {
+  min-height: 28px;
+  padding: 4px 6px;
+  background: transparent;
+}
+
+.cmux-ui-next .cmux-workspace:hover {
+  background: @cmux_surface_hover;
+}
+
+.cmux-ui-next .cmux-workspace-selected,
+.cmux-ui-next .cmux-workspace-selected:hover {
+  background: @cmux_selection;
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-workspace-select:focus .cmux-workspace-selected {
+  background: @cmux_selection_hover;
+  box-shadow: inset 0 0 0 1px @cmux_focus;
+}
+
+.cmux-ui-next .cmux-workspace-detail,
+.cmux-ui-next .cmux-workspace-description {
+  color: @cmux_text_secondary;
+  font-size: 11px;
+}
+
+.cmux-ui-next .cmux-workspace-description {
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-workspace-metadata {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: @cmux_text_secondary;
+  font-size: 10px;
+}
+
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-detail,
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-description,
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-metadata {
+  background: transparent;
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-metadata {
+  padding: 0;
+}
+
+.cmux-ui-next .cmux-workspace-unread {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: @cmux_unread;
+  color: @cmux_text_inverse;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-unread {
+  background: alpha(@cmux_text_inverse, 0.24);
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-workspace-port {
+  min-height: 20px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.cmux-ui-next .cmux-workspace-progress {
+  min-height: 3px;
+}
+
+.cmux-ui-next .cmux-workspace-select {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-workspace-close,
+.cmux-ui-next .cmux-group-toggle,
+.cmux-ui-next .cmux-group-add {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: @cmux_text_secondary;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-workspace-close:hover,
+.cmux-ui-next .cmux-workspace-close:focus,
+.cmux-ui-next .cmux-group-toggle:hover,
+.cmux-ui-next .cmux-group-toggle:focus,
+.cmux-ui-next .cmux-group-add:hover,
+.cmux-ui-next .cmux-group-add:focus {
+  background: @cmux_surface_active;
+  color: @cmux_text;
+}
+
+.cmux-ui-next .cmux-workspace-selected .cmux-workspace-close,
+.cmux-ui-next .cmux-workspace-selected .cmux-group-toggle,
+.cmux-ui-next .cmux-workspace-selected .cmux-group-add {
+  color: @cmux_text_inverse;
+}
+
+.cmux-ui-next .cmux-workspace-group {
+  padding-left: 5px;
+  border-left: 0;
+  background: transparent;
+}
+
+.cmux-ui-next .cmux-workspace-member {
+  margin-left: 10px;
+}
+
+.cmux-ui-next .cmux-workspace-multi-selected {
+  outline: 1px solid @cmux_focus;
+  outline-offset: -1px;
+}
+
+.cmux-ui-next .cmux-drop-target {
+  background: alpha(@cmux_accent, 0.18);
+  outline: 1px solid @cmux_accent;
+  outline-offset: -1px;
+}
+
+.cmux-ui-next .cmux-drag-source {
+  opacity: 0.7;
+}
+
+.cmux-ui-next .cmux-color-swatch {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.cmux-ui-next .cmux-chrome {
+  padding: 6px;
+  border-left: 1px solid @cmux_separator;
+  background: @cmux_chrome;
+}
+
+.cmux-ui-next .cmux-section {
+  margin-top: 7px;
+}
+
+.cmux-ui-next .cmux-toolbar {
+  margin-bottom: 3px;
+}
+
+.cmux-ui-next .cmux-right-slot {
+  background: @cmux_chrome;
+}
+
+.cmux-ui-next .cmux-right-drawer {
+  margin: 6px;
+  border: 1px solid @cmux_separator_strong;
+  border-radius: 7px;
+  background: @cmux_chrome;
+  box-shadow: 0 12px 32px alpha(@cmux_shadow, 0.5);
+}
+
+.cmux-ui-next .cmux-right-drawer .cmux-chrome {
+  border-left: 0;
+  border-radius: 7px;
+}
+
+.cmux-ui-next .cmux-right-sidebar-input,
+.cmux-ui-next .cmux-custom-sidebar-input {
+  min-height: 26px;
+  padding: 2px 6px;
+  border: 1px solid @cmux_separator;
+  border-radius: 4px;
+  background: @cmux_surface;
+  color: @cmux_text;
+  caret-color: @cmux_text;
+  box-shadow: none;
+}
+
+.cmux-ui-next .cmux-right-sidebar-input:focus,
+.cmux-ui-next .cmux-custom-sidebar-input:focus {
+  border-color: @cmux_focus;
+}

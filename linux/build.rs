@@ -17,6 +17,10 @@ fn main() {
     println!("cargo:rerun-if-changed=resources/ui/css/tokens.css");
     println!("cargo:rerun-if-changed=resources/ui/css/legacy.css");
     println!("cargo:rerun-if-changed=resources/ui/css/next.css");
+    println!("cargo:rerun-if-changed=resources/ui/css/parity-sidebar.css");
+    println!("cargo:rerun-if-changed=resources/ui/css/parity-panes.css");
+    println!("cargo:rerun-if-changed=resources/ui/css/parity-panels.css");
+    println!("cargo:rerun-if-changed=resources/ui/css/parity-overlays.css");
     println!("cargo:rerun-if-changed=resources/ui/strings/en.json");
     println!("cargo:rerun-if-changed=resources/ui/strings/ja.json");
 

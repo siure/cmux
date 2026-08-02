@@ -5,6 +5,10 @@
     <file>css/tokens.css</file>
     <file>css/legacy.css</file>
     <file>css/next.css</file>
+    <file>css/parity-sidebar.css</file>
+    <file>css/parity-panes.css</file>
+    <file>css/parity-panels.css</file>
+    <file>css/parity-overlays.css</file>
     <file>strings/en.json</file>
     <file>strings/ja.json</file>
   </gresource>
