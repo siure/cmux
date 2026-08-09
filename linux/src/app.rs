@@ -8279,14 +8279,6 @@ impl AppState {
                             "reason": "result_index_unavailable"
                         }))
                     }
-                } else if self.shortcut_matches("command_palette", &normalized)
-                    && self.shortcut_action_allowed("command_palette", &shortcut_context)
-                {
-                    self.command_palette_toggle_current(CommandPaletteMode::Switcher)
-                } else if self.shortcut_matches("command_palette_commands", &normalized)
-                    && self.shortcut_action_allowed("command_palette_commands", &shortcut_context)
-                {
-                    self.command_palette_toggle_current(CommandPaletteMode::Commands)
                 } else if self.palette_visible_for_current_window() && normalized == "ctrl+a" {
                     self.command_palette_select_all()
                 } else if self.palette_visible_for_current_window() && normalized == "backspace" {
@@ -32415,7 +32407,7 @@ impl AppState {
         let has_prefix = shortcut_dispatch_names().iter().any(|name| {
             self.shortcut_strokes(name)
                 .is_some_and(|strokes| strokes.len() == 2 && strokes[0] == normalized_combo)
-                && self.shortcut_action_allowed(name, context)
+                && self.shortcut_event_allowed(name, normalized_combo, context)
         });
         if !has_prefix {
             return None;
@@ -32549,7 +32541,7 @@ impl AppState {
         normalized_combo: &str,
         context: &ShortcutContext,
     ) -> Option<MatchedShortcut> {
-        if !self.shortcut_action_allowed(name, context) {
+        if !self.shortcut_event_allowed(name, normalized_combo, context) {
             return None;
         }
         if is_numbered_shortcut_name(name) {
@@ -32628,6 +32620,24 @@ impl AppState {
         }
     }
 
+    fn shortcut_event_allowed(
+        &self,
+        name: &str,
+        normalized_combo: &str,
+        context: &ShortcutContext,
+    ) -> bool {
+        let terminal_surface_focused = context.bool("terminalFocus")
+            && self
+                .current_surface_id()
+                .ok()
+                .and_then(|surface_id| self.surfaces.get(&surface_id))
+                .is_some_and(|surface| surface.kind == SurfaceKind::Terminal);
+        self.shortcut_action_allowed(name, context)
+            && !(terminal_surface_focused
+                && self.shortcut_uses_default(name)
+                && terminal_control_sequence_combo(normalized_combo))
+    }
+
     fn shortcut_context(&self, params: &Value) -> ShortcutContext {
         let current_surface = self
             .current_surface_id()
@@ -32664,7 +32674,13 @@ impl AppState {
             provided
                 .and_then(|values| values.get("terminalFocus"))
                 .and_then(Value::as_bool)
-                .unwrap_or(!browser_focus && !markdown_focus && !sidebar_focus),
+                .unwrap_or(
+                    current_surface.is_some_and(|surface| surface.kind == SurfaceKind::Terminal)
+                        && !browser_focus
+                        && !markdown_focus
+                        && !sidebar_focus
+                        && !self.palette_visible_for_current_window(),
+                ),
         );
         context.set_bool(
             "commandPaletteVisible",
@@ -46996,7 +47012,9 @@ fn default_shortcut_combo(name: &str) -> Option<&'static str> {
         "hide_find" => Some("ctrl+alt+shift+f"),
         "use_selection_for_find" => Some("ctrl+e"),
         "save_file_preview" => Some("ctrl+s"),
-        "claude_code" => Some("ctrl+shift+c"),
+        // Ghostty owns Ctrl+Shift+C for the standard Linux terminal Copy action.
+        // Claude Code remains available from the command palette.
+        "claude_code" => None,
         "open_settings" => Some("ctrl+,"),
         "reload_configuration" => Some("ctrl+shift+,"),
         "show_notifications" => Some("ctrl+i"),
@@ -47589,6 +47607,15 @@ fn numbered_shortcut_target<T>(values: &[T], digit: u8) -> Option<&T> {
     } else {
         values.get(digit.saturating_sub(1) as usize)
     }
+}
+
+fn terminal_control_sequence_combo(combo: &str) -> bool {
+    let Some(key) = combo.strip_prefix("ctrl+") else {
+        return false;
+    };
+    !key.contains('+')
+        && (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic()
+            || matches!(key, "space" | "@" | "[" | "\\" | "]" | "^" | "_" | "?"))
 }
 
 pub(crate) fn shifted_shortcut_base_key(key: &str) -> Option<&'static str> {
