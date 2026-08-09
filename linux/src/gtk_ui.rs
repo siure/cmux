@@ -864,6 +864,7 @@ fn refresh_gtk_window_host(
         }
         host.last_left_rebuild_key = rebuild_keys.left;
     }
+    shell::set_left_sidebar_visible(&host.snapshot_view, left_sidebar_visible(snapshot));
 
     let pane_chrome_rebuild_keys = snapshot_pane_chrome_rebuild_keys(snapshot);
     if host.last_pane_chrome_rebuild_keys != pane_chrome_rebuild_keys {
@@ -8705,6 +8706,14 @@ fn app_chrome_sidebar(
 fn right_sidebar_visible(snapshot: &Value) -> bool {
     snapshot
         .get("right_sidebar")
+        .and_then(|sidebar| sidebar.get("visible"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+fn left_sidebar_visible(snapshot: &Value) -> bool {
+    snapshot
+        .get("left_sidebar")
         .and_then(|sidebar| sidebar.get("visible"))
         .and_then(Value::as_bool)
         .unwrap_or(true)
@@ -18182,6 +18191,14 @@ mod tests {
             })),
             7
         );
+    }
+
+    #[test]
+    fn gtk_left_sidebar_state_maps_visibility() {
+        assert!(left_sidebar_visible(&json!({})));
+        assert!(!left_sidebar_visible(&json!({
+            "left_sidebar": {"visible": false}
+        })));
     }
 
     #[test]

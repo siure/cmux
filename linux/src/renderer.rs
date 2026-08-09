@@ -359,6 +359,7 @@ fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<V
     let canvas = app.handle("canvas.info", &json!({}))?;
     let sidebar = sidebar_snapshot(app)?;
     let custom_sidebar = app.custom_sidebar_snapshot();
+    let left_sidebar = app.handle("sidebar.left", &json!({"action": "mode"}))?;
     let right_sidebar = right_sidebar_snapshot(app)?;
     let notifications = app.handle("notification.list", &json!({}))?;
     let command_palette = app.handle("debug.command_palette.results", &json!({"limit": 10}))?;
@@ -391,6 +392,7 @@ fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<V
         "canvas": canvas,
         "sidebar": sidebar,
         "custom_sidebar": custom_sidebar,
+        "left_sidebar": left_sidebar,
         "right_sidebar": right_sidebar,
         "notifications": notifications.get("notifications").cloned().unwrap_or_else(|| json!([])),
         "command_palette": command_palette,

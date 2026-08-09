@@ -785,6 +785,8 @@ struct SessionWindowSnapshot {
     fullscreen: bool,
     selected_workspace_index: usize,
     sidebar_visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    right_sidebar_visible: Option<bool>,
     sidebar_mode: String,
     workspaces: Vec<SessionWorkspaceSnapshot>,
     workspace_groups: Vec<SessionWorkspaceGroupSnapshot>,
@@ -3010,7 +3012,8 @@ pub struct AppState {
     last_workspace_by_window: HashMap<String, String>,
     focus_history_by_window: HashMap<String, FocusHistoryState>,
     focus_history_recording_suppression_depth: usize,
-    sidebar_visible_by_window: HashMap<String, bool>,
+    left_sidebar_visible_by_window: HashMap<String, bool>,
+    right_sidebar_visible_by_window: HashMap<String, bool>,
     sidebar_mode_by_window: HashMap<String, String>,
     custom_sidebar_selection_path: PathBuf,
     custom_sidebar_state_path: PathBuf,
@@ -3318,7 +3321,8 @@ impl AppState {
             last_workspace_by_window: HashMap::new(),
             focus_history_by_window: HashMap::new(),
             focus_history_recording_suppression_depth: 0,
-            sidebar_visible_by_window: HashMap::new(),
+            left_sidebar_visible_by_window: HashMap::new(),
+            right_sidebar_visible_by_window: HashMap::new(),
             sidebar_mode_by_window: HashMap::new(),
             custom_sidebar_selection_path,
             custom_sidebar_state_path,
@@ -3481,7 +3485,8 @@ impl AppState {
             self.last_workspace_by_window.clear();
             self.focus_history_by_window.clear();
             self.focus_history_recording_suppression_depth = 0;
-            self.sidebar_visible_by_window.clear();
+            self.left_sidebar_visible_by_window.clear();
+            self.right_sidebar_visible_by_window.clear();
             self.sidebar_mode_by_window.clear();
             self.right_sidebar_focus_generation_by_window.clear();
             self.shortcut_help_visible_by_window.clear();
@@ -3511,8 +3516,17 @@ impl AppState {
                 window.display_name = window_snapshot.display_name.clone();
                 window.fullscreen = window_snapshot.fullscreen;
             }
-            self.sidebar_visible_by_window
-                .insert(window_id.clone(), window_snapshot.sidebar_visible);
+            let (left_sidebar_visible, right_sidebar_visible) =
+                match window_snapshot.right_sidebar_visible {
+                    Some(right_sidebar_visible) => {
+                        (window_snapshot.sidebar_visible, right_sidebar_visible)
+                    }
+                    None => (true, window_snapshot.sidebar_visible),
+                };
+            self.left_sidebar_visible_by_window
+                .insert(window_id.clone(), left_sidebar_visible);
+            self.right_sidebar_visible_by_window
+                .insert(window_id.clone(), right_sidebar_visible);
             self.sidebar_mode_by_window
                 .insert(window_id.clone(), window_snapshot.sidebar_mode.clone());
 
@@ -4033,10 +4047,16 @@ impl AppState {
                 window.selected_workspace.as_deref(),
             ),
             sidebar_visible: self
-                .sidebar_visible_by_window
+                .left_sidebar_visible_by_window
                 .get(&window.id)
                 .copied()
                 .unwrap_or(true),
+            right_sidebar_visible: Some(
+                self.right_sidebar_visible_by_window
+                    .get(&window.id)
+                    .copied()
+                    .unwrap_or(true),
+            ),
             sidebar_mode: self.right_sidebar_mode(&window.id),
             workspaces: window
                 .workspaces
@@ -8006,6 +8026,7 @@ impl AppState {
             "sidebar.log.clear" => self.sidebar_log_clear(params),
             "sidebar.log.list" => self.sidebar_log_list(params),
             "sidebar.right" => self.right_sidebar_control(params),
+            "sidebar.left" => self.left_sidebar_control(params),
             "sidebar.state" => self.sidebar_state(params),
             "agent.hibernation.set" => self.set_agent_hibernation_settings(params),
             "agent.hibernation.status" => Ok(self.agent_hibernation_status()),
@@ -8207,17 +8228,13 @@ impl AppState {
                 }
             }
             "debug.sidebar.visible" => {
-                let window_id = self
-                    .resolve_window_optional(
-                        params.get("window_id").or_else(|| params.get("window")),
-                    )?
-                    .unwrap_or_else(|| self.current_window.clone());
-                Ok(json!({
-                    "window_id": window_id,
-                    "window_ref": self.window_ref(&window_id),
-                    "visible": self.sidebar_visible_by_window.get(&window_id).copied().unwrap_or(true),
-                    "mode": self.right_sidebar_mode(&window_id)
-                }))
+                if let Some(visible) = bool_param(params, "visible") {
+                    let mut control = params.clone();
+                    control["action"] = json!(if visible { "show" } else { "hide" });
+                    self.left_sidebar_control(&control)
+                } else {
+                    self.left_sidebar_control(params)
+                }
             }
             "debug.right_sidebar.focus" => self.debug_right_sidebar_focus(params),
             "debug.textbox.inline_fixture" => self.debug_textbox_inline_fixture(params),
@@ -13822,7 +13839,8 @@ impl AppState {
             .position(|w| w.id == id)
             .ok_or_else(|| AppError::not_found("window not found"))?;
         let window = self.windows.remove(index);
-        self.sidebar_visible_by_window.remove(&id);
+        self.left_sidebar_visible_by_window.remove(&id);
+        self.right_sidebar_visible_by_window.remove(&id);
         self.sidebar_mode_by_window.remove(&id);
         self.right_sidebar_focus_generation_by_window.remove(&id);
         self.shortcut_help_visible_by_window.remove(&id);
@@ -22951,23 +22969,23 @@ impl AppState {
         match action.as_str() {
             "toggle" => {
                 let next = !self
-                    .sidebar_visible_by_window
+                    .right_sidebar_visible_by_window
                     .get(&window_id)
                     .copied()
                     .unwrap_or(true);
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), next);
             }
             "show" => {
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), true);
             }
             "hide" => {
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), false);
             }
             "focus" => {
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), true);
                 focused = true;
             }
@@ -22992,7 +23010,7 @@ impl AppState {
                     )));
                 }
                 self.sidebar_mode_by_window.insert(window_id.clone(), mode);
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), true);
                 focused = !bool_param(params, "no_focus").unwrap_or(false);
             }
@@ -23053,12 +23071,52 @@ impl AppState {
         json!({
             "window_id": window_id,
             "window_ref": self.window_ref(window_id),
-            "visible": self.sidebar_visible_by_window.get(window_id).copied().unwrap_or(true),
+            "visible": self.right_sidebar_visible_by_window.get(window_id).copied().unwrap_or(true),
             "mode": self.right_sidebar_mode(window_id),
             "available_modes": self.available_right_sidebar_modes(),
             "focus_generation": self.right_sidebar_focus_generation_by_window.get(window_id).copied().unwrap_or(0),
             "action": action,
             "focused": focused
+        })
+    }
+
+    fn left_sidebar_control(&mut self, params: &Value) -> AppResult<Value> {
+        let window_id = self
+            .resolve_window_optional(params.get("window_id").or_else(|| params.get("window")))?
+            .unwrap_or_else(|| self.current_window.clone());
+        let action = string_param(params, "action")
+            .unwrap_or_else(|| "mode".to_string())
+            .trim()
+            .to_ascii_lowercase();
+        match action.as_str() {
+            "toggle" => {
+                let next = !self
+                    .left_sidebar_visible_by_window
+                    .get(&window_id)
+                    .copied()
+                    .unwrap_or(true);
+                Ok(self.set_left_sidebar_visible(&window_id, next))
+            }
+            "show" => Ok(self.set_left_sidebar_visible(&window_id, true)),
+            "hide" => Ok(self.set_left_sidebar_visible(&window_id, false)),
+            "mode" => Ok(self.left_sidebar_state_value(&window_id)),
+            other => Err(AppError::invalid_params(format!(
+                "unknown left-sidebar action: {other}"
+            ))),
+        }
+    }
+
+    fn set_left_sidebar_visible(&mut self, window_id: &str, visible: bool) -> Value {
+        self.left_sidebar_visible_by_window
+            .insert(window_id.to_string(), visible);
+        self.left_sidebar_state_value(window_id)
+    }
+
+    fn left_sidebar_state_value(&self, window_id: &str) -> Value {
+        json!({
+            "window_id": window_id,
+            "window_ref": self.window_ref(window_id),
+            "visible": self.left_sidebar_visible_by_window.get(window_id).copied().unwrap_or(true)
         })
     }
 
@@ -26114,7 +26172,7 @@ impl AppState {
             return Err(AppError::not_found("Window not found"));
         }
         let focus_first_item = bool_param(params, "focus_first_item").unwrap_or(true);
-        self.sidebar_visible_by_window
+        self.right_sidebar_visible_by_window
             .insert(window_id.clone(), true);
         self.sidebar_mode_by_window
             .insert(window_id.clone(), mode.clone());
@@ -31455,7 +31513,7 @@ impl AppState {
                 "palette.toggleSidebar",
                 "Toggle Sidebar",
                 "toggle_sidebar",
-                "debug.sidebar.visible",
+                "sidebar.left",
             ),
             self.command_row(
                 "palette.clearNotifications",
@@ -34151,15 +34209,7 @@ impl AppState {
     }
 
     fn toggle_sidebar_current_window(&mut self) -> AppResult<Value> {
-        let window_id = self.current_window.clone();
-        let next = !self
-            .sidebar_visible_by_window
-            .get(&window_id)
-            .copied()
-            .unwrap_or(true);
-        self.sidebar_visible_by_window
-            .insert(window_id.clone(), next);
-        Ok(json!({"window_id": window_id, "visible": next}))
+        self.left_sidebar_control(&json!({"action": "toggle"}))
     }
 
     fn open_claude_code_integration_installer(&mut self) -> AppResult<Value> {
@@ -57375,6 +57425,55 @@ mod embedded_terminal_action_tests {
     }
 
     #[test]
+    fn session_snapshot_restores_left_and_right_sidebar_visibility_independently() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+        app.handle("debug.sidebar.visible", &json!({"visible": false}))
+            .expect("hide left sidebar");
+        app.handle("sidebar.right", &json!({"action": "hide"}))
+            .expect("hide right sidebar");
+
+        let snapshot = app.session_snapshot(false);
+        assert!(!snapshot.windows[0].sidebar_visible);
+        assert_eq!(snapshot.windows[0].right_sidebar_visible, Some(false));
+
+        let mut restored = AppState::with_paths(None, None).expect("restored app");
+        restored
+            .restore_session_snapshot(snapshot.clone())
+            .expect("restore snapshot");
+        assert_eq!(
+            restored
+                .handle("debug.sidebar.visible", &json!({}))
+                .expect("left sidebar state")["visible"],
+            false
+        );
+        assert_eq!(
+            restored
+                .handle("sidebar.right", &json!({"action": "mode"}))
+                .expect("right sidebar state")["visible"],
+            false
+        );
+
+        let mut legacy_snapshot = snapshot;
+        legacy_snapshot.windows[0].right_sidebar_visible = None;
+        let mut legacy_restored = AppState::with_paths(None, None).expect("legacy restored app");
+        legacy_restored
+            .restore_session_snapshot(legacy_snapshot)
+            .expect("restore legacy snapshot");
+        assert_eq!(
+            legacy_restored
+                .handle("debug.sidebar.visible", &json!({}))
+                .expect("legacy left sidebar state")["visible"],
+            true
+        );
+        assert_eq!(
+            legacy_restored
+                .handle("sidebar.right", &json!({"action": "mode"}))
+                .expect("legacy right sidebar state")["visible"],
+            false
+        );
+    }
+
+    #[test]
     fn custom_sidebar_nested_actions_cannot_reenter_feedback_delivery() {
         assert!(!custom_sidebar_nested_cmux_method_allowed(
             "feedback.submit"
@@ -64218,6 +64317,7 @@ fn supported_methods() -> Vec<&'static str> {
         "sidebar.metadata_block.set",
         "sidebar.progress.clear",
         "sidebar.progress.set",
+        "sidebar.left",
         "sidebar.right",
         "sidebar.state",
         "sidebar.status.clear",

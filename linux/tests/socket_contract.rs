@@ -34644,8 +34644,8 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
     assert_eq!(hide, "");
     let hidden = rpc(
         &server.socket,
-        "debug.sidebar.visible",
-        json!({"window_id": current_window}),
+        "sidebar.right",
+        json!({"action": "mode", "window_id": current_window}),
     );
     assert_eq!(hidden["visible"], false);
     assert_eq!(hidden["mode"], "files");
@@ -34686,6 +34686,31 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
         error.contains("--no-focus is only valid with set"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn socket_left_sidebar_controls_visibility_without_changing_right_sidebar() {
+    let server = start_server();
+    let initial = rpc(&server.socket, "sidebar.left", json!({"action": "mode"}));
+    assert_eq!(initial["visible"], true);
+
+    let hidden = rpc(&server.socket, "sidebar.left", json!({"action": "hide"}));
+    assert_eq!(hidden["visible"], false);
+    assert_eq!(
+        rpc(
+            &server.socket,
+            "debug.sidebar.visible",
+            json!({"window_id": hidden["window_id"]})
+        )["visible"],
+        false
+    );
+    assert_eq!(
+        rpc(&server.socket, "sidebar.right", json!({"action": "mode"}))["visible"],
+        true
+    );
+
+    let shown = rpc(&server.socket, "sidebar.left", json!({"action": "toggle"}));
+    assert_eq!(shown["visible"], true);
 }
 
 #[test]
