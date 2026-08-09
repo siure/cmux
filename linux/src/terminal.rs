@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -475,17 +477,20 @@ fn spawn_terminal_inner(
         .openpty(size.to_pty_size())
         .context("failed to open PTY")?;
 
-    let shell = std::env::var("CMUX_SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut cmd = if let Some(command) = command {
         let mut builder = CommandBuilder::new("/bin/sh");
         builder.arg("-lc");
-        builder.arg(if keep_shell_after_command {
-            format!("{command}; exec \"{shell}\" -i")
+        if keep_shell_after_command {
+            let shell = terminal_shell();
+            builder.arg(format!("{command}; exec \"$1\" -i"));
+            builder.arg("cmux");
+            builder.arg(shell);
         } else {
-            command
-        });
+            builder.arg(command);
+        }
         builder
     } else {
+        let shell = terminal_shell();
         let mut builder = CommandBuilder::new(shell);
         builder.arg("-i");
         builder
@@ -555,6 +560,50 @@ fn spawn_terminal_inner(
         child: Arc::new(Mutex::new(child)),
         title_events,
     })
+}
+
+fn terminal_shell() -> PathBuf {
+    terminal_shell_from_candidates(
+        std::env::var_os("CMUX_SHELL"),
+        std::env::var_os("SHELL"),
+        passwd_shell_for_current_user(),
+    )
+}
+
+fn terminal_shell_from_candidates(
+    cmux_shell: Option<OsString>,
+    environment_shell: Option<OsString>,
+    passwd_shell: Option<PathBuf>,
+) -> PathBuf {
+    cmux_shell
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(environment_shell.map(PathBuf::from))
+        .chain(passwd_shell)
+        .find(|path| shell_path_is_executable(path))
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+fn passwd_shell_for_current_user() -> Option<PathBuf> {
+    let uid = fs::metadata("/proc/self").ok()?.uid();
+    let passwd = fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let _name = fields.next()?;
+        let _password = fields.next()?;
+        let candidate_uid = fields.next()?.parse::<u32>().ok()?;
+        let _gid = fields.next()?;
+        let _gecos = fields.next()?;
+        let _home = fields.next()?;
+        let shell = fields.next()?.trim();
+        (candidate_uid == uid && !shell.is_empty()).then(|| PathBuf::from(shell))
+    })
+}
+
+fn shell_path_is_executable(path: &Path) -> bool {
+    path.is_absolute()
+        && fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 fn terminal_spawn_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
@@ -683,7 +732,18 @@ mod tests {
         shell: Option<&str>,
         expected_shell: &str,
     ) {
-        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        run_shell_selection_probe_with_command(cmux_shell, shell, expected_shell, None);
+    }
+
+    fn run_shell_selection_probe_with_command(
+        cmux_shell: Option<&str>,
+        shell: Option<&str>,
+        expected_shell: &str,
+        initial_command: Option<&str>,
+    ) {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("test executable"));
+        command
             .args([
                 "--exact",
                 "terminal::tests::terminal_shell_selection_probe_child",
@@ -694,9 +754,11 @@ mod tests {
             .env_remove("SHELL")
             .envs(cmux_shell.map(|value| ("CMUX_SHELL", value)))
             .envs(shell.map(|value| ("SHELL", value)))
-            .env("CMUX_TEST_EXPECTED_SHELL", expected_shell)
-            .output()
-            .expect("run isolated shell probe");
+            .env("CMUX_TEST_EXPECTED_SHELL", expected_shell);
+        if let Some(initial_command) = initial_command {
+            command.env("CMUX_TEST_INITIAL_COMMAND", initial_command);
+        }
+        let output = command.output().expect("run isolated shell probe");
 
         assert!(
             output.status.success(),
@@ -711,11 +773,12 @@ mod tests {
     fn terminal_shell_selection_probe_child() {
         let expected_shell =
             std::env::var("CMUX_TEST_EXPECTED_SHELL").expect("expected shell path");
+        let initial_command = std::env::var("CMUX_TEST_INITIAL_COMMAND").ok();
         let buffer = Arc::new(Mutex::new(String::new()));
         let terminal = spawn_terminal(
             None,
             HashMap::new(),
-            None,
+            initial_command.clone(),
             Arc::clone(&buffer),
             TerminalSize::default(),
         )
@@ -739,6 +802,12 @@ mod tests {
             output.contains(&format!("{SHELL_PROBE_PREFIX}{expected_shell}")),
             "expected shell {expected_shell:?}, terminal output was {output:?}"
         );
+        if initial_command.is_some() {
+            assert!(
+                output.contains("initial-command-path"),
+                "initial command did not run before shell handoff: {output:?}"
+            );
+        }
     }
 
     #[test]
@@ -753,6 +822,20 @@ mod tests {
             cmux_shell.to_str(),
             env_shell.to_str(),
             cmux_shell.to_str().expect("cmux shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_runs_initial_command_before_interactive_handoff() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        write_shell_probe(&cmux_shell);
+
+        run_shell_selection_probe_with_command(
+            cmux_shell.to_str(),
+            None,
+            cmux_shell.to_str().expect("cmux shell path"),
+            Some("printf initial-command-path"),
         );
     }
 
@@ -791,6 +874,18 @@ mod tests {
         for shell in [None, Some(""), Some("/definitely/missing/login-shell")] {
             run_shell_selection_probe(Some(""), shell, &expected);
         }
+    }
+
+    #[test]
+    fn terminal_shell_uses_bin_sh_when_all_candidates_are_unusable() {
+        assert_eq!(
+            terminal_shell_from_candidates(
+                Some(OsString::new()),
+                Some(OsString::from("relative-shell")),
+                Some(PathBuf::from("/definitely/missing/passwd-shell")),
+            ),
+            PathBuf::from("/bin/sh")
+        );
     }
 
     #[test]
