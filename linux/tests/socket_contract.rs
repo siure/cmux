@@ -872,6 +872,11 @@ fn start_server_with_env(envs: &[(&str, &str)]) -> Server {
         .arg(&socket)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Keep PTY-backed socket contracts independent of the developer's login shell.
+    // Login-shell selection itself is covered by isolated terminal unit tests.
+    if !envs.iter().any(|(key, _)| *key == "CMUX_SHELL") {
+        command.env("CMUX_SHELL", "/bin/sh");
+    }
     if !envs.iter().any(|(key, _)| *key == "XDG_STATE_HOME") {
         command.env("XDG_STATE_HOME", tmp.path().join("state"));
     }
@@ -11758,11 +11763,7 @@ fn close_confirmation_requests_round_trip_through_renderer_and_reply() {
         .iter()
         .any(|surface| surface["surface_id"] == second_surface));
 
-    let quit = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+q"}),
-    );
+    let quit = simulate_sidebar_shortcut(&server.socket, "ctrl+q");
     assert_eq!(quit["blocked"], true);
     let quit_confirmation_id = quit["confirmation"]["id"]
         .as_str()
@@ -15422,11 +15423,7 @@ fn palette_navigation_fullscreen_and_quit_use_stable_window_actions() {
     );
     assert_eq!(explicit["fullscreen"], false);
 
-    let quit = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+q"}),
-    );
+    let quit = simulate_sidebar_shortcut(&server.socket, "ctrl+q");
     assert_eq!(quit["handled"], true);
     assert_eq!(quit["quit"], false);
     assert_eq!(quit["blocked"], true);
@@ -35236,11 +35233,7 @@ fn command_palette_switcher_searches_recent_surface_input() {
         "surface.focus",
         json!({"surface_id": left_surface}),
     );
-    rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+p"}),
-    );
+    simulate_sidebar_shortcut(&server.socket, "ctrl+p");
     rpc(&server.socket, "debug.type", json!({"text": token}));
 
     let results = rpc(
