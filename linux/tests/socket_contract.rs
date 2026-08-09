@@ -14207,6 +14207,157 @@ fn super_shortcut_defaults_are_unhandled_but_explicit_overrides_dispatch_and_res
 }
 
 #[test]
+fn terminal_focus_defers_control_sequences_but_explicit_shortcuts_still_win() {
+    let server = start_server();
+    let terminal_context = json!({
+        "terminalFocus": true,
+        "browserFocus": false,
+        "sidebarFocus": false,
+        "markdownFocus": false,
+        "commandPaletteVisible": false
+    });
+
+    for combo in [
+        "ctrl+b",
+        "ctrl+p",
+        "ctrl+n",
+        "ctrl+t",
+        "ctrl+f",
+        "ctrl+e",
+        "ctrl+r",
+        "ctrl+o",
+        "ctrl+q",
+        "ctrl+[",
+        "ctrl+]",
+        "ctrl+shift+c",
+    ] {
+        let result = rpc(
+            &server.socket,
+            "debug.shortcut.simulate",
+            json!({"combo": combo, "context": terminal_context.clone()}),
+        );
+        assert_eq!(
+            result["handled"], false,
+            "terminal-owned shortcut {combo} was intercepted: {result}"
+        );
+    }
+
+    let claude_help = rpc(&server.socket, "help.shortcuts", json!({}));
+    let claude_row = claude_help["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["title"] == "Claude Code")
+        .expect("Claude Code shortcut help row");
+    assert_eq!(claude_row["shortcut_hint"], "");
+
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "toggle_sidebar", "combo": "ctrl+p"}),
+    );
+    let explicit = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+p", "context": terminal_context.clone()}),
+    );
+    assert_eq!(explicit["visible"], false);
+    assert_eq!(
+        rpc(
+            &server.socket,
+            "debug.command_palette.visible",
+            json!({})
+        )["visible"],
+        false,
+        "the colliding command-palette default beat the explicit override"
+    );
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "toggle_sidebar", "combo": "reset"}),
+    );
+
+    let surface_count = rpc(&server.socket, "surface.list", json!({}))["surfaces"]
+        .as_array()
+        .unwrap()
+        .len();
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "new_terminal", "combo": "ctrl+b c"}),
+    );
+    let prefix = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+b", "context": terminal_context.clone()}),
+    );
+    assert_eq!(prefix["chord_pending"], true);
+    let completed = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "c", "context": terminal_context.clone()}),
+    );
+    assert_eq!(completed["chord_completed"], true);
+    assert_eq!(
+        rpc(&server.socket, "surface.list", json!({}))["surfaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        surface_count + 1
+    );
+
+    let copy_mode = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+shift+m", "context": terminal_context.clone()}),
+    );
+    assert_eq!(copy_mode["terminal_shortcut_action"], "toggle_copy_mode");
+    assert_eq!(copy_mode["terminal_copy_mode_active"], true);
+    rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+shift+m", "context": terminal_context.clone()}),
+    );
+
+    let browser_default = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({
+            "combo": "ctrl+p",
+            "context": {
+                "terminalFocus": false,
+                "browserFocus": true,
+                "sidebarFocus": false,
+                "markdownFocus": false,
+                "commandPaletteVisible": false
+            }
+        }),
+    );
+    assert_eq!(browser_default["visible"], true);
+    rpc(
+        &server.socket,
+        "debug.command_palette.toggle",
+        json!({}),
+    );
+
+    let sidebar_default = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({
+            "combo": "ctrl+b",
+            "context": {
+                "terminalFocus": false,
+                "browserFocus": false,
+                "sidebarFocus": true,
+                "markdownFocus": false,
+                "commandPaletteVisible": false
+            }
+        }),
+    );
+    assert_eq!(sidebar_default["visible"], true);
+}
+
+#[test]
 fn shifted_symbol_shortcut_overrides_match_base_key_events() {
     let server = start_server();
 
