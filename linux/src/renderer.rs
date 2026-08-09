@@ -3636,6 +3636,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn toggle_sidebar_shortcut_hides_left_sidebar_without_hiding_right_sidebar() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+
+        let initial = snapshot_value(&mut app, &json!({})).expect("initial snapshot");
+        assert_eq!(initial["left_sidebar"]["visible"], true);
+        assert_eq!(initial["right_sidebar"]["visible"], true);
+
+        app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+b"}))
+            .expect("toggle sidebar shortcut");
+
+        let toggled = snapshot_value(&mut app, &json!({})).expect("toggled snapshot");
+        assert_eq!(toggled["left_sidebar"]["visible"], false);
+        assert_eq!(toggled["right_sidebar"]["visible"], true);
+    }
+
+    #[test]
     fn renderer_snapshot_exposes_beta_gated_right_sidebar_modes_and_feed_data() {
         let mut app = AppState::with_paths(None, None).expect("app state");
         app.set_beta_feature_settings_for_test(crate::config::BetaFeatureSettings::default());
