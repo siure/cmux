@@ -640,6 +640,182 @@ fn clean_terminal_osc_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    const SHELL_PROBE_PREFIX: &str = "CMUX_SHELL_PROBE:";
+
+    fn write_shell_probe(path: &Path) {
+        fs::write(
+            path,
+            format!("#!/bin/sh\nprintf '%s%s\\n' '{SHELL_PROBE_PREFIX}' \"$0\"\n"),
+        )
+        .expect("write shell probe");
+        let mut permissions = fs::metadata(path)
+            .expect("shell probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make shell probe executable");
+    }
+
+    fn current_passwd_shell() -> String {
+        let uid = fs::metadata("/proc/self")
+            .expect("current process metadata")
+            .uid();
+        fs::read_to_string("/etc/passwd")
+            .expect("read passwd database")
+            .lines()
+            .filter_map(|line| {
+                let fields = line.split(':').collect::<Vec<_>>();
+                (fields.len() >= 7 && fields[2].parse::<u32>().ok() == Some(uid))
+                    .then(|| fields[6].trim().to_string())
+            })
+            .find(|shell| {
+                !shell.is_empty()
+                    && fs::metadata(shell).is_ok_and(|metadata| {
+                        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                    })
+            })
+            .unwrap_or_else(|| "/bin/sh".to_string())
+    }
+
+    fn run_shell_selection_probe(
+        cmux_shell: Option<&str>,
+        shell: Option<&str>,
+        expected_shell: &str,
+    ) {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "terminal::tests::terminal_shell_selection_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_remove("CMUX_SHELL")
+            .env_remove("SHELL")
+            .envs(cmux_shell.map(|value| ("CMUX_SHELL", value)))
+            .envs(shell.map(|value| ("SHELL", value)))
+            .env("CMUX_TEST_EXPECTED_SHELL", expected_shell)
+            .output()
+            .expect("run isolated shell probe");
+
+        assert!(
+            output.status.success(),
+            "shell probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn terminal_shell_selection_probe_child() {
+        let expected_shell =
+            std::env::var("CMUX_TEST_EXPECTED_SHELL").expect("expected shell path");
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let terminal = spawn_terminal(
+            None,
+            HashMap::new(),
+            None,
+            Arc::clone(&buffer),
+            TerminalSize::default(),
+        )
+        .expect("spawn terminal shell");
+
+        terminal
+            .send_text(&format!(
+                "printf '{SHELL_PROBE_PREFIX}%s\\n' \"$0\"\nexit\n"
+            ))
+            .expect("send shell identity probe");
+        let exit = terminal
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("wait for shell probe");
+        if exit.is_none() {
+            let _ = terminal.kill();
+        }
+        assert!(exit.is_some(), "shell probe timed out");
+
+        let output = buffer.lock().expect("terminal buffer").clone();
+        assert!(
+            output.contains(&format!("{SHELL_PROBE_PREFIX}{expected_shell}")),
+            "expected shell {expected_shell:?}, terminal output was {output:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_shell_prefers_explicit_cmux_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&cmux_shell);
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            cmux_shell.to_str(),
+            env_shell.to_str(),
+            cmux_shell.to_str().expect("cmux shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_uses_valid_shell_environment_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            None,
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_empty_and_invalid_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&env_shell);
+
+        for cmux_shell in ["", "/definitely/missing/cmux-shell"] {
+            run_shell_selection_probe(
+                Some(cmux_shell),
+                env_shell.to_str(),
+                env_shell.to_str().expect("environment shell path"),
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_shell_uses_passwd_fallback_for_empty_or_invalid_shell_environment() {
+        let expected = current_passwd_shell();
+
+        for shell in [None, Some(""), Some("/definitely/missing/login-shell")] {
+            run_shell_selection_probe(Some(""), shell, &expected);
+        }
+    }
+
+    #[test]
+    fn explicit_terminal_process_command_does_not_require_a_valid_interactive_shell() {
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let terminal = spawn_terminal_process(
+            None,
+            HashMap::new(),
+            "printf explicit-command-path".to_string(),
+            Arc::clone(&buffer),
+            TerminalSize::default(),
+        )
+        .expect("spawn explicit terminal command");
+        assert_eq!(
+            terminal
+                .wait_for_exit(Duration::from_secs(3))
+                .expect("wait for explicit command"),
+            Some(0)
+        );
+        let output = buffer.lock().expect("terminal buffer").clone();
+        assert!(
+            output.contains("explicit-command-path"),
+            "output was {output:?}"
+        );
+    }
 
     #[test]
     fn terminal_key_bytes_cover_common_interactive_keys() {
