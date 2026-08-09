@@ -768,6 +768,21 @@ mod tests {
         );
     }
 
+    fn wait_for_terminal_output(
+        buffer: &Arc<Mutex<String>>,
+        expected: &str,
+        timeout: Duration,
+    ) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let output = buffer.lock().expect("terminal buffer").clone();
+            if output.contains(expected) || Instant::now() >= deadline {
+                return output;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     #[ignore = "helper executed in an isolated child process"]
     fn terminal_shell_selection_probe_child() {
@@ -797,9 +812,12 @@ mod tests {
         }
         assert!(exit.is_some(), "shell probe timed out");
 
-        let output = buffer.lock().expect("terminal buffer").clone();
+        // The PTY reader runs independently of the child handle. Process exit can
+        // become visible just before the reader appends the shell's final bytes.
+        let expected_probe = format!("{SHELL_PROBE_PREFIX}{expected_shell}");
+        let output = wait_for_terminal_output(&buffer, &expected_probe, Duration::from_secs(3));
         assert!(
-            output.contains(&format!("{SHELL_PROBE_PREFIX}{expected_shell}")),
+            output.contains(&expected_probe),
             "expected shell {expected_shell:?}, terminal output was {output:?}"
         );
         if initial_command.is_some() {
