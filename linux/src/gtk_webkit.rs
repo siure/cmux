@@ -134,11 +134,31 @@ pub(crate) struct WebKitPdf {
 }
 
 pub(crate) fn configure_environment() {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-    {
+    configure_environment_for_host(false);
+}
+
+pub(crate) fn configure_environment_for_gtk_fallback() {
+    configure_environment_for_host(true);
+}
+
+fn configure_environment_for_host(x11_gtk_fallback: bool) {
+    if should_disable_dmabuf_renderer(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("DISPLAY").is_some(),
+        x11_gtk_fallback,
+        std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some(),
+    ) {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
+}
+
+fn should_disable_dmabuf_renderer(
+    wayland_session: bool,
+    x11_session: bool,
+    x11_gtk_fallback: bool,
+    explicitly_configured: bool,
+) -> bool {
+    !explicitly_configured && (wayland_session || x11_session && x11_gtk_fallback)
 }
 
 fn configure_web_process_extension(api: &WebKitApi) -> Result<(), String> {
@@ -1740,6 +1760,16 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dmabuf_compatibility_is_scoped_to_affected_display_hosts() {
+        assert!(should_disable_dmabuf_renderer(true, false, false, false));
+        assert!(should_disable_dmabuf_renderer(false, true, true, false));
+        assert!(!should_disable_dmabuf_renderer(false, true, false, false));
+        assert!(!should_disable_dmabuf_renderer(true, false, false, true));
+        assert!(!should_disable_dmabuf_renderer(false, true, true, true));
+        assert!(!should_disable_dmabuf_renderer(false, false, true, false));
+    }
 
     #[test]
     fn webkit_runtime_resolves_required_browser_symbols_when_installed() {

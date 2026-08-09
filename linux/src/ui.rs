@@ -306,7 +306,11 @@ pub fn run_app_command(command: &[String]) -> Result<()> {
     )?;
     #[cfg(feature = "gtk")]
     if matches!(renderer.as_str(), "gtk" | "ghostty") {
-        crate::gtk_webkit::configure_environment();
+        if renderer == "gtk" {
+            crate::gtk_webkit::configure_environment_for_gtk_fallback();
+        } else {
+            crate::gtk_webkit::configure_environment();
+        }
     }
     let debug_log_path = socket.as_deref().map(server::debug_log_path_for_socket);
     if let Some(path) = &debug_log_path {
