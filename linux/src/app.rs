@@ -47740,7 +47740,7 @@ mod shortcut_combo_tests {
         normalize_shortcut_strokes_for, numbered_shortcut_digit, numbered_shortcut_target,
         shortcut_config_id, shortcut_default_when, shortcut_dispatch_names,
         shortcut_hint_from_combo, shortcut_name_for_config_id, valid_normalized_shortcut_combo,
-        ShortcutContext, ShortcutWhenClause,
+        terminal_control_sequence_combo, ShortcutContext, ShortcutWhenClause,
     };
     use crate::config::ShortcutBinding;
     use std::collections::HashMap;
@@ -47902,6 +47902,15 @@ mod shortcut_combo_tests {
         );
         assert_eq!(normalize_shortcut_strokes("b c"), None);
         assert_eq!(normalize_shortcut_strokes("ctrl+b c d"), None);
+    }
+
+    #[test]
+    fn terminal_control_sequence_combo_includes_numeric_aliases() {
+        for digit in 2..=8 {
+            assert!(terminal_control_sequence_combo(&format!("ctrl+{digit}")));
+        }
+        assert!(!terminal_control_sequence_combo("ctrl+1"));
+        assert!(!terminal_control_sequence_combo("ctrl+9"));
     }
 
     #[test]
