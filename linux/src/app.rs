@@ -36075,13 +36075,6 @@ impl AppState {
         Ok(false)
     }
 
-    fn ensure_workspace_terminals_started(&mut self, workspace_id: &str) -> AppResult<()> {
-        for surface_id in self.workspace_surface_ids(workspace_id) {
-            self.ensure_surface_terminal_started(&surface_id)?;
-        }
-        Ok(())
-    }
-
     fn set_pane_debug_pixel_size(
         &mut self,
         pane_id: &str,
@@ -37097,11 +37090,15 @@ impl AppState {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // Starting every terminal in a workspace here makes workspace selection
+        // block on one PTY spawn per hidden tab. Only the selected surface in
+        // each pane is visible and needs a live PTY for this selection; inactive
+        // tabs remain lazy until they are selected.
         for surface_id in visible_surface_ids {
             self.resume_agent_hibernated_surface(&surface_id)?;
-        }
-        if self.terminal_startup_mode == TerminalStartupMode::CorePty {
-            self.ensure_workspace_terminals_started(workspace_id)?;
+            if self.terminal_startup_mode == TerminalStartupMode::CorePty {
+                self.ensure_surface_terminal_started(&surface_id)?;
+            }
         }
         if self.is_app_active() {
             self.mark_notifications_read_for_workspace(workspace_id);
