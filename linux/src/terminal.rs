@@ -886,6 +886,29 @@ mod tests {
     }
 
     #[test]
+    fn terminal_shell_skips_override_not_executable_by_current_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blocked_shell = temp.path().join("blocked-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&blocked_shell);
+        write_shell_probe(&env_shell);
+
+        let mut permissions = fs::metadata(&blocked_shell)
+            .expect("blocked shell metadata")
+            .permissions();
+        // The file has execute bits, but not for its owner (the test user).
+        // A mode-bit-only check accepts it even though execve rejects it.
+        permissions.set_mode(0o011);
+        fs::set_permissions(&blocked_shell, permissions).expect("block owner execution");
+
+        run_shell_selection_probe(
+            blocked_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
     fn terminal_shell_uses_passwd_fallback_for_empty_or_invalid_shell_environment() {
         let expected = current_passwd_shell();
 
