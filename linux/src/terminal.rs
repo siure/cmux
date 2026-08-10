@@ -215,7 +215,7 @@ impl ParsedKey {
 
     fn sequence(&self) -> Result<Vec<u8>> {
         if self.ctrl {
-            if let Some(byte) = ctrl_byte(&self.key) {
+            if let Some(byte) = terminal_control_byte(&self.key) {
                 return Ok(maybe_alt_prefixed(vec![byte], self.alt));
             }
         }
@@ -314,7 +314,7 @@ fn canonical_key_name(key: &str) -> String {
     .to_string()
 }
 
-fn ctrl_byte(key: &str) -> Option<u8> {
+pub(crate) fn terminal_control_byte(key: &str) -> Option<u8> {
     let mut chars = key.chars();
     let ch = chars.next()?;
     if chars.next().is_none() {
@@ -322,6 +322,13 @@ fn ctrl_byte(key: &str) -> Option<u8> {
             return Some(ch as u8 - b'a' + 1);
         }
         return match ch {
+            '2' => Some(0x00),
+            '3' => Some(0x1b),
+            '4' => Some(0x1c),
+            '5' => Some(0x1d),
+            '6' => Some(0x1e),
+            '7' => Some(0x1f),
+            '8' => Some(0x7f),
             '@' | ' ' => Some(0x00),
             '[' => Some(0x1b),
             '\\' => Some(0x1c),

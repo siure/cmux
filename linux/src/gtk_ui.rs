@@ -2,7 +2,9 @@ use crate::{
     app::{current_unix_millis, shifted_shortcut_base_key, AppState, GlobalWindowCommand},
     browser_omnibar, config, diff_viewer,
     global_shortcuts::GlobalShortcutManager,
-    renderer, ui,
+    renderer,
+    terminal::terminal_control_byte,
+    ui,
 };
 use anyhow::{anyhow, Result};
 use gtk::gdk;
@@ -14909,6 +14911,9 @@ fn connect_terminal_keys(
                 return glib::Propagation::Stop;
             }
         }
+        if copy_fallback_terminal_selection(focused_widget.as_ref(), keyval, modifiers) {
+            return glib::Propagation::Stop;
+        }
         if let Some(widget) = focused_ghostty_widget
             .as_ref()
             .filter(|widget| widget.copy_mode_active())
@@ -15034,6 +15039,37 @@ fn apply_clipboard_shortcut_result(result: &Value) -> bool {
         return false;
     };
     display.clipboard().set_text(text);
+    true
+}
+
+fn terminal_copy_shortcut(keyval: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+    modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+        && !modifiers.intersects(
+            gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::META_MASK,
+        )
+        && keyval
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'c'))
+}
+
+fn copy_fallback_terminal_selection(
+    focused_widget: Option<&gtk::Widget>,
+    keyval: gdk::Key,
+    modifiers: gdk::ModifierType,
+) -> bool {
+    if !terminal_copy_shortcut(keyval, modifiers) {
+        return false;
+    }
+    let Some(label) = focused_widget
+        .and_then(|widget| widget.downcast_ref::<gtk::Label>())
+        .filter(|label| label.has_css_class("cmux-terminal-preview"))
+    else {
+        return false;
+    };
+    label.emit_copy_clipboard();
     true
 }
 
@@ -15573,6 +15609,9 @@ fn terminal_input_for_key(keyval: gdk::Key, modifiers: gdk::ModifierType) -> Opt
     if modifiers.intersects(gdk::ModifierType::SUPER_MASK | gdk::ModifierType::META_MASK) {
         return None;
     }
+    if terminal_copy_shortcut(keyval, modifiers) {
+        return None;
+    }
 
     let key = if matches!(keyval, gdk::Key::Return | gdk::Key::KP_Enter) {
         Some("enter")
@@ -15615,11 +15654,13 @@ fn terminal_input_for_key(keyval: gdk::Key, modifiers: gdk::ModifierType) -> Opt
         return None;
     }
     if modifiers.contains(gdk::ModifierType::CONTROL_MASK) {
-        if ch.is_ascii_alphabetic() {
-            return Some(terminal_key_input_with_modifiers(
-                &ch.to_ascii_lowercase().to_string(),
-                modifiers,
-            ));
+        let key = if ch == ' ' {
+            "space".to_string()
+        } else {
+            ch.to_ascii_lowercase().to_string()
+        };
+        if terminal_control_byte(&key).is_some() {
+            return Some(terminal_key_input_with_modifiers(&key, modifiers));
         }
         return None;
     }
@@ -20784,6 +20825,22 @@ mod tests {
         if gtk::init().is_err() {
             return;
         }
+        let terminal_label = gtk::Label::new(Some("selected terminal text"));
+        terminal_label.add_css_class("cmux-terminal-preview");
+        terminal_label.set_selectable(true);
+        terminal_label.select_region(0, 8);
+        let copied = Rc::new(Cell::new(false));
+        let copied_for_signal = Rc::clone(&copied);
+        terminal_label.connect_copy_clipboard(move |_| copied_for_signal.set(true));
+        let terminal_widget = terminal_label.upcast::<gtk::Widget>();
+        let c = gdk::Key::from_name("C").expect("shifted c key");
+        assert!(copy_fallback_terminal_selection(
+            Some(&terminal_widget),
+            c,
+            gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+        ));
+        assert!(copied.get());
+
         assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position();
         assert_gtk_tab_create_focus_and_close_refresh_before_fallback_poll();
         assert_gtk_local_refresh_does_not_retain_window_hosts();
