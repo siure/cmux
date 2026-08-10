@@ -406,10 +406,31 @@ fn ghostty_area_lifecycle_action(
         GhosttyAreaLifecycleEvent::Resize if mapped => {
             GhosttyAreaLifecycleAction::Resize { width, height }
         }
+        GhosttyAreaLifecycleEvent::Map if mapped && !has_host_area => {
+            GhosttyAreaLifecycleAction::Realize
+        }
         GhosttyAreaLifecycleEvent::Map | GhosttyAreaLifecycleEvent::Realize => {
             GhosttyAreaLifecycleAction::Wait
         }
         GhosttyAreaLifecycleEvent::Resize => GhosttyAreaLifecycleAction::Wait,
+    }
+}
+
+fn update_ghostty_area_lifecycle(
+    area: &gtk::GLArea,
+    status: &gtk::Label,
+    host: &Rc<RefCell<GtkGhosttyHost>>,
+    event: GhosttyAreaLifecycleEvent,
+) {
+    let width = area.allocated_width();
+    let height = area.allocated_height();
+    let has_host_area = host.borrow().callbacks.area.is_some();
+    match ghostty_area_lifecycle_action(event, area.is_mapped(), has_host_area, width, height) {
+        GhosttyAreaLifecycleAction::Wait => {}
+        GhosttyAreaLifecycleAction::Realize => realize_ghostty_area(area, status, host),
+        GhosttyAreaLifecycleAction::Resize { width, height } => {
+            host.borrow_mut().resize(area, width, height, status);
+        }
     }
 }
 
@@ -541,10 +562,21 @@ fn connect_ghostty_area(
     let realize_host = Rc::clone(&host);
     let realize_status = status.clone();
     area.connect_realize(move |area| {
-        if gtk_ghostty_allocated_surface_size(area).is_none() {
-            return;
-        }
-        realize_ghostty_area(area, &realize_status, &realize_host);
+        update_ghostty_area_lifecycle(
+            area,
+            &realize_status,
+            &realize_host,
+            GhosttyAreaLifecycleEvent::Realize,
+        );
+    });
+
+    let map_host = Rc::clone(&host);
+    let map_status = status.clone();
+    area.connect_map(move |area| {
+        // GTK can realize a GLArea before layout gives it a usable allocation.
+        // Mapping is the recovery point when both that realization and an
+        // earlier unmapped resize had to defer Ghostty surface creation.
+        update_ghostty_area_lifecycle(area, &map_status, &map_host, GhosttyAreaLifecycleEvent::Map);
     });
 
     let resize_host = Rc::clone(&host);
@@ -565,18 +597,12 @@ fn connect_ghostty_area(
             let Some(area) = area.upgrade() else {
                 return;
             };
-            let width = area.allocated_width();
-            let height = area.allocated_height();
-            if !area.is_mapped() || width <= 1 || height <= 1 {
-                return;
-            }
-            if resize_host.borrow().callbacks.area.is_none() {
-                realize_ghostty_area(&area, &resize_status, &resize_host);
-            } else {
-                resize_host
-                    .borrow_mut()
-                    .resize(&area, width, height, &resize_status);
-            }
+            update_ghostty_area_lifecycle(
+                &area,
+                &resize_status,
+                &resize_host,
+                GhosttyAreaLifecycleEvent::Resize,
+            );
         });
     });
     let scale_host = Rc::clone(&host);
