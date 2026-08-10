@@ -373,6 +373,46 @@ fn ghostty_status_visible(status: &str) -> bool {
     status != GHOSTTY_RENDERER_ACTIVE_STATUS
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GhosttyAreaLifecycleEvent {
+    Realize,
+    Map,
+    Resize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GhosttyAreaLifecycleAction {
+    Wait,
+    Realize,
+    Resize { width: i32, height: i32 },
+}
+
+fn ghostty_area_lifecycle_action(
+    event: GhosttyAreaLifecycleEvent,
+    mapped: bool,
+    has_host_area: bool,
+    width: i32,
+    height: i32,
+) -> GhosttyAreaLifecycleAction {
+    if width <= 1 || height <= 1 {
+        return GhosttyAreaLifecycleAction::Wait;
+    }
+
+    match event {
+        GhosttyAreaLifecycleEvent::Realize if !has_host_area => GhosttyAreaLifecycleAction::Realize,
+        GhosttyAreaLifecycleEvent::Resize if mapped && !has_host_area => {
+            GhosttyAreaLifecycleAction::Realize
+        }
+        GhosttyAreaLifecycleEvent::Resize if mapped => {
+            GhosttyAreaLifecycleAction::Resize { width, height }
+        }
+        GhosttyAreaLifecycleEvent::Map | GhosttyAreaLifecycleEvent::Realize => {
+            GhosttyAreaLifecycleAction::Wait
+        }
+        GhosttyAreaLifecycleEvent::Resize => GhosttyAreaLifecycleAction::Wait,
+    }
+}
+
 pub fn ghostty_surface_widget(options: GhosttySurfaceOptions) -> GhosttySurfaceWidget {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
     root.set_hexpand(true);
@@ -8988,6 +9028,28 @@ mod tests {
         assert!(!ghostty_status_visible(GHOSTTY_RENDERER_ACTIVE_STATUS));
         assert!(ghostty_status_visible("Initializing Ghostty renderer"));
         assert!(ghostty_status_visible("Ghostty renderer draw failed"));
+    }
+
+    #[test]
+    fn gtk_ghostty_map_recovers_realize_before_allocation_race() {
+        assert_eq!(
+            ghostty_area_lifecycle_action(GhosttyAreaLifecycleEvent::Realize, false, false, 1, 1),
+            GhosttyAreaLifecycleAction::Wait
+        );
+        assert_eq!(
+            ghostty_area_lifecycle_action(
+                GhosttyAreaLifecycleEvent::Resize,
+                false,
+                false,
+                1200,
+                800,
+            ),
+            GhosttyAreaLifecycleAction::Wait
+        );
+        assert_eq!(
+            ghostty_area_lifecycle_action(GhosttyAreaLifecycleEvent::Map, true, false, 1200, 800),
+            GhosttyAreaLifecycleAction::Realize
+        );
     }
 
     #[test]
