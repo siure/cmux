@@ -1009,6 +1009,24 @@ mod tests {
     }
 
     #[test]
+    fn terminal_key_bytes_cover_numeric_control_aliases() {
+        for (digit, byte) in [
+            (2, 0x00),
+            (3, 0x1b),
+            (4, 0x1c),
+            (5, 0x1d),
+            (6, 0x1e),
+            (7, 0x1f),
+            (8, 0x7f),
+        ] {
+            assert_eq!(
+                terminal_key_bytes(&format!("ctrl-{digit}")).unwrap(),
+                vec![byte]
+            );
+        }
+    }
+
+    #[test]
     fn terminal_key_bytes_cover_tmux_and_ghostty_aliases() {
         assert_eq!(terminal_key_bytes("A").unwrap(), b"A");
         assert_eq!(terminal_key_bytes("C-d").unwrap(), vec![0x04]);

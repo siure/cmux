@@ -18944,6 +18944,19 @@ mod tests {
             terminal_input_for_key(a, gdk::ModifierType::CONTROL_MASK),
             Some(TerminalInput::Key("ctrl-a".to_string()))
         );
+        let six = gdk::Key::from_name("6").expect("6 key");
+        assert_eq!(
+            terminal_input_for_key(six, gdk::ModifierType::CONTROL_MASK),
+            Some(TerminalInput::Key("ctrl-6".to_string()))
+        );
+        let c = gdk::Key::from_name("C").expect("shifted c key");
+        assert_eq!(
+            terminal_input_for_key(
+                c,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            None
+        );
         let v = gdk::Key::from_name("V").expect("shifted v key");
         assert_eq!(
             terminal_input_for_key(
