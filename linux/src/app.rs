@@ -47615,7 +47615,23 @@ fn terminal_control_sequence_combo(combo: &str) -> bool {
     };
     !key.contains('+')
         && (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic()
-            || matches!(key, "space" | "@" | "[" | "\\" | "]" | "^" | "_" | "?"))
+            || matches!(
+                key,
+                "2" | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "space"
+                    | "@"
+                    | "["
+                    | "\\"
+                    | "]"
+                    | "^"
+                    | "_"
+                    | "?"
+            ))
 }
 
 pub(crate) fn shifted_shortcut_base_key(key: &str) -> Option<&'static str> {
@@ -47739,8 +47755,8 @@ mod shortcut_combo_tests {
         normalize_numbered_shortcut_binding, normalize_shortcut_combo, normalize_shortcut_strokes,
         normalize_shortcut_strokes_for, numbered_shortcut_digit, numbered_shortcut_target,
         shortcut_config_id, shortcut_default_when, shortcut_dispatch_names,
-        shortcut_hint_from_combo, shortcut_name_for_config_id, valid_normalized_shortcut_combo,
-        terminal_control_sequence_combo, ShortcutContext, ShortcutWhenClause,
+        shortcut_hint_from_combo, shortcut_name_for_config_id, terminal_control_sequence_combo,
+        valid_normalized_shortcut_combo, ShortcutContext, ShortcutWhenClause,
     };
     use crate::config::ShortcutBinding;
     use std::collections::HashMap;
