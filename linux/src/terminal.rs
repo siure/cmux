@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -585,25 +585,65 @@ fn terminal_shell_from_candidates(
 }
 
 fn passwd_shell_for_current_user() -> Option<PathBuf> {
-    let uid = fs::metadata("/proc/self").ok()?.uid();
-    let passwd = fs::read_to_string("/etc/passwd").ok()?;
-    passwd.lines().find_map(|line| {
-        let mut fields = line.split(':');
-        let _name = fields.next()?;
-        let _password = fields.next()?;
-        let candidate_uid = fields.next()?.parse::<u32>().ok()?;
-        let _gid = fields.next()?;
-        let _gecos = fields.next()?;
-        let _home = fields.next()?;
-        let shell = fields.next()?.trim();
-        (candidate_uid == uid && !shell.is_empty()).then(|| PathBuf::from(shell))
-    })
+    // SAFETY: getuid has no preconditions and does not dereference pointers.
+    passwd_shell_for_uid(unsafe { libc::getuid() })
+}
+
+fn passwd_shell_for_uid(uid: libc::uid_t) -> Option<PathBuf> {
+    const DEFAULT_PASSWD_BUFFER_SIZE: usize = 16 * 1024;
+    const MAX_PASSWD_BUFFER_SIZE: usize = 1024 * 1024;
+
+    // SAFETY: sysconf has no pointer arguments; failure is reported as -1.
+    let configured_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut buffer_size = usize::try_from(configured_size)
+        .ok()
+        .filter(|size| *size > 0)
+        .unwrap_or(DEFAULT_PASSWD_BUFFER_SIZE)
+        .clamp(1024, MAX_PASSWD_BUFFER_SIZE);
+
+    loop {
+        // SAFETY: passwd is a C data carrier that getpwuid_r initializes before
+        // any of its fields are read below.
+        let mut passwd = unsafe { std::mem::zeroed::<libc::passwd>() };
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0_u8; buffer_size];
+        // SAFETY: passwd, result, and the writable buffer remain alive for the
+        // call. getpwuid_r writes at most buffer.len() bytes.
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &mut passwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer_size < MAX_PASSWD_BUFFER_SIZE {
+            buffer_size = buffer_size.saturating_mul(2).min(MAX_PASSWD_BUFFER_SIZE);
+            continue;
+        }
+        if status != 0 || result.is_null() || passwd.pw_shell.is_null() {
+            return None;
+        }
+
+        // SAFETY: on success, pw_shell points to a NUL-terminated string whose
+        // storage is owned by buffer until this scope ends.
+        let shell = unsafe { CStr::from_ptr(passwd.pw_shell) }.to_bytes();
+        return (!shell.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(shell)));
+    }
 }
 
 fn shell_path_is_executable(path: &Path) -> bool {
-    path.is_absolute()
-        && fs::metadata(path)
-            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    if !path.is_absolute() || !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: path is NUL-terminated and remains alive for the call. AT_EACCESS
+    // checks the effective credentials execve will use, including ACL/noexec
+    // policy that cannot be inferred from mode bits alone.
+    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 fn terminal_spawn_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
