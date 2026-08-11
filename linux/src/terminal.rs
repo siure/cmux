@@ -7,7 +7,10 @@ use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,6 +20,21 @@ pub struct TerminalHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     title_events: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Clone, Default)]
+pub struct TerminalOutputActivity {
+    generation: Arc<AtomicU64>,
+}
+
+impl TerminalOutputActivity {
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    fn record_output(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,8 +475,9 @@ pub fn spawn_terminal(
     command: Option<String>,
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
+    output_activity: TerminalOutputActivity,
 ) -> Result<TerminalHandle> {
-    spawn_terminal_inner(cwd, env, command, buffer, size, true)
+    spawn_terminal_inner(cwd, env, command, buffer, size, true, output_activity)
 }
 
 pub fn spawn_terminal_process(
@@ -467,8 +486,17 @@ pub fn spawn_terminal_process(
     command: String,
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
+    output_activity: TerminalOutputActivity,
 ) -> Result<TerminalHandle> {
-    spawn_terminal_inner(cwd, env, Some(command), buffer, size, false)
+    spawn_terminal_inner(
+        cwd,
+        env,
+        Some(command),
+        buffer,
+        size,
+        false,
+        output_activity,
+    )
 }
 
 fn spawn_terminal_inner(
@@ -478,6 +506,7 @@ fn spawn_terminal_inner(
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
     keep_shell_after_command: bool,
+    output_activity: TerminalOutputActivity,
 ) -> Result<TerminalHandle> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -554,6 +583,8 @@ fn spawn_terminal_inner(
                             let keep_from = out.len().saturating_sub(700_000);
                             out.replace_range(..keep_from, "");
                         }
+                        drop(out);
+                        output_activity.record_output();
                     }
                 }
                 Err(_) => break,
@@ -843,6 +874,7 @@ mod tests {
             initial_command.clone(),
             Arc::clone(&buffer),
             TerminalSize::default(),
+            TerminalOutputActivity::default(),
         )
         .expect("spawn terminal shell");
 
@@ -985,6 +1017,7 @@ mod tests {
             "printf explicit-command-path".to_string(),
             Arc::clone(&buffer),
             TerminalSize::default(),
+            TerminalOutputActivity::default(),
         )
         .expect("spawn explicit terminal command");
         assert_eq!(

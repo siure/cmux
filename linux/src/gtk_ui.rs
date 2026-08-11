@@ -39,6 +39,7 @@ const GTK_CELL_WIDTH: i32 = 10;
 const GTK_CELL_HEIGHT: i32 = 20;
 const GTK_SPLIT_INITIAL_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 const GTK_SPLIT_STABLE_INTERVAL: Duration = Duration::from_millis(50);
+const GTK_FALLBACK_OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
 const GTK_MODEL_SAFETY_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 const BROWSER_FOCUS_ESCAPE_INTERVAL: Duration = Duration::from_millis(1600);
 const BROWSER_FOCUS_RETRY_ATTEMPTS: u8 = 8;
@@ -150,6 +151,9 @@ fn run_gtk_app_with_renderer(
             &activate_presented_model_window,
             &activate_global_visibility,
         );
+        if !activate_sync_started.get() {
+            let _ = local_refresh.install_fallback_terminal_output_refresh();
+        }
         if !sync_gtk_window_hosts(
             application,
             &app_state,
@@ -289,6 +293,36 @@ impl GtkLocalRefresh {
         }
     }
 
+    fn install_fallback_terminal_output_refresh(&self) -> Option<glib::SourceId> {
+        if self.renderer_mode != GtkRendererMode::Gtk {
+            return None;
+        }
+        let Some(output_activity) = self
+            .app_state
+            .lock()
+            .ok()
+            .map(|app| app.terminal_output_activity())
+        else {
+            return None;
+        };
+        let mut observed_generation = output_activity.generation();
+        let refresh = self.clone();
+        Some(glib::timeout_add_local(
+            GTK_FALLBACK_OUTPUT_REFRESH_INTERVAL,
+            move || {
+                if refresh.hosts.upgrade().is_none() {
+                    return glib::ControlFlow::Break;
+                }
+                let current_generation = output_activity.generation();
+                if current_generation != observed_generation {
+                    observed_generation = current_generation;
+                    refresh.schedule();
+                }
+                glib::ControlFlow::Continue
+            },
+        ))
+    }
+
     fn schedule(&self) {
         if self.pending.replace(true) {
             return;
@@ -312,6 +346,20 @@ impl GtkLocalRefresh {
             );
         });
     }
+}
+
+fn fallback_terminal_output_generation(
+    app_state: &Arc<Mutex<AppState>>,
+    renderer_mode: GtkRendererMode,
+) -> u64 {
+    if renderer_mode != GtkRendererMode::Gtk {
+        return 0;
+    }
+    app_state
+        .lock()
+        .ok()
+        .map(|app| app.terminal_output_activity().generation())
+        .unwrap_or(0)
 }
 
 struct GtkWindowHost {
@@ -338,6 +386,7 @@ struct GtkWindowHost {
     last_header_rebuild_key: Value,
     last_overlay_rebuild_key: Value,
     last_right_sidebar_focus_generation: u64,
+    last_terminal_output_generation: u64,
 }
 
 type GtkWindowHosts = Rc<RefCell<HashMap<String, GtkWindowHost>>>;
@@ -626,6 +675,7 @@ fn sync_gtk_window_hosts(
 
     let mut selected_snapshot = None;
     let mut selected_window_id = None;
+    let terminal_output_generation = fallback_terminal_output_generation(app_state, renderer_mode);
     for row in rows {
         let Some(window_id) = model_window_id(&row).map(str::to_string) else {
             continue;
@@ -644,6 +694,7 @@ fn sync_gtk_window_hosts(
                 &window_id,
                 &row,
                 &snapshot,
+                terminal_output_generation,
                 local_refresh,
             );
             if !global_visibility.borrow().hidden {
@@ -658,6 +709,7 @@ fn sync_gtk_window_hosts(
                 ui_mode,
                 &row,
                 &snapshot,
+                terminal_output_generation,
                 local_refresh,
             );
         }
@@ -696,6 +748,7 @@ fn create_gtk_window_host(
     window_id: &str,
     row: &Value,
     snapshot: &Value,
+    terminal_output_generation: u64,
     local_refresh: &GtkLocalRefresh,
 ) -> GtkWindowHost {
     let pane_allocations = Rc::new(RefCell::new(HashMap::new()));
@@ -851,6 +904,7 @@ fn create_gtk_window_host(
         last_header_rebuild_key: shell::header_rebuild_key(snapshot),
         last_overlay_rebuild_key: shell::overlay_rebuild_key(snapshot),
         last_right_sidebar_focus_generation: 0,
+        last_terminal_output_generation: terminal_output_generation,
     };
     sync_resume_command_prompts(&mut host, snapshot, app_state);
     sync_close_confirmation_prompts(&mut host, snapshot, app_state);
@@ -864,6 +918,7 @@ fn refresh_gtk_window_host(
     ui_mode: GtkUiMode,
     row: &Value,
     snapshot: &Value,
+    terminal_output_generation: u64,
     local_refresh: &GtkLocalRefresh,
 ) {
     host.window.set_title(Some(model_window_title(row)));
@@ -903,6 +958,8 @@ fn refresh_gtk_window_host(
         widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-right-sidebar-input")
             && !focus_right_sidebar
             && !right_structure_changed;
+    let fallback_terminal_output_changed =
+        terminal_output_generation != host.last_terminal_output_generation;
 
     if host.last_left_rebuild_key != rebuild_keys.left && !left_rebuild_suppressed {
         replace_snapshot_slot_child(
@@ -930,11 +987,14 @@ fn refresh_gtk_window_host(
         host.last_pane_chrome_rebuild_keys = pane_chrome_rebuild_keys;
     }
 
-    let main_changed = host.last_main_rebuild_key != rebuild_keys.main;
+    let main_changed =
+        host.last_main_rebuild_key != rebuild_keys.main || fallback_terminal_output_changed;
     if main_changed {
         let main_structure_rebuild_key = snapshot_main_structure_rebuild_key(snapshot);
         let pane_rebuild_keys = snapshot_pane_rebuild_keys(snapshot);
-        if host.last_main_non_tab_rebuild_key == rebuild_keys.main_without_tabs {
+        if !fallback_terminal_output_changed
+            && host.last_main_non_tab_rebuild_key == rebuild_keys.main_without_tabs
+        {
             sync_pane_tab_strips(
                 &host.window,
                 snapshot,
@@ -1000,6 +1060,9 @@ fn refresh_gtk_window_host(
             host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
             host.last_main_structure_rebuild_key = main_structure_rebuild_key;
             host.last_pane_rebuild_keys = pane_rebuild_keys;
+        }
+        if !main_rebuild_suppressed {
+            host.last_terminal_output_generation = terminal_output_generation;
         }
     }
     if host.last_right_rebuild_key != rebuild_keys.right && !right_rebuild_suppressed {
@@ -18135,6 +18198,7 @@ mod tests {
             "window-a",
             &row,
             &first,
+            0,
             &local_refresh,
         );
         let mounted_main = host
@@ -18151,6 +18215,7 @@ mod tests {
             GtkUiMode::Next,
             &row,
             &second,
+            0,
             &local_refresh,
         );
         assert_eq!(
@@ -18172,6 +18237,7 @@ mod tests {
             GtkUiMode::Next,
             &row,
             &first,
+            0,
             &local_refresh,
         );
         assert_eq!(
@@ -20952,6 +21018,9 @@ mod tests {
             &presented_model_window,
             &global_visibility,
         );
+        let output_refresh_source = local_refresh
+            .install_fallback_terminal_output_refresh()
+            .expect("fallback PTY output refresh source");
         assert!(sync_gtk_window_hosts(
             &application,
             &app_state,
@@ -21000,6 +21069,7 @@ mod tests {
             "fallback PTY output must refresh before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync; preview was {:?}",
             refreshed_preview.text()
         );
+        output_refresh_source.remove();
         for host in hosts.borrow_mut().values_mut() {
             host.window.destroy();
         }

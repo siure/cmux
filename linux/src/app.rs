@@ -13,7 +13,7 @@ use crate::{
     shortcut_when::{ShortcutContext, ShortcutWhenClause},
     terminal::{
         spawn_terminal, spawn_terminal_process, terminal_key_bytes,
-        terminal_title_events_from_text, TerminalHandle, TerminalSize,
+        terminal_title_events_from_text, TerminalHandle, TerminalOutputActivity, TerminalSize,
     },
 };
 use anyhow::Result;
@@ -3059,6 +3059,7 @@ pub struct AppState {
     pending_close_confirmations: VecDeque<CloseConfirmationRequest>,
     terminal_scrollback_snapshot_dirty_at_ms: Option<u64>,
     terminal_startup_mode: TerminalStartupMode,
+    terminal_output_activity: TerminalOutputActivity,
     agent_hibernation_settings_path: PathBuf,
     agent_hibernation_settings_use_cmux_config: bool,
     agent_hibernation_settings: agent_hibernation_settings::Settings,
@@ -3378,6 +3379,7 @@ impl AppState {
             pending_close_confirmations: VecDeque::new(),
             terminal_scrollback_snapshot_dirty_at_ms: None,
             terminal_startup_mode,
+            terminal_output_activity: TerminalOutputActivity::default(),
             agent_hibernation_settings_path,
             agent_hibernation_settings_use_cmux_config,
             agent_hibernation_settings,
@@ -7485,6 +7487,10 @@ impl AppState {
 
     pub(crate) fn prepare_renderer_snapshot(&mut self) -> AppResult<()> {
         self.prepare_for_request()
+    }
+
+    pub(crate) fn terminal_output_activity(&self) -> TerminalOutputActivity {
+        self.terminal_output_activity.clone()
     }
 
     pub(crate) fn handle_renderer_read(
@@ -16093,6 +16099,7 @@ impl AppState {
                 command.clone(),
                 Arc::clone(&buffer),
                 size,
+                self.terminal_output_activity.clone(),
             )
             .map_err(|err| AppError::internal(err.to_string()))?;
             (Some(terminal), buffer)
@@ -16510,6 +16517,7 @@ impl AppState {
             initial_input.as_deref(),
             Arc::clone(&buffer),
             terminal_size,
+            self.terminal_output_activity.clone(),
         )
         .map_err(|_| AppError::internal("Failed to respawn surface"))?;
 
@@ -19095,6 +19103,7 @@ impl AppState {
             None,
             Arc::clone(&buffer),
             terminal_size,
+            self.terminal_output_activity.clone(),
         )?;
 
         if let Some(surface) = self.surfaces.get_mut(surface_id) {
@@ -36165,6 +36174,7 @@ impl AppState {
             initial_input.as_deref(),
             buffer,
             terminal_size,
+            self.terminal_output_activity.clone(),
         )?;
         if let Some(surface) = self.surfaces.get_mut(surface_id) {
             if surface.terminal.is_none() {
@@ -36502,6 +36512,7 @@ impl AppState {
                     terminal_initial_input.as_deref(),
                     Arc::clone(&buffer),
                     terminal_size,
+                    self.terminal_output_activity.clone(),
                 )?)
             } else {
                 None
@@ -39599,8 +39610,9 @@ fn spawn_terminal_with_initial_input(
     initial_input: Option<&str>,
     buffer: Arc<Mutex<String>>,
     terminal_size: TerminalSize,
+    output_activity: TerminalOutputActivity,
 ) -> AppResult<TerminalHandle> {
-    let terminal = spawn_terminal(cwd, env, command, buffer, terminal_size)
+    let terminal = spawn_terminal(cwd, env, command, buffer, terminal_size, output_activity)
         .map_err(|err| AppError::internal(err.to_string()))?;
     if let Some(initial_input) = initial_input.filter(|input| !input.is_empty()) {
         if let Err(err) = terminal.send_text(initial_input) {
