@@ -5017,6 +5017,38 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_render_grid_modes_follow_v1_array_schema() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "rows_data": []
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 44, &snapshot).expect("render grid");
+
+        assert_eq!(grid["modes"], json!([]));
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_preserves_fallback_active_screen() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "rows_data": []
+        });
+        let fallback = render_grid_from_text("surface-a", 45, 8, 1, "primary\x1b[?1049hALT");
+        assert_eq!(fallback["active_screen"], "alternate");
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 45, native);
+
+        assert_eq!(object["render_grid"]["active_screen"], "alternate");
+    }
+
+    #[test]
     fn renderer_text_fallback_keeps_cursor_only_empty_grid() {
         let grid = render_grid_from_text("surface-a", 43, 8, 2, "");
         assert_eq!(grid["format"], "cmux.render-grid.v1");
