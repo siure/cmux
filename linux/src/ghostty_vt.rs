@@ -19,12 +19,15 @@ const RENDER_DATA_CURSOR_VIEWPORT_X: c_int = 15;
 const RENDER_DATA_CURSOR_VIEWPORT_Y: c_int = 16;
 const ROW_DATA_DIRTY: c_int = 1;
 const ROW_DATA_CELLS: c_int = 3;
+const CELL_DATA_RAW: c_int = 1;
 const CELL_DATA_STYLE: c_int = 2;
 const CELL_DATA_BG_COLOR: c_int = 5;
 const CELL_DATA_FG_COLOR: c_int = 6;
 const CELL_DATA_SELECTED: c_int = 7;
 const CELL_DATA_HAS_STYLING: c_int = 8;
 const CELL_DATA_GRAPHEMES_UTF8: c_int = 9;
+const GHOSTTY_CELL_DATA_WIDE: c_int = 3;
+const GHOSTTY_CELL_WIDE_WIDE: c_int = 1;
 
 #[link(name = "dl")]
 extern "C" {
@@ -39,6 +42,7 @@ type GhosttyFormatter = *mut c_void;
 type GhosttyRenderState = *mut c_void;
 type GhosttyRenderStateRowIterator = *mut c_void;
 type GhosttyRenderStateRowCells = *mut c_void;
+type GhosttyCell = u64;
 
 type GhosttyTerminalNew =
     unsafe extern "C" fn(*const c_void, *mut GhosttyTerminal, GhosttyTerminalOptions) -> c_int;
@@ -71,6 +75,7 @@ type GhosttyRenderStateRowCellsFree = unsafe extern "C" fn(GhosttyRenderStateRow
 type GhosttyRenderStateRowCellsNext = unsafe extern "C" fn(GhosttyRenderStateRowCells) -> bool;
 type GhosttyRenderStateRowCellsGet =
     unsafe extern "C" fn(GhosttyRenderStateRowCells, c_int, *mut c_void) -> c_int;
+type GhosttyCellGet = unsafe extern "C" fn(GhosttyCell, c_int, *mut c_void) -> c_int;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -201,6 +206,7 @@ pub struct RenderRow {
 pub struct RenderCell {
     pub x: u16,
     pub text: String,
+    pub cell_width: u16,
     pub style: RenderCellStyle,
 }
 
@@ -259,6 +265,7 @@ struct GhosttyVtLibrary {
     row_cells_free: GhosttyRenderStateRowCellsFree,
     row_cells_next: GhosttyRenderStateRowCellsNext,
     row_cells_get: GhosttyRenderStateRowCellsGet,
+    cell_get: GhosttyCellGet,
 }
 
 impl GhosttyVtLibrary {
@@ -291,6 +298,7 @@ impl GhosttyVtLibrary {
             row_cells_free: load_symbol(handle, "ghostty_render_state_row_cells_free")?,
             row_cells_next: load_symbol(handle, "ghostty_render_state_row_cells_next")?,
             row_cells_get: load_symbol(handle, "ghostty_render_state_row_cells_get")?,
+            cell_get: load_symbol(handle, "ghostty_cell_get")?,
         };
         Ok(library)
     }
@@ -440,7 +448,13 @@ impl GhosttyVtLibrary {
                 let text = self.cell_utf8(cells_guard.cells)?;
                 if !text.is_empty() {
                     let style = self.cell_style(cells_guard.cells)?;
-                    cells.push(RenderCell { x, text, style });
+                    let cell_width = self.cell_width(cells_guard.cells)?;
+                    cells.push(RenderCell {
+                        x,
+                        text,
+                        cell_width,
+                        style,
+                    });
                 }
                 x = x.saturating_add(1);
             }
@@ -527,6 +541,19 @@ impl GhosttyVtLibrary {
         ensure_success(result, "ghostty_render_state_row_cells_get(GRAPHEMES_UTF8)")?;
         bytes.truncate(output.len);
         Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    fn cell_width(&self, cells: GhosttyRenderStateRowCells) -> Result<u16> {
+        let mut raw = 0_u64;
+        let result = unsafe {
+            (self.row_cells_get)(cells, CELL_DATA_RAW, (&mut raw as *mut GhosttyCell).cast())
+        };
+        ensure_success(result, "ghostty_render_state_row_cells_get(RAW)")?;
+        let mut wide = 0_i32;
+        let result =
+            unsafe { (self.cell_get)(raw, GHOSTTY_CELL_DATA_WIDE, (&mut wide as *mut i32).cast()) };
+        ensure_success(result, "ghostty_cell_get(WIDE)")?;
+        Ok(if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 })
     }
 
     fn cell_style(&self, cells: GhosttyRenderStateRowCells) -> Result<RenderCellStyle> {
@@ -996,6 +1023,27 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("Hello"), "snapshot was {snapshot:?}");
         assert!(text.contains('Z'), "snapshot was {snapshot:?}");
+    }
+
+    #[test]
+    fn render_snapshot_exposes_native_wide_cell_width_when_available() {
+        if discover_library().is_none() {
+            eprintln!("SKIP: libghostty-vt is not available");
+            return;
+        }
+
+        let snapshot = render_snapshot("界A".as_bytes(), 4, 1).expect("render wide snapshot");
+        let cells = &snapshot.rows_data[0].cells;
+        let wide = cells
+            .iter()
+            .find(|cell| cell.text == "界")
+            .expect("wide cell");
+        let narrow = cells
+            .iter()
+            .find(|cell| cell.text == "A")
+            .expect("narrow cell");
+        assert_eq!((wide.x, wide.cell_width), (0, 2));
+        assert_eq!((narrow.x, narrow.cell_width), (2, 1));
     }
 
     #[test]

@@ -23,17 +23,28 @@ pub struct TerminalHandle {
 }
 
 #[derive(Clone, Default)]
-pub struct TerminalOutputActivity {
-    generation: Arc<AtomicU64>,
+pub struct RenderActivity {
+    terminal_output_generation: Arc<AtomicU64>,
+    model_mutation_generation: Arc<AtomicU64>,
 }
 
-impl TerminalOutputActivity {
-    pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+impl RenderActivity {
+    pub fn terminal_output_generation(&self) -> u64 {
+        self.terminal_output_generation.load(Ordering::Relaxed)
     }
 
-    fn record_output(&self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
+    pub fn model_mutation_generation(&self) -> u64 {
+        self.model_mutation_generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_terminal_output(&self) {
+        self.terminal_output_generation
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_model_mutation(&self) {
+        self.model_mutation_generation
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -475,9 +486,9 @@ pub fn spawn_terminal(
     command: Option<String>,
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
-    output_activity: TerminalOutputActivity,
+    render_activity: RenderActivity,
 ) -> Result<TerminalHandle> {
-    spawn_terminal_inner(cwd, env, command, buffer, size, true, output_activity)
+    spawn_terminal_inner(cwd, env, command, buffer, size, true, render_activity)
 }
 
 pub fn spawn_terminal_process(
@@ -486,7 +497,7 @@ pub fn spawn_terminal_process(
     command: String,
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
-    output_activity: TerminalOutputActivity,
+    render_activity: RenderActivity,
 ) -> Result<TerminalHandle> {
     spawn_terminal_inner(
         cwd,
@@ -495,7 +506,7 @@ pub fn spawn_terminal_process(
         buffer,
         size,
         false,
-        output_activity,
+        render_activity,
     )
 }
 
@@ -506,7 +517,7 @@ fn spawn_terminal_inner(
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
     keep_shell_after_command: bool,
-    output_activity: TerminalOutputActivity,
+    render_activity: RenderActivity,
 ) -> Result<TerminalHandle> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -584,7 +595,7 @@ fn spawn_terminal_inner(
                             out.replace_range(..keep_from, "");
                         }
                         drop(out);
-                        output_activity.record_output();
+                        render_activity.record_terminal_output();
                     }
                 }
                 Err(_) => break,
@@ -874,7 +885,7 @@ mod tests {
             initial_command.clone(),
             Arc::clone(&buffer),
             TerminalSize::default(),
-            TerminalOutputActivity::default(),
+            RenderActivity::default(),
         )
         .expect("spawn terminal shell");
 
@@ -1017,7 +1028,7 @@ mod tests {
             "printf explicit-command-path".to_string(),
             Arc::clone(&buffer),
             TerminalSize::default(),
-            TerminalOutputActivity::default(),
+            RenderActivity::default(),
         )
         .expect("spawn explicit terminal command");
         assert_eq!(

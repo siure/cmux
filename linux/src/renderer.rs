@@ -275,6 +275,7 @@ const OPTIONAL_GHOSTTY_EXPORT_SYMBOLS: &[&str] = &[
 const MAX_UNEXPECTED_GHOSTTY_EXPORT_SYMBOLS: usize = 32;
 
 const REQUIRED_GHOSTTY_VT_SYMBOLS: &[&str] = &[
+    "ghostty_cell_get",
     "ghostty_terminal_new",
     "ghostty_terminal_free",
     "ghostty_terminal_vt_write",
@@ -1902,20 +1903,25 @@ fn render_grid_from_ghostty_vt_snapshot(
                 style_id
             };
             let column = cell.get("x").and_then(Value::as_u64).unwrap_or(0);
+            let cell_width = cell
+                .get("cell_width")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .max(1);
             if let Some(span) = spans.last_mut().filter(|span| {
                 span.row == row_index
                     && span.style_id == style_id
                     && span.column.saturating_add(span.cell_width) == column
             }) {
                 span.text.push_str(text);
-                span.cell_width = span.cell_width.saturating_add(1);
+                span.cell_width = span.cell_width.saturating_add(cell_width);
             } else {
                 spans.push(GhosttyRenderGridSpan {
                     row: row_index,
                     column,
                     style_id,
                     text: text.to_string(),
-                    cell_width: 1,
+                    cell_width,
                 });
             }
         }
@@ -6289,12 +6295,9 @@ typedef enum {
             .collect::<HashSet<_>>();
         assert!(missing_required_ghostty_vt_symbols(&symbols).is_empty());
 
-        symbols.remove("ghostty_render_state_row_cells_get");
+        symbols.remove("ghostty_cell_get");
         let missing = missing_required_ghostty_vt_symbols(&symbols);
-        assert_eq!(
-            missing,
-            vec!["ghostty_render_state_row_cells_get".to_string()]
-        );
+        assert_eq!(missing, vec!["ghostty_cell_get".to_string()]);
     }
 
     #[test]

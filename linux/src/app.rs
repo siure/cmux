@@ -13,7 +13,7 @@ use crate::{
     shortcut_when::{ShortcutContext, ShortcutWhenClause},
     terminal::{
         spawn_terminal, spawn_terminal_process, terminal_key_bytes,
-        terminal_title_events_from_text, TerminalHandle, TerminalOutputActivity, TerminalSize,
+        terminal_title_events_from_text, RenderActivity, TerminalHandle, TerminalSize,
     },
 };
 use anyhow::Result;
@@ -3059,7 +3059,7 @@ pub struct AppState {
     pending_close_confirmations: VecDeque<CloseConfirmationRequest>,
     terminal_scrollback_snapshot_dirty_at_ms: Option<u64>,
     terminal_startup_mode: TerminalStartupMode,
-    terminal_output_activity: TerminalOutputActivity,
+    render_activity: RenderActivity,
     agent_hibernation_settings_path: PathBuf,
     agent_hibernation_settings_use_cmux_config: bool,
     agent_hibernation_settings: agent_hibernation_settings::Settings,
@@ -3379,7 +3379,7 @@ impl AppState {
             pending_close_confirmations: VecDeque::new(),
             terminal_scrollback_snapshot_dirty_at_ms: None,
             terminal_startup_mode,
-            terminal_output_activity: TerminalOutputActivity::default(),
+            render_activity: RenderActivity::default(),
             agent_hibernation_settings_path,
             agent_hibernation_settings_use_cmux_config,
             agent_hibernation_settings,
@@ -7489,8 +7489,8 @@ impl AppState {
         self.prepare_for_request()
     }
 
-    pub(crate) fn terminal_output_activity(&self) -> TerminalOutputActivity {
-        self.terminal_output_activity.clone()
+    pub(crate) fn render_activity(&self) -> RenderActivity {
+        self.render_activity.clone()
     }
 
     pub(crate) fn handle_renderer_read(
@@ -7507,6 +7507,8 @@ impl AppState {
         params: &Value,
         persist_snapshot: bool,
     ) -> AppResult<Value> {
+        let command_palette_was_visible = self.palette_visible_for_current_window();
+        let mut debug_shortcut_was_terminal_input = false;
         let result = match method {
             "system.ping" => Ok(json!({"pong": true})),
             "system.capabilities" => Ok(json!({
@@ -8348,16 +8350,20 @@ impl AppState {
                 {
                     self.execute_matched_shortcut(shortcut)
                 } else if normalized == "ctrl+d" {
-                    self.surface_send_key(&json!({"key": "ctrl-d"}))
+                    let result = self.surface_send_key(&json!({"key": "ctrl-d"}))?;
+                    debug_shortcut_was_terminal_input = result_is_terminal_input(&result);
+                    Ok(result)
                 } else if let Some(result) = self.arm_shortcut_chord(&normalized, &shortcut_context)
                 {
                     Ok(result)
                 } else if matches!(normalized.as_str(), "enter" | "return") {
+                    debug_shortcut_was_terminal_input = true;
                     self.surface_send_key(&json!({"key": "enter"}))
                 } else if self.palette_visible_for_current_window() && trimmed.chars().count() == 1
                 {
                     self.command_palette_type_text(trimmed)
                 } else if trimmed.chars().count() == 1 {
+                    debug_shortcut_was_terminal_input = true;
                     self.surface_send_text(&json!({"text": trimmed}))
                 } else {
                     Ok(json!({"handled": false}))
@@ -8373,6 +8379,17 @@ impl AppState {
             _ => Err(AppError::method_not_found(method)),
         };
         if persist_snapshot && result.is_ok() {
+            if result.as_ref().is_ok_and(|value| {
+                method_changes_presented_model(
+                    method,
+                    params,
+                    value,
+                    command_palette_was_visible,
+                    debug_shortcut_was_terminal_input,
+                )
+            }) {
+                self.render_activity.record_model_mutation();
+            }
             self.persist_session_snapshot_after_method(method);
         }
         result
@@ -8381,7 +8398,7 @@ impl AppState {
     pub fn handle_legacy_v1(&mut self, command: &str) -> AppResult<String> {
         let args = shell_words(command);
         let name = args.first().map(String::as_str).unwrap_or_default();
-        match name {
+        let result = match name {
             "new_surface" => {
                 let spec = legacy_surface_spec(&args);
                 let pane_id = legacy_option(&args, "--pane")
@@ -8644,7 +8661,11 @@ impl AppState {
                     .to_string())
             }
             _ => Err(AppError::method_not_found(name)),
+        };
+        if result.is_ok() && legacy_method_changes_presented_model(name) {
+            self.render_activity.record_model_mutation();
         }
+        result
     }
 
     fn legacy_resolve_pane_arg(&self, raw: &str) -> AppResult<String> {
@@ -16099,7 +16120,7 @@ impl AppState {
                 command.clone(),
                 Arc::clone(&buffer),
                 size,
-                self.terminal_output_activity.clone(),
+                self.render_activity.clone(),
             )
             .map_err(|err| AppError::internal(err.to_string()))?;
             (Some(terminal), buffer)
@@ -16517,7 +16538,7 @@ impl AppState {
             initial_input.as_deref(),
             Arc::clone(&buffer),
             terminal_size,
-            self.terminal_output_activity.clone(),
+            self.render_activity.clone(),
         )
         .map_err(|_| AppError::internal("Failed to respawn surface"))?;
 
@@ -19103,7 +19124,7 @@ impl AppState {
             None,
             Arc::clone(&buffer),
             terminal_size,
-            self.terminal_output_activity.clone(),
+            self.render_activity.clone(),
         )?;
 
         if let Some(surface) = self.surfaces.get_mut(surface_id) {
@@ -36174,7 +36195,7 @@ impl AppState {
             initial_input.as_deref(),
             buffer,
             terminal_size,
-            self.terminal_output_activity.clone(),
+            self.render_activity.clone(),
         )?;
         if let Some(surface) = self.surfaces.get_mut(surface_id) {
             if surface.terminal.is_none() {
@@ -36512,7 +36533,7 @@ impl AppState {
                     terminal_initial_input.as_deref(),
                     Arc::clone(&buffer),
                     terminal_size,
-                    self.terminal_output_activity.clone(),
+                    self.render_activity.clone(),
                 )?)
             } else {
                 None
@@ -39610,9 +39631,9 @@ fn spawn_terminal_with_initial_input(
     initial_input: Option<&str>,
     buffer: Arc<Mutex<String>>,
     terminal_size: TerminalSize,
-    output_activity: TerminalOutputActivity,
+    render_activity: RenderActivity,
 ) -> AppResult<TerminalHandle> {
-    let terminal = spawn_terminal(cwd, env, command, buffer, terminal_size, output_activity)
+    let terminal = spawn_terminal(cwd, env, command, buffer, terminal_size, render_activity)
         .map_err(|err| AppError::internal(err.to_string()))?;
     if let Some(initial_input) = initial_input.filter(|input| !input.is_empty()) {
         if let Err(err) = terminal.send_text(initial_input) {
@@ -54093,6 +54114,305 @@ fn method_persists_session_snapshot(method: &str) -> bool {
         || method.starts_with("document.")
         || method.starts_with("project.")
         || method.starts_with("sidebar.")
+}
+
+fn method_changes_presented_model(
+    method: &str,
+    params: &Value,
+    result: &Value,
+    command_palette_was_visible: bool,
+    debug_shortcut_was_terminal_input: bool,
+) -> bool {
+    if method == "debug.type" {
+        return command_palette_was_visible;
+    }
+    if method == "debug.shortcut.simulate" {
+        if debug_shortcut_was_terminal_input {
+            return false;
+        }
+    }
+    if matches!(method, "debug.shortcut.simulate" | "debug.type")
+        && result.get("handled").and_then(Value::as_bool) == Some(false)
+    {
+        return false;
+    }
+    if matches!(
+        method,
+        "surface.send_text"
+            | "mobile.terminal.input"
+            | "mobile.terminal.mouse"
+            | "mobile.terminal.paste"
+            | "mobile.terminal.paste_image"
+            | "mobile.terminal.scroll"
+            | "mobile.terminal.viewport"
+            | "terminal.input"
+            | "terminal.mouse"
+            | "terminal.paste"
+            | "terminal.paste_image"
+            | "terminal.scroll"
+            | "terminal.viewport"
+    ) {
+        return false;
+    }
+    if method == "surface.send_key" {
+        return result_changes_presented_topology(result);
+    }
+    if matches!(method, "sidebar.left" | "sidebar.right") {
+        return string_param(params, "action")
+            .map(|action| !action.trim().eq_ignore_ascii_case("mode"))
+            .unwrap_or(false);
+    }
+    if method == "debug.sidebar.visible" {
+        return params.get("visible").and_then(Value::as_bool).is_some()
+            || string_param(params, "action")
+                .is_some_and(|action| !action.trim().eq_ignore_ascii_case("mode"));
+    }
+    if matches!(
+        method,
+        "window.current"
+            | "window.list"
+            | "window.displays"
+            | "workspace.current"
+            | "workspace.list"
+            | "workspace.env"
+            | "workspace.sidebar_selection"
+            | "workspace.group.list"
+            | "pane.list"
+            | "pane.surfaces"
+            | "surface.current"
+            | "surface.list"
+            | "surface.health"
+            | "surface.read_text"
+            | "surface.resume.get"
+            | "terminal.textbox.state"
+            | "agent_session.get_state"
+            | "agent_session.output"
+            | "agent_session.output_delta"
+            | "canvas.info"
+            | "document.get_state"
+            | "project.get_state"
+            | "browser.import.sources"
+            | "browser.omnibar.resolve"
+            | "browser.omnibar.suggestions"
+            | "browser.profiles.list"
+            | "browser.status"
+            | "debug.command_palette.visible"
+            | "debug.command_palette.results"
+            | "debug.command_palette.selection"
+            | "debug.command_palette.rename_input.selection"
+            | "sidebar.state"
+            | "sidebar.status.list"
+            | "sidebar.meta.list"
+            | "sidebar.metadata.list"
+            | "sidebar.meta_block.list"
+            | "sidebar.metadata_block.list"
+            | "sidebar.log.list"
+            | "settings.shortcuts"
+    ) {
+        return false;
+    }
+    method_persists_session_snapshot(method)
+        || socket_event_mapping(method).is_some()
+        || matches!(
+            method,
+            "config.reload"
+                | "debug.command_palette.toggle"
+                | "debug.command_palette.delete_backward"
+                | "debug.command_palette.rename_tab.open"
+                | "debug.command_palette.rename_input.select_all"
+                | "debug.command_palette.rename_input.interact"
+                | "debug.command_palette.rename_input.delete_backward"
+                | "debug.right_sidebar.focus"
+                | "debug.shortcut.simulate"
+                | "debug.type"
+                | "feedback.open"
+                | "help.shortcuts.toggle"
+                | "notification.mark_unread"
+                | "notification.reconcile"
+                | "settings.global_hotkey.set_enabled"
+        )
+        || (method.starts_with("settings.") && method.contains(".set"))
+        || (method.starts_with("feed.") && method != "feed.list")
+}
+
+fn result_changes_presented_topology(result: &Value) -> bool {
+    result.get("closed").is_some()
+        || result.get("blocked").is_some()
+        || result.get("confirmation_required").is_some()
+        || result.get("last_surface").is_some()
+        || result.get("workspace_closed").is_some()
+        || result.get("replacement_created").is_some()
+}
+
+fn result_is_terminal_input(result: &Value) -> bool {
+    result.as_object().is_some_and(|object| {
+        object.is_empty()
+            || (object.contains_key("surface_id")
+                && object
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "surface_id" | "surface_ref")))
+    })
+}
+
+fn legacy_method_changes_presented_model(method: &str) -> bool {
+    matches!(
+        method,
+        "new_surface"
+            | "open_browser"
+            | "navigate"
+            | "browser_back"
+            | "browser_forward"
+            | "browser_reload"
+            | "focus_webview"
+            | "agent_hibernation"
+            | "new_pane"
+            | "focus_pane"
+            | "focus_surface_by_panel"
+            | "drag_surface_to_split"
+            | "close_surface"
+            | "reload_config"
+            | "report_pwd"
+    )
+}
+
+#[cfg(test)]
+mod render_activity_tests {
+    use super::{method_changes_presented_model, AppState, TerminalStartupMode};
+    use serde_json::json;
+
+    #[test]
+    fn model_mutation_activity_excludes_terminal_input() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let initial_generation = activity.model_mutation_generation();
+
+        app.handle(
+            "surface.send_text",
+            &json!({"surface_id": surface_id, "text": ""}),
+        )
+        .expect("empty terminal input");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            initial_generation,
+            "terminal input must not request a Ghostty model snapshot"
+        );
+        app.handle("debug.type", &json!({"text": ""}))
+            .expect("GTK terminal typing path");
+        app.handle("debug.shortcut.simulate", &json!({"combo": "enter"}))
+            .expect("GTK terminal enter path");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            initial_generation,
+            "GTK terminal input adapters must not request a Ghostty model snapshot"
+        );
+        app.handle("settings.shortcuts", &json!({}))
+            .expect("shortcut settings read");
+        app.handle("browser.status", &json!({}))
+            .expect("browser status read");
+        app.handle("debug.sidebar.visible", &json!({}))
+            .expect("left sidebar read");
+        app.handle("sidebar.right", &json!({"action": "mode"}))
+            .expect("right sidebar read");
+        assert!(!method_changes_presented_model(
+            "agent_session.output",
+            &json!({}),
+            &json!({}),
+            false,
+            false,
+        ));
+        assert_eq!(
+            activity.model_mutation_generation(),
+            initial_generation,
+            "GTK model reads must not schedule another model refresh"
+        );
+
+        app.handle("surface.create", &json!({"type": "terminal"}))
+            .expect("surface creation");
+        let after_surface_create = activity.model_mutation_generation();
+        assert!(after_surface_create > initial_generation);
+
+        app.handle(
+            "debug.shortcut.set",
+            &json!({"name": "new_terminal", "combo": "ctrl+alt+t"}),
+        )
+        .expect("shortcut override");
+        app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+alt+t"}))
+            .expect("shortcut mutation");
+        let after_shortcut_mutation = activity.model_mutation_generation();
+        assert!(after_shortcut_mutation > after_surface_create);
+
+        app.shortcut_overrides.insert(
+            "new_terminal".to_string(),
+            crate::config::ShortcutBinding::Single("n".to_string()),
+        );
+        let before_single_character_shortcut = activity.model_mutation_generation();
+        app.handle("debug.shortcut.simulate", &json!({"combo": "n"}))
+            .expect("single-character shortcut mutation");
+        assert!(activity.model_mutation_generation() > before_single_character_shortcut);
+
+        app.handle("debug.command_palette.toggle", &json!({}))
+            .expect("show command palette");
+        let after_palette_toggle = activity.model_mutation_generation();
+        assert!(after_palette_toggle > after_shortcut_mutation);
+        app.handle("debug.type", &json!({"text": "w"}))
+            .expect("type into command palette");
+        let after_palette_type = activity.model_mutation_generation();
+        assert!(after_palette_type > after_palette_toggle);
+        app.handle("debug.command_palette.toggle", &json!({}))
+            .expect("hide command palette");
+
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({"direction": "right", "type": "terminal"}),
+            )
+            .expect("split terminal pane");
+        let split_surface = split["surface_id"].as_str().expect("split surface");
+        let split_pane = app.surfaces[split_surface].pane_id.clone();
+        let split_workspace = app.panes[&split_pane].workspace_id.clone();
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 2);
+        let before_direct_close = activity.model_mutation_generation();
+        let closed = app
+            .handle(
+                "surface.send_key",
+                &json!({"surface_id": split_surface, "key": "ctrl+d"}),
+            )
+            .expect("close split with direct key input");
+        assert_eq!(closed["surface_id"], split["surface_id"]);
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 1);
+        assert!(activity.model_mutation_generation() > before_direct_close);
+
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({"direction": "right", "type": "terminal"}),
+            )
+            .expect("split terminal pane for shortcut");
+        let before_shortcut_close = activity.model_mutation_generation();
+        let closed = app
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+d"}))
+            .expect("close split with GTK shortcut path");
+        assert_eq!(closed["surface_id"], split["surface_id"]);
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 1);
+        assert!(activity.model_mutation_generation() > before_shortcut_close);
+
+        let before_legacy_read = activity.model_mutation_generation();
+        app.handle_legacy_v1("list_panes").expect("legacy read");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_legacy_read,
+            "legacy reads must not schedule model refreshes"
+        );
+        app.handle_legacy_v1("new_surface")
+            .expect("legacy surface mutation");
+        assert!(activity.model_mutation_generation() > before_legacy_read);
+    }
 }
 
 fn env_truthy(key: &str) -> bool {

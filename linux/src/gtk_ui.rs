@@ -39,7 +39,7 @@ const GTK_CELL_WIDTH: i32 = 10;
 const GTK_CELL_HEIGHT: i32 = 20;
 const GTK_SPLIT_INITIAL_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 const GTK_SPLIT_STABLE_INTERVAL: Duration = Duration::from_millis(50);
-const GTK_FALLBACK_OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+const GTK_RENDER_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
 const GTK_MODEL_SAFETY_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 const BROWSER_FOCUS_ESCAPE_INTERVAL: Duration = Duration::from_millis(1600);
 const BROWSER_FOCUS_RETRY_ATTEMPTS: u8 = 8;
@@ -152,7 +152,7 @@ fn run_gtk_app_with_renderer(
             &activate_global_visibility,
         );
         if !activate_sync_started.get() {
-            let _ = local_refresh.install_fallback_terminal_output_refresh();
+            let _ = local_refresh.install_render_activity_refresh();
         }
         if !sync_gtk_window_hosts(
             application,
@@ -293,29 +293,31 @@ impl GtkLocalRefresh {
         }
     }
 
-    fn install_fallback_terminal_output_refresh(&self) -> Option<glib::SourceId> {
-        if self.renderer_mode != GtkRendererMode::Gtk {
-            return None;
-        }
-        let Some(output_activity) = self
-            .app_state
-            .lock()
-            .ok()
-            .map(|app| app.terminal_output_activity())
+    fn install_render_activity_refresh(&self) -> Option<glib::SourceId> {
+        let Some(render_activity) = self.app_state.lock().ok().map(|app| app.render_activity())
         else {
             return None;
         };
-        let mut observed_generation = output_activity.generation();
+        // Model mutations can originate outside GTK and affect either renderer. PTY bytes only
+        // need this fallback wake in Gtk mode; Ghostty owns its output-driven rendering path.
+        let mut observed_model_generation = render_activity.model_mutation_generation();
+        let mut observed_terminal_generation = render_activity.terminal_output_generation();
+        let observes_terminal_output = self.renderer_mode == GtkRendererMode::Gtk;
         let refresh = self.clone();
         Some(glib::timeout_add_local(
-            GTK_FALLBACK_OUTPUT_REFRESH_INTERVAL,
+            GTK_RENDER_ACTIVITY_REFRESH_INTERVAL,
             move || {
                 if refresh.hosts.upgrade().is_none() {
                     return glib::ControlFlow::Break;
                 }
-                let current_generation = output_activity.generation();
-                if current_generation != observed_generation {
-                    observed_generation = current_generation;
+                let current_model_generation = render_activity.model_mutation_generation();
+                let current_terminal_generation = render_activity.terminal_output_generation();
+                let model_changed = current_model_generation != observed_model_generation;
+                let terminal_changed = observes_terminal_output
+                    && current_terminal_generation != observed_terminal_generation;
+                if model_changed || terminal_changed {
+                    observed_model_generation = current_model_generation;
+                    observed_terminal_generation = current_terminal_generation;
                     refresh.schedule();
                 }
                 glib::ControlFlow::Continue
@@ -358,7 +360,7 @@ fn fallback_terminal_output_generation(
     app_state
         .lock()
         .ok()
-        .map(|app| app.terminal_output_activity().generation())
+        .map(|app| app.render_activity().terminal_output_generation())
         .unwrap_or(0)
 }
 
@@ -21020,7 +21022,7 @@ mod tests {
             &global_visibility,
         );
         let output_refresh_source = local_refresh
-            .install_fallback_terminal_output_refresh()
+            .install_render_activity_refresh()
             .expect("fallback PTY output refresh source");
         assert!(sync_gtk_window_hosts(
             &application,
@@ -21123,7 +21125,7 @@ mod tests {
             &global_visibility,
         );
         let activity_refresh_source = local_refresh
-            .install_fallback_terminal_output_refresh()
+            .install_render_activity_refresh()
             .expect("fallback activity refresh source");
         assert!(sync_gtk_window_hosts(
             &application,
