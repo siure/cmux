@@ -53,8 +53,11 @@ jobs:
           git submodule update --init --depth 1 ghostty
           ghostty_ref="$(git -C ghostty rev-parse HEAD)"
           pinned_ref="$(git ls-tree HEAD ghostty | awk '{print $3}')"
+          ghostty_repository="$(git config -f .gitmodules --get submodule.ghostty.url)"
           test "$ghostty_ref" = "$pinned_ref"
+          test -n "$ghostty_repository"
           echo "ref=$ghostty_ref" >> "$GITHUB_OUTPUT"
+          echo "repository=$ghostty_repository" >> "$GITHUB_OUTPUT"
 
       - name: Install Linux desktop build dependencies
         run: |
@@ -99,6 +102,7 @@ jobs:
 
       - name: Build validated Linux desktop bundle
         env:
+          GHOSTTY_REPOSITORY: ${{ steps.ghostty.outputs.repository }}
           REQUESTED_BUNDLE_VERSION: ${{ inputs.bundle_version }}
         run: |
           set -euo pipefail
@@ -109,13 +113,14 @@ jobs:
           export SOURCE_DATE_EPOCH
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           CMUX_GHOSTTY_CHECKOUT="$GITHUB_WORKSPACE/ghostty" \
-          CMUX_LINUX_BUNDLE_GHOSTTY_REPOSITORY="siure/ghostty" \
+          CMUX_LINUX_BUNDLE_GHOSTTY_REPOSITORY="$GHOSTTY_REPOSITORY" \
           CMUX_LINUX_BUNDLE_VERSION="$version" \
             ./linux/scripts/build-bundle.sh
           (cd dist && sha256sum -c "cmux-linux-$(uname -m).tar.gz.sha256")
 
       - name: Record source provenance
         env:
+          GHOSTTY_REPOSITORY: ${{ steps.ghostty.outputs.repository }}
           REQUESTED_BUNDLE_VERSION: ${{ inputs.bundle_version }}
           GHOSTTY_REF: ${{ steps.ghostty.outputs.ref }}
         run: |
@@ -130,7 +135,7 @@ jobs:
             --arg version "$version" \
             --arg cmux_commit "$(git rev-parse HEAD)" \
             --argjson cmux_dirty false \
-            --arg ghostty_repository "siure/ghostty" \
+            --arg ghostty_repository "$GHOSTTY_REPOSITORY" \
             --arg ghostty_ref "$GHOSTTY_REF" \
             --arg ghostty_commit "$(git -C ghostty rev-parse HEAD)" \
             --argjson ghostty_dirty false \
