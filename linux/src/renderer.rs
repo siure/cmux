@@ -4983,6 +4983,34 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_render_grid_preserves_wide_cell_columns() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "cursor": {"visible": true, "in_viewport": true, "x": 3, "y": 0},
+            "rows_data": [{
+                "y": 0,
+                "dirty": true,
+                "cells": [
+                    {"x": 0, "text": "界", "cell_width": 2, "style": {}},
+                    {"x": 2, "text": "x", "cell_width": 1, "style": {}}
+                ]
+            }]
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 43, &snapshot).expect("render grid");
+        let spans = grid["row_spans"].as_array().expect("row spans");
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["column"], 0);
+        assert_eq!(spans[0]["text"], "界x");
+        assert_eq!(spans[0]["cell_width"], 3);
+        assert_eq!(grid["cursor"]["column"], 3);
+    }
+
+    #[test]
     fn renderer_text_fallback_keeps_cursor_only_empty_grid() {
         let grid = render_grid_from_text("surface-a", 43, 8, 2, "");
         assert_eq!(grid["format"], "cmux.render-grid.v1");

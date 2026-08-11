@@ -17434,6 +17434,7 @@ fn attach_notification_context_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::TerminalStartupMode;
 
     #[test]
     fn gtk_custom_sidebar_helpers_map_style_and_icons() {
@@ -21073,6 +21074,121 @@ mod tests {
         for host in hosts.borrow_mut().values_mut() {
             host.window.destroy();
         }
+    }
+
+    fn assert_gtk_external_model_mutations_refresh_before_safety_sync(
+        renderer_mode: GtkRendererMode,
+    ) {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let renderer_name = match renderer_mode {
+            GtkRendererMode::Gtk => "fallback",
+            GtkRendererMode::Ghostty => "ghostty",
+        };
+        let application = gtk::Application::builder()
+            .application_id(format!(
+                "ai.manaflow.cmux.tests.external-model-refresh-{renderer_name}"
+            ))
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("renderer-owned app state");
+        app.handle(
+            "debug.shortcut.set",
+            &json!({"name": "new_terminal", "combo": "ctrl+alt+t"}),
+        )
+        .expect("deterministic new terminal shortcut");
+        let app_state = Arc::new(Mutex::new(app));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            renderer_mode,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        let activity_refresh_source = local_refresh
+            .install_fallback_terminal_output_refresh()
+            .expect("fallback activity refresh source");
+        assert!(sync_gtk_window_hosts(
+            &application,
+            &app_state,
+            renderer_mode,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+            &local_refresh,
+        ));
+        let root = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .window
+            .child()
+            .expect("GTK window content");
+        assert_eq!(gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"), 1);
+
+        let shortcut_result = app_state
+            .lock()
+            .expect("app lock")
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+alt+t"}))
+            .expect("keyboard shortcut surface creation");
+        assert!(
+            shortcut_result["surface_id"].is_string(),
+            "{shortcut_result}"
+        );
+        gtk_run_main_loop_for(Duration::from_millis(750));
+
+        assert_eq!(
+            gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"),
+            2,
+            "keyboard model mutations must refresh the {renderer_name} renderer before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync"
+        );
+
+        app_state
+            .lock()
+            .expect("app lock")
+            .handle("surface.create", &json!({"type": "terminal"}))
+            .expect("socket-style surface creation");
+        gtk_run_main_loop_for(Duration::from_millis(750));
+
+        assert_eq!(
+            gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"),
+            3,
+            "socket/CLI model mutations must refresh the {renderer_name} renderer before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync"
+        );
+        activity_refresh_source.remove();
+        for host in hosts.borrow_mut().values_mut() {
+            host.window.destroy();
+        }
+    }
+
+    #[test]
+    fn gtk_fallback_external_model_mutations_refresh_before_safety_sync() {
+        assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Gtk);
+    }
+
+    #[test]
+    fn gtk_ghostty_external_model_mutations_refresh_before_safety_sync() {
+        assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Ghostty);
     }
 
     #[test]
