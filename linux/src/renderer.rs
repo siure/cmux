@@ -360,7 +360,7 @@ fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<V
     let canvas = app.handle_renderer_read("canvas.info", &json!({}))?;
     let sidebar = sidebar_snapshot(app)?;
     let custom_sidebar = app.custom_sidebar_snapshot();
-    let left_sidebar = app.handle("sidebar.left", &json!({"action": "mode"}))?;
+    let left_sidebar = app.handle_renderer_read("sidebar.left", &json!({"action": "mode"}))?;
     let right_sidebar = right_sidebar_snapshot(app)?;
     let notifications = app.handle_renderer_read("notification.list", &json!({}))?;
     let command_palette =
@@ -370,8 +370,8 @@ fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<V
     if renderer_backend_uses_text_fallback(&backend) {
         attach_render_grid_fallbacks(app, &mut views)?;
     } else if backend == "ghostty-vt" {
-        attach_ghostty_vt_render_states(app, &mut views)?;
         attach_render_grid_fallbacks(app, &mut views)?;
+        attach_ghostty_vt_render_states(app, &mut views)?;
     }
     let diagnostics = cached_diagnostics_value_for_backend(&backend)?;
 
@@ -1764,10 +1764,95 @@ fn attach_ghostty_vt_snapshot(
     state_seq: u64,
     value: Value,
 ) {
-    if let Some(render_grid) = render_grid_from_ghostty_vt_snapshot(surface_id, state_seq, &value) {
+    let fallback_render_grid = object.get("render_grid").cloned();
+    if let Some(mut render_grid) =
+        render_grid_from_ghostty_vt_snapshot(surface_id, state_seq, &value)
+    {
+        if let Some(fallback_render_grid) = fallback_render_grid.as_ref() {
+            merge_render_grid_scrollback(&mut render_grid, fallback_render_grid);
+        }
         object.insert("render_grid".to_string(), render_grid);
     }
     object.insert("ghostty_vt".to_string(), value);
+}
+
+fn merge_render_grid_scrollback(render_grid: &mut Value, fallback: &Value) {
+    let Some(target) = render_grid.as_object_mut() else {
+        return;
+    };
+    let Some(source_spans) = fallback.get("scrollback_spans").and_then(Value::as_array) else {
+        return;
+    };
+    let source_styles = fallback
+        .get("styles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(target_styles) = target.get_mut("styles").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut target_style_ids = target_styles
+        .iter()
+        .enumerate()
+        .map(|(index, style)| {
+            (
+                render_grid_style_key(style),
+                style
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(index as u64),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut source_to_target = HashMap::new();
+    for (index, style) in source_styles.iter().enumerate() {
+        let source_id = style
+            .get("id")
+            .and_then(Value::as_u64)
+            .unwrap_or(index as u64);
+        let key = render_grid_style_key(style);
+        let target_id = if let Some(target_id) = target_style_ids.get(&key) {
+            *target_id
+        } else {
+            let target_id = target_styles.len() as u64;
+            let mut style = style.clone();
+            if let Some(style) = style.as_object_mut() {
+                style.insert("id".to_string(), json!(target_id));
+            }
+            target_styles.push(style);
+            target_style_ids.insert(key, target_id);
+            target_id
+        };
+        source_to_target.insert(source_id, target_id);
+    }
+    let mut scrollback_spans = source_spans.clone();
+    for span in &mut scrollback_spans {
+        let Some(source_id) = span.get("style_id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(target_id) = source_to_target.get(&source_id) else {
+            continue;
+        };
+        if let Some(span) = span.as_object_mut() {
+            span.insert("style_id".to_string(), json!(target_id));
+        }
+    }
+    target.insert(
+        "scrollback_rows".to_string(),
+        fallback
+            .get("scrollback_rows")
+            .cloned()
+            .unwrap_or_else(|| json!(0)),
+    );
+    target.insert("scrollback_spans".to_string(), json!(scrollback_spans));
+}
+
+fn render_grid_style_key(style: &Value) -> String {
+    let mut style = style.clone();
+    if let Some(style) = style.as_object_mut() {
+        style.remove("id");
+    }
+    serde_json::to_string(&style).unwrap_or_default()
 }
 
 struct GhosttyRenderGridSpan {
@@ -4871,8 +4956,14 @@ mod tests {
                 }]
             }]
         });
-        let fallback =
-            render_grid_from_text_with_scrollback("surface-a", 42, 8, 2, "old\nready\n", 10);
+        let fallback = render_grid_from_text_with_scrollback(
+            "surface-a",
+            42,
+            8,
+            2,
+            "\x1b[31mold\x1b[0m\nready\n",
+            10,
+        );
         let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
         attach_ghostty_vt_snapshot(&mut object, "surface-a", 42, native.clone());
 
@@ -4887,6 +4978,8 @@ mod tests {
         assert_eq!(object["render_grid"]["cursor"]["column"], 3);
         assert_eq!(object["render_grid"]["scrollback_rows"], 1);
         assert_eq!(object["render_grid"]["scrollback_spans"][0]["text"], "old");
+        assert_eq!(object["render_grid"]["scrollback_spans"][0]["style_id"], 2);
+        assert_eq!(object["render_grid"]["styles"][2]["fg"]["r"], 205);
     }
 
     #[test]

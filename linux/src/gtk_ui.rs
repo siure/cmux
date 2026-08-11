@@ -14361,15 +14361,19 @@ fn surface_card(
             }
             if is_terminal {
                 if let Some(pane_id) = pane_id_or_ref(view) {
-                    connect_pane_allocation_probe(
+                    let preview = fallback_terminal_preview_container(
                         &preview_label,
                         pane_id,
                         Arc::clone(app_state),
                         Rc::clone(pane_allocations),
                     );
+                    card.append(&preview);
+                } else {
+                    card.append(&preview_label);
                 }
+            } else {
+                card.append(&preview_label);
             }
-            card.append(&preview_label);
         }
     }
 
@@ -14687,16 +14691,38 @@ fn attach_surface_context_menu_for(
     card.add_controller(gesture);
 }
 
+fn fallback_terminal_preview_container(
+    label: &gtk::Label,
+    pane_id: String,
+    app_state: Arc<Mutex<AppState>>,
+    pane_allocations: PaneAllocations,
+) -> gtk::Overlay {
+    let container = gtk::Overlay::new();
+    container.set_hexpand(true);
+    container.set_vexpand(true);
+    container.set_child(Some(label));
+
+    let probe = gtk::DrawingArea::new();
+    probe.set_can_target(false);
+    probe.set_hexpand(true);
+    probe.set_vexpand(true);
+    probe.set_halign(gtk::Align::Fill);
+    probe.set_valign(gtk::Align::Fill);
+    container.add_overlay(&probe);
+    container.set_measure_overlay(&probe, false);
+
+    connect_pane_allocation_probe(&probe, pane_id, app_state, pane_allocations);
+    container
+}
+
 fn connect_pane_allocation_probe(
-    widget: &gtk::Label,
+    probe: &gtk::DrawingArea,
     pane_id: String,
     app_state: Arc<Mutex<AppState>>,
     pane_allocations: PaneAllocations,
 ) {
-    let update = Rc::new(move |widget: &gtk::Label| {
-        let Some(allocation) =
-            pane_allocation_from_pixels(widget.allocated_width(), widget.allocated_height())
-        else {
+    let update = Rc::new(move |width: i32, height: i32| {
+        let Some(allocation) = pane_allocation_from_pixels(width, height) else {
             return;
         };
 
@@ -14721,11 +14747,9 @@ fn connect_pane_allocation_probe(
             }),
         );
     });
-    let width_update = Rc::clone(&update);
-    widget.connect_notify_local(Some("width"), move |widget, _| width_update(widget));
-    let height_update = Rc::clone(&update);
-    widget.connect_notify_local(Some("height"), move |widget, _| height_update(widget));
-    widget.connect_map(move |widget| update(widget));
+    let resize_update = Rc::clone(&update);
+    probe.connect_resize(move |_, width, height| resize_update(width, height));
+    probe.connect_map(move |probe| update(probe.allocated_width(), probe.allocated_height()));
 }
 
 fn pane_allocation_from_pixels(width: i32, height: i32) -> Option<GtkPaneAllocation> {
@@ -20884,7 +20908,7 @@ mod tests {
     }
 
     #[test]
-    fn gtk_runtime_widget_regressions() {
+    fn gtk_fallback_terminal_allocation_follows_live_resize() {
         if gtk::init().is_err() {
             return;
         }
@@ -20903,7 +20927,7 @@ mod tests {
         let allocation_label = gtk::Label::new(Some("fallback terminal"));
         allocation_label.set_hexpand(true);
         allocation_label.set_vexpand(true);
-        connect_pane_allocation_probe(
+        let allocation_container = fallback_terminal_preview_container(
             &allocation_label,
             pane_id.clone(),
             Arc::clone(&allocation_app),
@@ -20912,7 +20936,7 @@ mod tests {
         let allocation_window = gtk::Window::builder()
             .default_width(320)
             .default_height(180)
-            .child(&allocation_label)
+            .child(&allocation_container)
             .build();
         allocation_window.present();
         gtk_run_main_loop_for(Duration::from_millis(100));
@@ -20933,7 +20957,13 @@ mod tests {
             "fallback terminal allocation must follow live GTK resizes"
         );
         allocation_window.close();
+    }
 
+    #[test]
+    fn gtk_runtime_widget_regressions() {
+        if gtk::init().is_err() {
+            return;
+        }
         let terminal_label = gtk::Label::new(Some("selected terminal text"));
         terminal_label.add_css_class("cmux-terminal-preview");
         terminal_label.set_selectable(true);
