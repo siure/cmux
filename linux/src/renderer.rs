@@ -4303,11 +4303,11 @@ mod tests {
     }
 
     #[test]
-    fn full_ghostty_backend_skips_core_text_fallback() {
+    fn ghostty_backends_skip_core_text_fallback() {
         assert!(!renderer_backend_uses_text_fallback("ghostty"));
         assert!(renderer_backend_uses_text_fallback("core"));
         assert!(renderer_backend_uses_text_fallback("gtk"));
-        assert!(renderer_backend_uses_text_fallback("ghostty-vt"));
+        assert!(!renderer_backend_uses_text_fallback("ghostty-vt"));
     }
 
     #[test]
