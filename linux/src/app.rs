@@ -16295,9 +16295,21 @@ impl AppState {
             .and_then(|surface| surface.buffer.lock().ok().map(|buffer| buffer.clone()))
             .map(|output| clean_terminal_text(&output))
             .unwrap_or_default();
+        let revision = fallback_agent_transcript_revision(&output);
         let offset = usize::try_from(cursor).ok();
-        let valid_cursor =
-            offset.is_some_and(|offset| offset <= output.len() && output.is_char_boundary(offset));
+        let prior_revision = params.get("revision").and_then(Value::as_str);
+        let valid_cursor = offset.is_some_and(|offset| {
+            offset <= output.len()
+                && output.is_char_boundary(offset)
+                && if offset == 0 {
+                    true
+                } else if offset == output.len() {
+                    prior_revision == Some(revision.as_str())
+                } else {
+                    let prefix_revision = fallback_agent_transcript_revision(&output[..offset]);
+                    prior_revision == Some(prefix_revision.as_str())
+                }
+        });
         let reset = !valid_cursor;
         let text = if reset {
             output.clone()
@@ -16307,6 +16319,7 @@ impl AppState {
         Ok(json!({
             "surface_id": surface_id,
             "cursor": output.len() as u64,
+            "revision": revision,
             "reset": reset,
             "output": text
         }))
@@ -32688,6 +32701,10 @@ impl AppState {
         normalized_combo: &str,
         context: &ShortcutContext,
     ) -> bool {
+        let active_overlay_owns_shortcut = (context.bool("commandPaletteVisible")
+            && matches!(name, "command_palette_next" | "command_palette_previous"))
+            || (context.bool("terminalFindVisible")
+                && matches!(name, "find_next" | "find_previous" | "hide_find"));
         let terminal_surface_focused = context.bool("terminalFocus")
             && self
                 .current_surface_id()
@@ -32696,6 +32713,7 @@ impl AppState {
                 .is_some_and(|surface| surface.kind == SurfaceKind::Terminal);
         self.shortcut_action_allowed(name, context)
             && !(terminal_surface_focused
+                && !active_overlay_owns_shortcut
                 && self.shortcut_uses_default(name)
                 && terminal_control_sequence_combo(normalized_combo))
     }
@@ -33654,6 +33672,12 @@ impl AppState {
 
     fn shortcut_matches(&self, name: &str, normalized_combo: &str) -> bool {
         self.effective_shortcut_combo(name).as_deref() == Some(normalized_combo)
+    }
+
+    pub(crate) fn terminal_find_shortcut_matches(&self, normalized_combo: &str) -> bool {
+        ["find_next", "find_previous", "hide_find"]
+            .into_iter()
+            .any(|name| self.shortcut_matches(name, normalized_combo))
     }
 
     fn shortcut_uses_default(&self, name: &str) -> bool {
@@ -48000,6 +48024,8 @@ mod shortcut_combo_tests {
         context.set_bool("commandPaletteVisible", false);
         context.set_bool("terminalFindVisible", true);
         assert!(app.shortcut_event_allowed("find_next", "ctrl+g", &context));
+        assert!(app.terminal_find_shortcut_matches("ctrl+g"));
+        assert!(!app.terminal_find_shortcut_matches("ctrl+n"));
     }
 
     #[test]
@@ -56975,6 +57001,10 @@ fn clean_terminal_text(text: &str) -> String {
     terminal_text_screen(text).text()
 }
 
+fn fallback_agent_transcript_revision(output: &str) -> String {
+    format!("{:x}", Sha256::digest(output.as_bytes()))
+}
+
 fn append_terminal_output_aligned(buffer: &mut String, output: &str) {
     if output.is_empty() {
         return;
@@ -63954,14 +63984,14 @@ fn git_branch_state_for_cwd(cwd: Option<&str>) -> Option<(String, bool)> {
 
 fn git_project_root_for_extension(cwd: Option<&str>) -> Option<String> {
     static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<String>>>> = OnceLock::new();
-    cached_git_value_with_initial(cwd?, &CACHE, |cwd| {
+    cached_git_value(cwd?, &CACHE, |cwd| {
         git_output(&cwd, ["rev-parse", "--show-toplevel"])
     })
 }
 
 fn git_branch_state_for_extension(cwd: Option<&str>) -> Option<(String, bool)> {
     static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<(String, bool)>>>> = OnceLock::new();
-    cached_git_value_with_initial(cwd?, &CACHE, |cwd| {
+    cached_git_value(cwd?, &CACHE, |cwd| {
         git_output(&cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| {
             let dirty = git_output(&cwd, ["status", "--porcelain"])
                 .map(|status| !status.trim().is_empty())
@@ -63989,7 +64019,7 @@ where
     let entries_cache = cache.get_or_init(|| Mutex::new(HashMap::new()));
     let now = Instant::now();
     let cwd = cwd.to_string();
-    let stale_value = {
+    let (stale_value, initial_lookup) = {
         let Ok(mut entries) = entries_cache.lock() else {
             return None;
         };
@@ -64000,7 +64030,7 @@ where
                 return entry.value.clone();
             }
             entry.refresh_in_flight = true;
-            entry.value.clone()
+            (entry.value.clone(), false)
         } else {
             if entries.len() >= 256 {
                 entries.retain(|_, entry| {
@@ -64008,17 +64038,23 @@ where
                         || now.duration_since(entry.updated_at) < Duration::from_secs(30)
                 });
             }
-            entries.insert(
-                cwd.clone(),
-                GitCacheEntry {
-                    updated_at: now,
-                    value: None,
-                    refresh_in_flight: true,
-                },
-            );
-            None
+            (None, true)
         }
     };
+    if initial_lookup {
+        let value = refresh(cwd.clone());
+        if let Ok(mut entries) = entries_cache.lock() {
+            entries.insert(
+                cwd,
+                GitCacheEntry {
+                    updated_at: Instant::now(),
+                    value: value.clone(),
+                    refresh_in_flight: false,
+                },
+            );
+        }
+        return value;
+    }
     let refresh_cwd = cwd.clone();
     thread::Builder::new()
         .name("cmux-git-status".to_string())
@@ -64037,40 +64073,6 @@ where
         })
         .ok();
     stale_value
-}
-
-fn cached_git_value_with_initial<T, F>(
-    cwd: &str,
-    cache: &'static OnceLock<Mutex<HashMap<String, GitCacheEntry<T>>>>,
-    refresh: F,
-) -> Option<T>
-where
-    T: Clone + Send + 'static,
-    F: FnOnce(String) -> Option<T> + Send + 'static,
-{
-    let entries_cache = cache.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(entries) = entries_cache.lock() {
-        if let Some(entry) = entries.get(cwd) {
-            if Instant::now().duration_since(entry.updated_at) < Duration::from_secs(3) {
-                return entry.value.clone();
-            }
-        } else {
-            drop(entries);
-            let value = refresh(cwd.to_string());
-            if let Ok(mut entries) = entries_cache.lock() {
-                entries.insert(
-                    cwd.to_string(),
-                    GitCacheEntry {
-                        updated_at: Instant::now(),
-                        value: value.clone(),
-                        refresh_in_flight: false,
-                    },
-                );
-            }
-            return value;
-        }
-    }
-    cached_git_value(cwd, cache, refresh)
 }
 
 fn git_output<const N: usize>(cwd: &str, args: [&str; N]) -> Option<String> {

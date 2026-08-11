@@ -31509,17 +31509,17 @@ fn renderer_snapshot_ghostty_vt_embeds_render_state_for_terminal_views() {
         fallback_text.contains("CMUX_GHOSTTY_FRAME"),
         "fallback render grid was missing terminal output: {snapshot}"
     );
-    let fallback_scrollback = view["render_grid"]["scrollback_spans"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|span| span["text"].as_str())
-        .collect::<String>();
-    assert!(
-        fallback_scrollback.contains("CMUX_SCROLL"),
-        "fallback render grid was missing bounded scrollback: {snapshot}"
-    );
     if view.get("ghostty_vt_error").is_some() {
+        let fallback_scrollback = view["render_grid"]["scrollback_spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|span| span["text"].as_str())
+            .collect::<String>();
+        assert!(
+            fallback_scrollback.contains("CMUX_SCROLL"),
+            "fallback render grid was missing bounded scrollback: {snapshot}"
+        );
         assert!(
             view["ghostty_vt_error"]["message"]
                 .as_str()
@@ -31531,6 +31531,9 @@ fn renderer_snapshot_ghostty_vt_embeds_render_state_for_terminal_views() {
         return;
     }
 
+    assert_eq!(view["render_grid"]["format"], "cmux.render-grid.v1");
+    assert_eq!(view["render_grid"]["parser"], "ghostty-vt-adapter");
+    assert_ne!(view["render_grid"], view["ghostty_vt"]);
     let render = &view["ghostty_vt"];
     assert_eq!(render["parser"], "ghostty-vt");
     assert_eq!(render["cols"], 80);

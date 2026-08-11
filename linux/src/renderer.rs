@@ -1760,12 +1760,155 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
 
 fn attach_ghostty_vt_snapshot(
     object: &mut serde_json::Map<String, Value>,
-    _surface_id: &str,
-    _state_seq: u64,
+    surface_id: &str,
+    state_seq: u64,
     value: Value,
 ) {
-    object.insert("render_grid".to_string(), value.clone());
+    if let Some(render_grid) = render_grid_from_ghostty_vt_snapshot(surface_id, state_seq, &value) {
+        object.insert("render_grid".to_string(), render_grid);
+    }
     object.insert("ghostty_vt".to_string(), value);
+}
+
+struct GhosttyRenderGridSpan {
+    row: u64,
+    column: u64,
+    style_id: u64,
+    text: String,
+    cell_width: u64,
+}
+
+fn render_grid_from_ghostty_vt_snapshot(
+    surface_id: &str,
+    state_seq: u64,
+    snapshot: &Value,
+) -> Option<Value> {
+    let columns = snapshot.get("cols")?.as_u64()?.max(1);
+    let rows = snapshot.get("rows")?.as_u64()?.max(1);
+    let rows_data = snapshot.get("rows_data")?.as_array()?;
+    let mut styles = vec![json!({"id": 0})];
+    let mut style_ids = HashMap::from([("{}".to_string(), 0_u64)]);
+    let mut spans = Vec::<GhosttyRenderGridSpan>::new();
+
+    for row in rows_data {
+        let row_index = row.get("y").and_then(Value::as_u64).unwrap_or(0);
+        for cell in row
+            .get("cells")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let text = cell.get("text").and_then(Value::as_str).unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+            let style = render_grid_style_from_ghostty_vt(cell.get("style"));
+            let style_key = serde_json::to_string(&style).unwrap_or_default();
+            let style_id = if let Some(style_id) = style_ids.get(&style_key) {
+                *style_id
+            } else {
+                let style_id = styles.len() as u64;
+                let mut style = style;
+                if let Some(style) = style.as_object_mut() {
+                    style.insert("id".to_string(), json!(style_id));
+                }
+                styles.push(style);
+                style_ids.insert(style_key, style_id);
+                style_id
+            };
+            let column = cell.get("x").and_then(Value::as_u64).unwrap_or(0);
+            if let Some(span) = spans.last_mut().filter(|span| {
+                span.row == row_index
+                    && span.style_id == style_id
+                    && span.column.saturating_add(span.cell_width) == column
+            }) {
+                span.text.push_str(text);
+                span.cell_width = span.cell_width.saturating_add(1);
+            } else {
+                spans.push(GhosttyRenderGridSpan {
+                    row: row_index,
+                    column,
+                    style_id,
+                    text: text.to_string(),
+                    cell_width: 1,
+                });
+            }
+        }
+    }
+    let row_spans = spans
+        .into_iter()
+        .map(|span| {
+            json!({
+                "row": span.row,
+                "column": span.column,
+                "style_id": span.style_id,
+                "text": span.text,
+                "cell_width": span.cell_width
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut render_grid = json!({
+        "format": "cmux.render-grid.v1",
+        "parser": "ghostty-vt-adapter",
+        "surface_id": surface_id,
+        "state_seq": state_seq,
+        "columns": columns,
+        "rows": rows,
+        "full": true,
+        "cleared_rows": [],
+        "styles": styles,
+        "row_spans": row_spans,
+        "active_screen": "primary",
+        "modes": {},
+        "scrollback_rows": 0,
+        "scrollback_spans": []
+    });
+    let cursor = snapshot.get("cursor").filter(|cursor| {
+        cursor.get("visible").and_then(Value::as_bool) == Some(true)
+            && cursor.get("in_viewport").and_then(Value::as_bool) == Some(true)
+    });
+    if let Some((row, column)) =
+        cursor.and_then(|cursor| Some((cursor.get("y")?.as_u64()?, cursor.get("x")?.as_u64()?)))
+    {
+        render_grid["cursor"] = json!({
+            "row": row,
+            "column": column,
+            "visible": true,
+            "style": "block",
+            "blinking": false
+        });
+    }
+    Some(render_grid)
+}
+
+fn render_grid_style_from_ghostty_vt(style: Option<&Value>) -> Value {
+    let Some(style) = style.and_then(Value::as_object) else {
+        return json!({});
+    };
+    let mut normalized = serde_json::Map::new();
+    for key in ["fg", "bg"] {
+        if let Some(value) = style.get(key).filter(|value| value.is_object()) {
+            normalized.insert(key.to_string(), value.clone());
+        }
+    }
+    for key in [
+        "selected",
+        "bold",
+        "italic",
+        "faint",
+        "blink",
+        "inverse",
+        "invisible",
+        "underline",
+        "strikethrough",
+        "overline",
+    ] {
+        if style.get(key).and_then(Value::as_bool) == Some(true) {
+            normalized.insert(key.to_string(), json!(true));
+        }
+    }
+    Value::Object(normalized)
 }
 
 fn frame_terminal_size(frame: Option<&Value>) -> (u16, u16) {
@@ -4726,6 +4869,9 @@ mod tests {
         assert_eq!(object["render_grid"]["surface_id"], "surface-a");
         assert_eq!(object["render_grid"]["state_seq"], 42);
         assert_eq!(object["render_grid"]["row_spans"][0]["text"], "ready");
+        assert_eq!(object["render_grid"]["row_spans"][0]["style_id"], 1);
+        assert_eq!(object["render_grid"]["styles"][1]["fg"]["r"], 10);
+        assert_eq!(object["render_grid"]["styles"][1]["bold"], true);
         assert_eq!(object["render_grid"]["cursor"]["column"], 3);
     }
 

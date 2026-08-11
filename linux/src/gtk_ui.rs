@@ -10708,12 +10708,14 @@ fn agent_session_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) ->
         let app_state = Arc::clone(app_state);
         let surface_id = surface_id.clone();
         let cursor = Rc::new(Cell::new(0_u64));
+        let revision = Rc::new(RefCell::new(None::<String>));
         move |buffer: &gtk::TextBuffer| {
-            let Some(value) = call_app_value(
-                &app_state,
-                "agent_session.output_delta",
-                json!({"surface_id": surface_id, "cursor": cursor.get()}),
-            ) else {
+            let mut params = json!({"surface_id": surface_id, "cursor": cursor.get()});
+            if let Some(value) = revision.borrow().as_deref() {
+                params["revision"] = json!(value);
+            }
+            let Some(value) = call_app_value(&app_state, "agent_session.output_delta", params)
+            else {
                 return;
             };
             let output = value
@@ -10728,6 +10730,10 @@ fn agent_session_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) ->
             if let Some(next_cursor) = value.get("cursor").and_then(Value::as_u64) {
                 cursor.set(next_cursor);
             }
+            *revision.borrow_mut() = value
+                .get("revision")
+                .and_then(Value::as_str)
+                .map(str::to_string);
         }
     };
     refresh_transcript(&transcript_buffer);
@@ -14857,6 +14863,8 @@ fn connect_terminal_keys(
         let browser_location_focused = focused_widget
             .as_ref()
             .is_some_and(|widget| widget.has_css_class("cmux-browser-location"));
+        let terminal_search_focused =
+            widget_or_ancestor_has_css_class(focused_widget.as_ref(), "cmux-terminal-search");
         let browser_location_navigation_key = browser_location_focused
             && !modifiers.intersects(
                 gdk::ModifierType::CONTROL_MASK
@@ -14886,15 +14894,25 @@ fn connect_terminal_keys(
                 .or_else(|| app_shortcut_combo_for_key(keyval, modifiers))
         } else if diff_focused && !editable_focused {
             diff_shortcut_combo_for_key(keyval, modifiers)
-        } else if editable_focus_blocks_application_shortcuts(
-            editable_focused,
-            browser_location_focused,
-            text_view_focused,
-            focused_widget
-                .as_ref()
-                .is_some_and(|widget| widget.has_css_class("cmux-terminal-search")),
-        ) {
-            None
+        } else if editable_focused && !browser_location_focused && !text_view_focused {
+            let combo = app_shortcut_combo_for_key(keyval, modifiers);
+            let terminal_find_shortcut = terminal_search_focused
+                && combo.as_deref().is_some_and(|combo| {
+                    app_state
+                        .lock()
+                        .ok()
+                        .is_some_and(|app| app.terminal_find_shortcut_matches(combo))
+                });
+            if editable_focus_blocks_application_shortcuts(
+                editable_focused,
+                browser_location_focused,
+                text_view_focused,
+                terminal_find_shortcut,
+            ) {
+                None
+            } else {
+                combo
+            }
         } else {
             app_shortcut_combo_for_key(keyval, modifiers)
         };
@@ -15486,16 +15504,21 @@ fn shortcut_focus_context(focused: Option<&gtk::Widget>) -> Value {
         && (widget_or_ancestor_has_css_class(focused, "cmux-surface-browser")
             || widget_or_ancestor_has_css_class(focused, "cmux-surface-diff"));
     let markdown = !sidebar && widget_or_ancestor_has_css_class(focused, "cmux-surface-markdown");
-    shortcut_focus_context_from_flags(sidebar, browser, markdown)
+    let terminal_search = widget_or_ancestor_has_css_class(focused, "cmux-terminal-search");
+    let mut context = shortcut_focus_context_from_flags(sidebar, browser, markdown);
+    if terminal_search {
+        context["terminalFocus"] = json!(false);
+    }
+    context
 }
 
 fn editable_focus_blocks_application_shortcuts(
     editable: bool,
     browser_location: bool,
     text_view: bool,
-    _terminal_search: bool,
+    allowed_application_shortcut: bool,
 ) -> bool {
-    editable && !browser_location && !text_view
+    editable && !browser_location && !text_view && !allowed_application_shortcut
 }
 
 fn shortcut_focus_context_from_flags(sidebar: bool, browser: bool, markdown: bool) -> Value {
@@ -20965,6 +20988,9 @@ mod tests {
 
     #[test]
     fn terminal_search_focus_routes_application_shortcuts() {
+        assert!(editable_focus_blocks_application_shortcuts(
+            true, false, false, false
+        ));
         assert!(
             !editable_focus_blocks_application_shortcuts(true, false, false, true),
             "terminal search must keep application shortcuts such as Ctrl+G routable"
