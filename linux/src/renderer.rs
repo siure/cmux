@@ -3817,6 +3817,16 @@ mod tests {
     }
 
     #[test]
+    fn renderer_snapshot_does_not_enter_session_persistence_path() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+        assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), 0);
+
+        snapshot_value(&mut app, &json!({})).expect("renderer snapshot");
+
+        assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), 0);
+    }
+
+    #[test]
     fn renderer_snapshot_exposes_beta_gated_right_sidebar_modes_and_feed_data() {
         let mut app = AppState::with_paths(None, None).expect("app state");
         app.set_beta_feature_settings_for_test(crate::config::BetaFeatureSettings::default());
@@ -4861,7 +4871,9 @@ mod tests {
                 }]
             }]
         });
-        let mut object = serde_json::Map::new();
+        let fallback =
+            render_grid_from_text_with_scrollback("surface-a", 42, 8, 2, "old\nready\n", 10);
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
         attach_ghostty_vt_snapshot(&mut object, "surface-a", 42, native.clone());
 
         assert_eq!(object["ghostty_vt"], native);
@@ -4873,6 +4885,8 @@ mod tests {
         assert_eq!(object["render_grid"]["styles"][1]["fg"]["r"], 10);
         assert_eq!(object["render_grid"]["styles"][1]["bold"], true);
         assert_eq!(object["render_grid"]["cursor"]["column"], 3);
+        assert_eq!(object["render_grid"]["scrollback_rows"], 1);
+        assert_eq!(object["render_grid"]["scrollback_spans"][0]["text"], "old");
     }
 
     #[test]

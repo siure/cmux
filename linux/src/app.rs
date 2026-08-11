@@ -3088,6 +3088,8 @@ pub struct AppState {
     events_boot_id: String,
     events: Vec<Value>,
     next_event_sequence: i64,
+    #[cfg(test)]
+    session_snapshot_persist_attempt_count: usize,
 }
 
 #[derive(Clone)]
@@ -3405,6 +3407,8 @@ impl AppState {
             events_boot_id: new_id(),
             events: Vec::new(),
             next_event_sequence: 1,
+            #[cfg(test)]
+            session_snapshot_persist_attempt_count: 0,
         };
         match app.restore_persisted_session_snapshot() {
             Ok(true) => {
@@ -4270,6 +4274,12 @@ impl AppState {
     }
 
     fn persist_session_snapshot_after_method(&mut self, method: &str) {
+        #[cfg(test)]
+        if method_persists_session_snapshot(method) {
+            self.session_snapshot_persist_attempt_count = self
+                .session_snapshot_persist_attempt_count
+                .saturating_add(1);
+        }
         if !method_persists_session_snapshot(method) || !session_snapshot_save_enabled() {
             return;
         }
@@ -4282,6 +4292,11 @@ impl AppState {
                 ));
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_snapshot_persist_attempt_count_for_test(&self) -> usize {
+        self.session_snapshot_persist_attempt_count
     }
 
     pub(crate) fn event_stream_snapshot(

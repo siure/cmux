@@ -20888,6 +20888,52 @@ mod tests {
         if gtk::init().is_err() {
             return;
         }
+        let allocation_app = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("allocation app state"),
+        ));
+        let pane_id = allocation_app
+            .lock()
+            .expect("allocation app lock")
+            .handle("system.identify", &json!({}))
+            .expect("current pane")["pane_id"]
+            .as_str()
+            .expect("current pane id")
+            .to_string();
+        let pane_allocations = Rc::new(RefCell::new(HashMap::new()));
+        let allocation_label = gtk::Label::new(Some("fallback terminal"));
+        allocation_label.set_hexpand(true);
+        allocation_label.set_vexpand(true);
+        connect_pane_allocation_probe(
+            &allocation_label,
+            pane_id.clone(),
+            Arc::clone(&allocation_app),
+            Rc::clone(&pane_allocations),
+        );
+        let allocation_window = gtk::Window::builder()
+            .default_width(320)
+            .default_height(180)
+            .child(&allocation_label)
+            .build();
+        allocation_window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let initial_allocation = pane_allocations
+            .borrow()
+            .get(&pane_id)
+            .copied()
+            .expect("initial fallback pane allocation");
+        allocation_window.set_default_size(640, 360);
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let resized_allocation = pane_allocations
+            .borrow()
+            .get(&pane_id)
+            .copied()
+            .expect("resized fallback pane allocation");
+        assert_ne!(
+            resized_allocation, initial_allocation,
+            "fallback terminal allocation must follow live GTK resizes"
+        );
+        allocation_window.close();
+
         let terminal_label = gtk::Label::new(Some("selected terminal text"));
         terminal_label.add_css_class("cmux-terminal-preview");
         terminal_label.set_selectable(true);
