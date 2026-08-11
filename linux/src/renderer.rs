@@ -1728,6 +1728,11 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
             continue;
         };
         let (cols, rows) = frame_terminal_size(view.get("frame"));
+        let state_seq = view
+            .get("state_seq")
+            .or_else(|| view.get("present_count"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let render_state = app.handle_renderer_read(
             "renderer.ghostty_vt.snapshot",
             &json!({
@@ -1739,8 +1744,7 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
         if let Some(object) = view.as_object_mut() {
             match render_state {
                 Ok(value) => {
-                    object.insert("render_grid".to_string(), value.clone());
-                    object.insert("ghostty_vt".to_string(), value);
+                    attach_ghostty_vt_snapshot(object, &surface_id, state_seq, value);
                 }
                 Err(err) => {
                     object.insert(
@@ -1752,6 +1756,16 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
         }
     }
     Ok(())
+}
+
+fn attach_ghostty_vt_snapshot(
+    object: &mut serde_json::Map<String, Value>,
+    _surface_id: &str,
+    _state_seq: u64,
+    value: Value,
+) {
+    object.insert("render_grid".to_string(), value.clone());
+    object.insert("ghostty_vt".to_string(), value);
 }
 
 fn frame_terminal_size(frame: Option<&Value>) -> (u16, u16) {
@@ -4685,6 +4699,34 @@ mod tests {
         assert_eq!(grid["row_spans"][1]["text"], "three");
         assert_eq!(grid["cursor"]["row"], 1);
         assert_eq!(grid["cursor"]["column"], 5);
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_keeps_native_and_render_grid_schemas_distinct() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": true, "in_viewport": true, "x": 3, "y": 1},
+            "rows_data": [{
+                "y": 1,
+                "dirty": true,
+                "cells": [{
+                    "x": 0,
+                    "text": "ready",
+                    "style": {"fg": {"r": 10, "g": 20, "b": 30}, "bold": true}
+                }]
+            }]
+        });
+        let mut object = serde_json::Map::new();
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 42, native.clone());
+
+        assert_eq!(object["ghostty_vt"], native);
+        assert_eq!(object["render_grid"]["format"], "cmux.render-grid.v1");
+        assert_eq!(object["render_grid"]["surface_id"], "surface-a");
+        assert_eq!(object["render_grid"]["state_seq"], 42);
+        assert_eq!(object["render_grid"]["row_spans"][0]["text"], "ready");
+        assert_eq!(object["render_grid"]["cursor"]["column"], 3);
     }
 
     #[test]

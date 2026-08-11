@@ -47815,7 +47815,7 @@ mod shortcut_combo_tests {
         normalize_shortcut_strokes_for, numbered_shortcut_digit, numbered_shortcut_target,
         shortcut_config_id, shortcut_default_when, shortcut_dispatch_names,
         shortcut_hint_from_combo, shortcut_name_for_config_id, terminal_control_sequence_combo,
-        valid_normalized_shortcut_combo, ShortcutContext, ShortcutWhenClause,
+        valid_normalized_shortcut_combo, AppState, ShortcutContext, ShortcutWhenClause,
     };
     use crate::config::ShortcutBinding;
     use std::collections::HashMap;
@@ -47986,6 +47986,20 @@ mod shortcut_combo_tests {
         }
         assert!(!terminal_control_sequence_combo("ctrl+1"));
         assert!(!terminal_control_sequence_combo("ctrl+9"));
+    }
+
+    #[test]
+    fn palette_and_terminal_find_shortcuts_override_terminal_control_deferral() {
+        let app = AppState::with_paths(None, None).expect("app state");
+        let mut context = ShortcutContext::default();
+        context.set_bool("terminalFocus", true);
+        context.set_bool("commandPaletteVisible", true);
+        assert!(app.shortcut_event_allowed("command_palette_next", "ctrl+n", &context));
+        assert!(app.shortcut_event_allowed("command_palette_previous", "ctrl+p", &context));
+
+        context.set_bool("commandPaletteVisible", false);
+        context.set_bool("terminalFindVisible", true);
+        assert!(app.shortcut_event_allowed("find_next", "ctrl+g", &context));
     }
 
     #[test]
@@ -57507,9 +57521,9 @@ mod embedded_terminal_action_tests {
         browser_import_bookmarks_from_value, browser_import_settings_from_value,
         browser_surface_preview_value, custom_sidebar_nested_cmux_method_allowed,
         debug_container_frame, default_browser_profiles, file_url_for_path,
-        global_search_query_tokens, global_search_result_digit, global_search_text_matches,
-        load_browser_profiles, merge_browser_history_entries, session_terminal_env,
-        workspace_placement_insertion_index, AppState, BrowserHistoryEntry,
+        git_branch_state_for_cwd, global_search_query_tokens, global_search_result_digit,
+        global_search_text_matches, load_browser_profiles, merge_browser_history_entries,
+        session_terminal_env, workspace_placement_insertion_index, AppState, BrowserHistoryEntry,
         BrowserImportHistoryEntry, EmbeddedTerminalActionRecord, EmbeddedTerminalColorChange,
         EmbeddedTerminalCommandFinished, EmbeddedTerminalInput, EmbeddedTerminalKeySequence,
         EmbeddedTerminalPixelSize, EmbeddedTerminalProgress, EmbeddedTerminalScrollbar,
@@ -57523,6 +57537,8 @@ mod embedded_terminal_action_tests {
     use base64::Engine;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::process::Command;
     use std::thread;
     use std::time::Duration;
     use uuid::Uuid;
@@ -57533,6 +57549,79 @@ mod embedded_terminal_action_tests {
         let surface_ref = app.surface_ref(&surface_id);
         let workspace_id = app.surface_workspace_id(&surface_id).expect("workspace");
         (app, surface_id, surface_ref, workspace_id)
+    }
+
+    #[test]
+    fn fallback_agent_transcript_resets_after_same_length_rewrite() {
+        let (mut app, surface_id, _, _) = app_with_current_surface();
+        app.surfaces.get_mut(&surface_id).expect("surface").kind = SurfaceKind::AgentSession;
+        app.configure_agent_session_surface(
+            &surface_id,
+            &json!({
+                "provider": "codex",
+                "renderer": "solid",
+                "transport": "pty-interactive"
+            }),
+        )
+        .expect("configure fallback agent session");
+        {
+            let surface = app.surfaces.get(&surface_id).expect("surface");
+            *surface.buffer.lock().expect("buffer") = "status 1".to_string();
+        }
+
+        let first = app
+            .agent_session_output_delta(&json!({"surface_id": surface_id, "cursor": 0}))
+            .expect("first delta");
+        assert_eq!(first["output"], "status 1");
+        let revision = first["revision"]
+            .as_str()
+            .expect("fallback delta revision")
+            .to_string();
+        {
+            let surface = app.surfaces.get(&surface_id).expect("surface");
+            *surface.buffer.lock().expect("buffer") = "status 2".to_string();
+        }
+
+        let rewritten = app
+            .agent_session_output_delta(&json!({
+                "surface_id": surface_id,
+                "cursor": first["cursor"],
+                "revision": revision
+            }))
+            .expect("rewritten delta");
+        assert_eq!(rewritten["reset"], true);
+        assert_eq!(rewritten["output"], "status 2");
+    }
+
+    #[test]
+    fn first_git_branch_lookup_returns_authoritative_state() {
+        let directory = tempfile::tempdir().expect("git tempdir");
+        let cwd = directory.path();
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init", "-b", "review-initial"]);
+        run_git(&[
+            "-c",
+            "user.name=cmux test",
+            "-c",
+            "user.email=cmux@example.test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ]);
+        fs::write(cwd.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        assert_eq!(
+            git_branch_state_for_cwd(cwd.to_str()),
+            Some(("review-initial".to_string(), true))
+        );
     }
 
     #[test]

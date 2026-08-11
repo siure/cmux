@@ -14886,7 +14886,14 @@ fn connect_terminal_keys(
                 .or_else(|| app_shortcut_combo_for_key(keyval, modifiers))
         } else if diff_focused && !editable_focused {
             diff_shortcut_combo_for_key(keyval, modifiers)
-        } else if editable_focused && !browser_location_focused && !text_view_focused {
+        } else if editable_focus_blocks_application_shortcuts(
+            editable_focused,
+            browser_location_focused,
+            text_view_focused,
+            focused_widget
+                .as_ref()
+                .is_some_and(|widget| widget.has_css_class("cmux-terminal-search")),
+        ) {
             None
         } else {
             app_shortcut_combo_for_key(keyval, modifiers)
@@ -15480,6 +15487,15 @@ fn shortcut_focus_context(focused: Option<&gtk::Widget>) -> Value {
             || widget_or_ancestor_has_css_class(focused, "cmux-surface-diff"));
     let markdown = !sidebar && widget_or_ancestor_has_css_class(focused, "cmux-surface-markdown");
     shortcut_focus_context_from_flags(sidebar, browser, markdown)
+}
+
+fn editable_focus_blocks_application_shortcuts(
+    editable: bool,
+    browser_location: bool,
+    text_view: bool,
+    _terminal_search: bool,
+) -> bool {
+    editable && !browser_location && !text_view
 }
 
 fn shortcut_focus_context_from_flags(sidebar: bool, browser: bool, markdown: bool) -> Value {
@@ -20865,6 +20881,18 @@ mod tests {
         ));
         assert!(copied.get());
 
+        let terminal_search = gtk::SearchEntry::new();
+        terminal_search.add_css_class("cmux-terminal-search");
+        let terminal_search_widget = terminal_search.upcast::<gtk::Widget>();
+        assert_eq!(
+            shortcut_focus_context(Some(&terminal_search_widget))["terminalFocus"],
+            false
+        );
+        assert!(
+            !editable_focus_blocks_application_shortcuts(true, false, false, true),
+            "terminal search must keep application shortcuts such as Ctrl+G routable"
+        );
+
         assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position();
         assert_gtk_tab_create_focus_and_close_refresh_before_fallback_poll();
         assert_gtk_local_refresh_does_not_retain_window_hosts();
@@ -20933,6 +20961,14 @@ mod tests {
         adjustment.set_value(bottom);
         assert!((adjustment.value() - bottom).abs() < f64::EPSILON);
         window.close();
+    }
+
+    #[test]
+    fn terminal_search_focus_routes_application_shortcuts() {
+        assert!(
+            !editable_focus_blocks_application_shortcuts(true, false, false, true),
+            "terminal search must keep application shortcuts such as Ctrl+G routable"
+        );
     }
 
     #[test]
