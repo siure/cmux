@@ -71,12 +71,11 @@ find_ghostty_checkout() {
         return 0
     fi
 
-    for candidate in "$repo_root/../ghostty" "$repo_root/ghostty"; do
-        if [[ -f "$candidate/build.zig" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
+    candidate=$repo_root/ghostty
+    if [[ -f "$candidate/build.zig" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
     return 1
 }
 

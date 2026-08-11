@@ -7,10 +7,6 @@ on:
         description: Optional cmux commit to build instead of the dispatched ref
         required: false
         type: string
-      ghostty_ref:
-        description: Published 40-character manaflow-ai/ghostty commit to embed
-        required: true
-        type: string
       bundle_version:
         description: Optional version written into the bundle metadata
         required: false
@@ -21,10 +17,6 @@ on:
         description: Optional cmux commit to build instead of the caller commit
         required: false
         type: string
-      ghostty_ref:
-        description: Published 40-character manaflow-ai/ghostty commit to embed
-        required: true
-        type: string
       bundle_version:
         description: Optional version written into the bundle metadata
         required: false
@@ -34,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: linux-desktop-app-${{ github.ref }}-${{ inputs.ghostty_ref }}
+  group: linux-desktop-app-${{ github.ref }}-${{ inputs.cmux_ref || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -53,23 +45,16 @@ jobs:
           ref: ${{ inputs.cmux_ref || github.sha }}
           fetch-depth: 0
 
-      - name: Validate immutable Linux Ghostty revision
-        env:
-          GHOSTTY_REF: ${{ inputs.ghostty_ref }}
+      - name: Checkout pinned Linux Ghostty submodule
+        id: ghostty
         run: |
           set -euo pipefail
-          if [[ ! "$GHOSTTY_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "ghostty_ref must be an immutable 40-character Git commit SHA" >&2
-            exit 1
-          fi
-
-      - name: Checkout Linux Ghostty revision
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: manaflow-ai/ghostty
-          ref: ${{ inputs.ghostty_ref }}
-          path: ghostty-linux
-          fetch-depth: 1
+          git submodule sync -- ghostty
+          git submodule update --init --depth 1 ghostty
+          ghostty_ref="$(git -C ghostty rev-parse HEAD)"
+          pinned_ref="$(git ls-tree HEAD ghostty | awk '{print $3}')"
+          test "$ghostty_ref" = "$pinned_ref"
+          echo "ref=$ghostty_ref" >> "$GITHUB_OUTPUT"
 
       - name: Install Linux desktop build dependencies
         run: |
@@ -109,8 +94,8 @@ jobs:
             ~/.cargo/git
             linux/target
             ~/.cache/zig
-            ghostty-linux/.zig-cache
-          key: linux-desktop-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ env.ZIG_VERSION }}-${{ hashFiles('linux/Cargo.lock') }}-${{ inputs.ghostty_ref }}
+            ghostty/.zig-cache
+          key: linux-desktop-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ env.ZIG_VERSION }}-${{ hashFiles('linux/Cargo.lock') }}-${{ steps.ghostty.outputs.ref }}
 
       - name: Build validated Linux desktop bundle
         env:
@@ -123,8 +108,8 @@ jobs:
           fi
           export SOURCE_DATE_EPOCH
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
-          CMUX_GHOSTTY_CHECKOUT="$GITHUB_WORKSPACE/ghostty-linux" \
-          CMUX_LINUX_BUNDLE_GHOSTTY_REPOSITORY="manaflow-ai/ghostty" \
+          CMUX_GHOSTTY_CHECKOUT="$GITHUB_WORKSPACE/ghostty" \
+          CMUX_LINUX_BUNDLE_GHOSTTY_REPOSITORY="siure/ghostty" \
           CMUX_LINUX_BUNDLE_VERSION="$version" \
             ./linux/scripts/build-bundle.sh
           (cd dist && sha256sum -c "cmux-linux-$(uname -m).tar.gz.sha256")
@@ -132,7 +117,7 @@ jobs:
       - name: Record source provenance
         env:
           REQUESTED_BUNDLE_VERSION: ${{ inputs.bundle_version }}
-          GHOSTTY_REF: ${{ inputs.ghostty_ref }}
+          GHOSTTY_REF: ${{ steps.ghostty.outputs.ref }}
         run: |
           set -euo pipefail
           version="$REQUESTED_BUNDLE_VERSION"
@@ -145,9 +130,9 @@ jobs:
             --arg version "$version" \
             --arg cmux_commit "$(git rev-parse HEAD)" \
             --argjson cmux_dirty false \
-            --arg ghostty_repository "manaflow-ai/ghostty" \
+            --arg ghostty_repository "siure/ghostty" \
             --arg ghostty_ref "$GHOSTTY_REF" \
-            --arg ghostty_commit "$(git -C ghostty-linux rev-parse HEAD)" \
+            --arg ghostty_commit "$(git -C ghostty rev-parse HEAD)" \
             --argjson ghostty_dirty false \
             --arg rust_version "$(rustc --version)" \
             --arg zig_version "$(zig version)" \

@@ -1,9 +1,11 @@
 # Linux port Git workflow
 
-This checkout contains two separate repositories:
+This checkout contains the cmux repository and its pinned Ghostty submodule:
 
 - `cmux/` — the cmux fork and Linux port; run cmux Git commands here.
-- `../ghostty/` — a separate Ghostty checkout; do not treat the parent directory as a repository.
+- `cmux/ghostty/` — the Linux-enabled Ghostty fork pinned by cmux. Initialize it
+  with `git submodule update --init ghostty`; local Linux builds use this
+  checkout by default.
 
 ## Remotes and permanent branches
 

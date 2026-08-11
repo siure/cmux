@@ -138,13 +138,11 @@ find_ghostty_checkout() {
         return 1
     fi
 
-    local candidate
-    for candidate in "$repo_root/../ghostty" "$repo_root/ghostty"; do
-        if [[ -f "$candidate/include/ghostty.h" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
+    local candidate=$repo_root/ghostty
+    if [[ -f "$candidate/include/ghostty.h" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
     return 1
 }
 
