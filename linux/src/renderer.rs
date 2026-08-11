@@ -347,29 +347,31 @@ pub fn snapshot_value(app: &mut AppState, params: &Value) -> Result<Value, AppEr
 
 fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<Value, AppError> {
     let backend = selected_backend(params)?;
-    let window = app.handle("window.current", &json!({}))?;
-    let focused = app.handle("system.identify", &json!({}))?;
-    let workspaces = app.handle("workspace.list", &json!({}))?;
-    let workspace_groups = app.handle("workspace.group.list", &json!({}))?;
-    let panes = app.handle("pane.list", &json!({}))?;
-    let surfaces = app.handle("surface.list", &json!({}))?;
-    let tree = app.handle("system.tree", &json!({}))?;
+    app.prepare_renderer_snapshot()?;
+    let window = app.handle_renderer_read("window.current", &json!({}))?;
+    let focused = app.handle_renderer_read("system.identify", &json!({}))?;
+    let workspaces = app.handle_renderer_read("workspace.list", &json!({}))?;
+    let workspace_groups = app.handle_renderer_read("workspace.group.list", &json!({}))?;
+    let panes = app.handle_renderer_read("pane.list", &json!({}))?;
+    let surfaces = app.handle_renderer_read("surface.list", &json!({}))?;
+    let tree = app.handle_renderer_read("system.tree", &json!({}))?;
     let window_surfaces = window_surface_inventory(&tree);
-    let layout = app.handle("debug.layout", &json!({}))?;
-    let canvas = app.handle("canvas.info", &json!({}))?;
+    let layout = app.handle_renderer_read("debug.layout", &json!({}))?;
+    let canvas = app.handle_renderer_read("canvas.info", &json!({}))?;
     let sidebar = sidebar_snapshot(app)?;
     let custom_sidebar = app.custom_sidebar_snapshot();
     let left_sidebar = app.handle("sidebar.left", &json!({"action": "mode"}))?;
     let right_sidebar = right_sidebar_snapshot(app)?;
-    let notifications = app.handle("notification.list", &json!({}))?;
-    let command_palette = app.handle("debug.command_palette.results", &json!({"limit": 10}))?;
-    let shortcut_help = app.handle("help.shortcuts", &json!({}))?;
+    let notifications = app.handle_renderer_read("notification.list", &json!({}))?;
+    let command_palette =
+        app.handle_renderer_read("debug.command_palette.results", &json!({"limit": 10}))?;
+    let shortcut_help = app.handle_renderer_read("help.shortcuts", &json!({}))?;
     let mut views = surface_views(&layout, &surfaces);
     if renderer_backend_uses_text_fallback(&backend) {
         attach_render_grid_fallbacks(app, &mut views)?;
-    }
-    if backend == "ghostty-vt" {
+    } else if backend == "ghostty-vt" {
         attach_ghostty_vt_render_states(app, &mut views)?;
+        attach_render_grid_fallbacks(app, &mut views)?;
     }
     let diagnostics = cached_diagnostics_value_for_backend(&backend)?;
 
@@ -463,9 +465,9 @@ fn cached_diagnostics_value_for_backend(backend: &str) -> Result<Value, AppError
 }
 
 fn sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
-    let mut state = app.handle("sidebar.state", &json!({}))?;
-    let statuses = app.handle("sidebar.status.list", &json!({}))?;
-    let logs = app.handle("sidebar.log.list", &json!({"limit": 5}))?;
+    let mut state = app.handle_renderer_read("sidebar.state", &json!({}))?;
+    let statuses = app.handle_renderer_read("sidebar.status.list", &json!({}))?;
+    let logs = app.handle_renderer_read("sidebar.log.list", &json!({"limit": 5}))?;
 
     if let Some(object) = state.as_object_mut() {
         object.insert(
@@ -485,11 +487,11 @@ fn sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
 }
 
 fn right_sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
-    let mut state = app.handle("sidebar.right", &json!({"action": "mode"}))?;
+    let mut state = app.handle_renderer_read("sidebar.right", &json!({"action": "mode"}))?;
     let include_feed = state.get("visible").and_then(Value::as_bool) == Some(true)
         && state.get("mode").and_then(Value::as_str) == Some("feed");
     let feed_items = if include_feed {
-        app.handle("feed.list", &json!({"limit": 20}))?
+        app.handle_renderer_read("feed.list", &json!({"limit": 20}))?
             .get("items")
             .cloned()
             .unwrap_or_else(|| json!([]))
@@ -793,6 +795,9 @@ fn attach_render_grid_fallbacks(app: &mut AppState, views: &mut Value) -> Result
         return Ok(());
     };
     for view in views {
+        if view.get("render_grid").is_some() {
+            continue;
+        }
         let is_terminal = view
             .get("kind")
             .and_then(Value::as_str)
@@ -814,7 +819,7 @@ fn attach_render_grid_fallbacks(app: &mut AppState, views: &mut Value) -> Result
             .or_else(|| view.get("present_count"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let read = app.handle(
+        let read = app.handle_renderer_read(
             "surface.read_text",
             &json!({"surface_id": surface_id.clone(), "raw": true}),
         );
@@ -1723,7 +1728,7 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
             continue;
         };
         let (cols, rows) = frame_terminal_size(view.get("frame"));
-        let render_state = app.handle(
+        let render_state = app.handle_renderer_read(
             "renderer.ghostty_vt.snapshot",
             &json!({
                 "surface_id": surface_id,
@@ -1734,6 +1739,7 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
         if let Some(object) = view.as_object_mut() {
             match render_state {
                 Ok(value) => {
+                    object.insert("render_grid".to_string(), value.clone());
                     object.insert("ghostty_vt".to_string(), value);
                 }
                 Err(err) => {
@@ -1787,7 +1793,7 @@ fn normalize_backend(backend: &str) -> Option<&'static str> {
 }
 
 fn renderer_backend_uses_text_fallback(backend: &str) -> bool {
-    backend != "ghostty"
+    matches!(backend, "core" | "gtk")
 }
 
 fn probe_gtk4() -> GtkProbe {

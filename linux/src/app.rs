@@ -7456,10 +7456,36 @@ impl AppState {
     }
 
     pub fn handle(&mut self, method: &str, params: &Value) -> AppResult<Value> {
+        self.prepare_for_request()?;
+        self.handle_prepared(method, params, true)
+    }
+
+    fn prepare_for_request(&mut self) -> AppResult<()> {
         self.drain_remote_tmux_events();
         self.flush_terminal_title_events()?;
         self.refresh_agent_session_processes();
         self.maybe_evaluate_agent_hibernation();
+        Ok(())
+    }
+
+    pub(crate) fn prepare_renderer_snapshot(&mut self) -> AppResult<()> {
+        self.prepare_for_request()
+    }
+
+    pub(crate) fn handle_renderer_read(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> AppResult<Value> {
+        self.handle_prepared(method, params, false)
+    }
+
+    fn handle_prepared(
+        &mut self,
+        method: &str,
+        params: &Value,
+        persist_snapshot: bool,
+    ) -> AppResult<Value> {
         let result = match method {
             "system.ping" => Ok(json!({"pong": true})),
             "system.capabilities" => Ok(json!({
@@ -7515,6 +7541,7 @@ impl AppState {
             "agent_session.interrupt" => self.agent_session_interrupt(params),
             "agent_session.stop" => self.agent_session_stop(params),
             "agent_session.output" => self.agent_session_output(params),
+            "agent_session.output_delta" => self.agent_session_output_delta(params),
             "session.restore_previous" => self.session_restore_previous(),
             "settings.open" => self.settings_open(params),
             "settings.set_target" => self.settings_set_target(params),
@@ -8324,7 +8351,7 @@ impl AppState {
             "debug.terminal.simulate_file_drop" => self.simulate_terminal_file_drop(params),
             _ => Err(AppError::method_not_found(method)),
         };
-        if result.is_ok() {
+        if persist_snapshot && result.is_ok() {
             self.persist_session_snapshot_after_method(method);
         }
         result
@@ -16250,6 +16277,41 @@ impl AppState {
         }))
     }
 
+    fn agent_session_output_delta(&self, params: &Value) -> AppResult<Value> {
+        let surface_id = self.resolve_agent_session_surface(params)?;
+        let cursor = params.get("cursor").and_then(Value::as_u64).unwrap_or(0);
+        if let Some(runtime) = self.agent_session_runtimes.get(&surface_id) {
+            let delta = runtime.transcript_delta(cursor);
+            return Ok(json!({
+                "surface_id": surface_id,
+                "cursor": delta.cursor,
+                "reset": delta.reset,
+                "output": delta.text
+            }));
+        }
+        let output = self
+            .surfaces
+            .get(&surface_id)
+            .and_then(|surface| surface.buffer.lock().ok().map(|buffer| buffer.clone()))
+            .map(|output| clean_terminal_text(&output))
+            .unwrap_or_default();
+        let offset = usize::try_from(cursor).ok();
+        let valid_cursor =
+            offset.is_some_and(|offset| offset <= output.len() && output.is_char_boundary(offset));
+        let reset = !valid_cursor;
+        let text = if reset {
+            output.clone()
+        } else {
+            output[offset.unwrap_or_default()..].to_string()
+        };
+        Ok(json!({
+            "surface_id": surface_id,
+            "cursor": output.len() as u64,
+            "reset": reset,
+            "output": text
+        }))
+    }
+
     fn refresh_agent_session_processes(&mut self) {
         let structured_snapshots = self
             .agent_session_runtimes
@@ -23774,7 +23836,6 @@ impl AppState {
 
     pub(crate) fn custom_sidebar_snapshot(&mut self) -> Value {
         let selected_provider_id = self.custom_sidebar_selected_provider_id.clone();
-        let context = self.custom_sidebar_data_context();
         let custom_enabled = self.beta_feature_settings.custom_sidebars;
         let extensions_enabled = self.beta_feature_settings.extensions;
         let extension_selected =
@@ -23789,7 +23850,7 @@ impl AppState {
                 custom_sidebar::DEFAULT_PROVIDER_ID,
                 self.custom_sidebar_reload_generation,
                 None,
-                &context,
+                &json!({}),
                 &mut custom_sidebar::SidebarState::new(),
             );
             snapshot["enabled"] = json!(custom_enabled || extensions_enabled);
@@ -23805,6 +23866,7 @@ impl AppState {
         if extension_available {
             return self.sidebar_extension_snapshot();
         }
+        let context = self.custom_sidebar_data_context();
         let last_good = custom_sidebar::provider_name(&selected_provider_id)
             .and_then(|name| self.custom_sidebar_last_good.get(name))
             .cloned();
@@ -24245,8 +24307,8 @@ impl AppState {
     ) -> Value {
         let current_directory = workspace.cwd.clone().unwrap_or_default();
         let root_path = non_empty_trimmed(current_directory.clone());
-        let project_root_path = git_project_root_for_cwd(workspace.cwd.as_deref());
-        let git_branch = git_branch_state_for_cwd(workspace.cwd.as_deref());
+        let project_root_path = git_project_root_for_extension(workspace.cwd.as_deref());
+        let git_branch = git_branch_state_for_extension(workspace.cwd.as_deref());
         let branch_summary = git_branch.as_ref().map(|(branch, _)| branch.clone());
         let git_branches = git_branch
             .into_iter()
@@ -63789,38 +63851,137 @@ fn format_log_entry(entry: &SidebarLogEntry) -> String {
     }
 }
 
-fn git_project_root_for_cwd(cwd: Option<&str>) -> Option<String> {
-    git_output(cwd?, ["rev-parse", "--show-toplevel"])
+fn git_branch_state_for_cwd(cwd: Option<&str>) -> Option<(String, bool)> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<(String, bool)>>>> = OnceLock::new();
+    cached_git_value(cwd?, &CACHE, |cwd| {
+        git_output(&cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| {
+            let dirty = git_output(&cwd, ["status", "--porcelain"])
+                .map(|status| !status.trim().is_empty())
+                .unwrap_or(false);
+            (branch, dirty)
+        })
+    })
 }
 
-fn git_branch_state_for_cwd(cwd: Option<&str>) -> Option<(String, bool)> {
-    let cwd = cwd?;
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Option<(String, bool)>)>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+fn git_project_root_for_extension(cwd: Option<&str>) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<String>>>> = OnceLock::new();
+    cached_git_value_with_initial(cwd?, &CACHE, |cwd| {
+        git_output(&cwd, ["rev-parse", "--show-toplevel"])
+    })
+}
+
+fn git_branch_state_for_extension(cwd: Option<&str>) -> Option<(String, bool)> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<(String, bool)>>>> = OnceLock::new();
+    cached_git_value_with_initial(cwd?, &CACHE, |cwd| {
+        git_output(&cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| {
+            let dirty = git_output(&cwd, ["status", "--porcelain"])
+                .map(|status| !status.trim().is_empty())
+                .unwrap_or(false);
+            (branch, dirty)
+        })
+    })
+}
+
+struct GitCacheEntry<T> {
+    updated_at: Instant,
+    value: Option<T>,
+    refresh_in_flight: bool,
+}
+
+fn cached_git_value<T, F>(
+    cwd: &str,
+    cache: &'static OnceLock<Mutex<HashMap<String, GitCacheEntry<T>>>>,
+    refresh: F,
+) -> Option<T>
+where
+    T: Clone + Send + 'static,
+    F: FnOnce(String) -> Option<T> + Send + 'static,
+{
+    let entries_cache = cache.get_or_init(|| Mutex::new(HashMap::new()));
     let now = Instant::now();
-    if let Ok(cache) = cache.lock() {
-        if let Some((updated_at, value)) = cache.get(cwd) {
-            if now.duration_since(*updated_at) < Duration::from_secs(3) {
-                return value.clone();
+    let cwd = cwd.to_string();
+    let stale_value = {
+        let Ok(mut entries) = entries_cache.lock() else {
+            return None;
+        };
+        if let Some(entry) = entries.get_mut(&cwd) {
+            if now.duration_since(entry.updated_at) < Duration::from_secs(3)
+                || entry.refresh_in_flight
+            {
+                return entry.value.clone();
             }
+            entry.refresh_in_flight = true;
+            entry.value.clone()
+        } else {
+            if entries.len() >= 256 {
+                entries.retain(|_, entry| {
+                    entry.refresh_in_flight
+                        || now.duration_since(entry.updated_at) < Duration::from_secs(30)
+                });
+            }
+            entries.insert(
+                cwd.clone(),
+                GitCacheEntry {
+                    updated_at: now,
+                    value: None,
+                    refresh_in_flight: true,
+                },
+            );
+            None
+        }
+    };
+    let refresh_cwd = cwd.clone();
+    thread::Builder::new()
+        .name("cmux-git-status".to_string())
+        .spawn(move || {
+            let value = refresh(refresh_cwd);
+            if let Ok(mut entries) = entries_cache.lock() {
+                entries.insert(
+                    cwd,
+                    GitCacheEntry {
+                        updated_at: Instant::now(),
+                        value,
+                        refresh_in_flight: false,
+                    },
+                );
+            }
+        })
+        .ok();
+    stale_value
+}
+
+fn cached_git_value_with_initial<T, F>(
+    cwd: &str,
+    cache: &'static OnceLock<Mutex<HashMap<String, GitCacheEntry<T>>>>,
+    refresh: F,
+) -> Option<T>
+where
+    T: Clone + Send + 'static,
+    F: FnOnce(String) -> Option<T> + Send + 'static,
+{
+    let entries_cache = cache.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(entries) = entries_cache.lock() {
+        if let Some(entry) = entries.get(cwd) {
+            if Instant::now().duration_since(entry.updated_at) < Duration::from_secs(3) {
+                return entry.value.clone();
+            }
+        } else {
+            drop(entries);
+            let value = refresh(cwd.to_string());
+            if let Ok(mut entries) = entries_cache.lock() {
+                entries.insert(
+                    cwd.to_string(),
+                    GitCacheEntry {
+                        updated_at: Instant::now(),
+                        value: value.clone(),
+                        refresh_in_flight: false,
+                    },
+                );
+            }
+            return value;
         }
     }
-    let value = git_output(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| {
-        let dirty = git_output(cwd, ["status", "--porcelain"])
-            .map(|status| !status.trim().is_empty())
-            .unwrap_or(false);
-        (branch, dirty)
-    });
-    if let Ok(mut cache) = cache.lock() {
-        if cache.len() >= 256 {
-            cache.retain(|_, (updated_at, _)| {
-                now.duration_since(*updated_at) < Duration::from_secs(30)
-            });
-        }
-        cache.insert(cwd.to_string(), (now, value.clone()));
-    }
-    value
+    cached_git_value(cwd, cache, refresh)
 }
 
 fn git_output<const N: usize>(cwd: &str, args: [&str; N]) -> Option<String> {
@@ -63998,6 +64159,7 @@ fn supported_methods() -> Vec<&'static str> {
         "agent_session.draft.set",
         "agent_session.interrupt",
         "agent_session.output",
+        "agent_session.output_delta",
         "agent_session.send",
         "agent_session.set_permission_mode",
         "agent_session.set_provider",

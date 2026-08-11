@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
@@ -157,6 +157,7 @@ struct BrowserRuntimeBridge {
     pending_evaluations: VecDeque<BrowserEvaluationRequest>,
     pending_screenshots: VecDeque<BrowserScreenshotRequest>,
     pending_pdfs: VecDeque<BrowserPdfRequest>,
+    wakeup: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 fn bridge() -> &'static Mutex<BrowserRuntimeBridge> {
@@ -174,12 +175,20 @@ pub(crate) fn activate_browser_runtime() {
 }
 
 #[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+pub(crate) fn set_browser_runtime_wakeup(wakeup: Option<Arc<dyn Fn() + Send + Sync>>) {
+    if let Ok(mut bridge) = bridge().lock() {
+        bridge.wakeup = wakeup;
+    }
+}
+
+#[cfg_attr(not(feature = "gtk"), allow(dead_code))]
 pub(crate) fn deactivate_browser_runtime() {
     let Ok(mut bridge) = bridge().lock() else {
         return;
     };
     bridge.active = false;
     bridge.gtk_thread = None;
+    bridge.wakeup = None;
     for request in bridge.pending_evaluations.drain(..) {
         request.unavailable();
     }
@@ -193,7 +202,7 @@ pub(crate) fn deactivate_browser_runtime() {
 
 pub(crate) fn evaluate_in_live_browser(surface_id: &str, script: &str) -> BrowserEvaluationAttempt {
     let (responder, receiver) = mpsc::channel();
-    {
+    let wakeup = {
         let Ok(mut bridge) = bridge().lock() else {
             return BrowserEvaluationAttempt::Unavailable;
         };
@@ -208,6 +217,10 @@ pub(crate) fn evaluate_in_live_browser(surface_id: &str, script: &str) -> Browse
                 deadline: Instant::now() + BROWSER_EVALUATION_TIMEOUT,
                 responder,
             });
+        bridge.wakeup.clone()
+    };
+    if let Some(wakeup) = wakeup {
+        wakeup();
     }
 
     match receiver.recv_timeout(BROWSER_EVALUATION_TIMEOUT + Duration::from_millis(250)) {
@@ -233,7 +246,7 @@ pub(crate) fn capture_live_browser_screenshot(
     full_document: bool,
 ) -> BrowserScreenshotAttempt {
     let (responder, receiver) = mpsc::channel();
-    {
+    let wakeup = {
         let Ok(mut bridge) = bridge().lock() else {
             return BrowserScreenshotAttempt::Unavailable;
         };
@@ -248,6 +261,10 @@ pub(crate) fn capture_live_browser_screenshot(
                 deadline: Instant::now() + BROWSER_EVALUATION_TIMEOUT,
                 responder,
             });
+        bridge.wakeup.clone()
+    };
+    if let Some(wakeup) = wakeup {
+        wakeup();
     }
 
     match receiver.recv_timeout(BROWSER_EVALUATION_TIMEOUT + Duration::from_millis(250)) {
@@ -267,7 +284,7 @@ pub(crate) fn capture_live_browser_screenshot(
 
 pub(crate) fn print_live_browser_pdf(surface_id: &str) -> BrowserPdfAttempt {
     let (responder, receiver) = mpsc::channel();
-    {
+    let wakeup = {
         let Ok(mut bridge) = bridge().lock() else {
             return BrowserPdfAttempt::Unavailable;
         };
@@ -279,6 +296,10 @@ pub(crate) fn print_live_browser_pdf(surface_id: &str) -> BrowserPdfAttempt {
             deadline: Instant::now() + BROWSER_PDF_TIMEOUT,
             responder,
         });
+        bridge.wakeup.clone()
+    };
+    if let Some(wakeup) = wakeup {
+        wakeup();
     }
 
     match receiver.recv_timeout(BROWSER_PDF_TIMEOUT + Duration::from_millis(250)) {
@@ -355,6 +376,18 @@ pub(crate) fn requeue_browser_pdf_request(request: BrowserPdfRequest) {
     } else {
         request.unavailable();
     }
+}
+
+#[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+pub(crate) fn has_pending_browser_requests() -> bool {
+    bridge()
+        .lock()
+        .map(|bridge| {
+            !bridge.pending_evaluations.is_empty()
+                || !bridge.pending_screenshots.is_empty()
+                || !bridge.pending_pdfs.is_empty()
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn evaluation_envelope_script(script: &str) -> String {
@@ -591,6 +624,7 @@ pub(crate) fn decode_evaluation_envelope(result: &str) -> Result<Value, String> 
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn evaluation_envelope_script_quotes_source_and_decodes_values() {
@@ -653,6 +687,11 @@ mod tests {
     #[test]
     fn evaluation_bridge_round_trips_off_the_gtk_thread() {
         activate_browser_runtime();
+        let wakeups = Arc::new(AtomicUsize::new(0));
+        let counted_wakeups = Arc::clone(&wakeups);
+        set_browser_runtime_wakeup(Some(Arc::new(move || {
+            counted_wakeups.fetch_add(1, Ordering::Relaxed);
+        })));
         assert_eq!(
             evaluate_in_live_browser("surface-main", "1 + 1"),
             BrowserEvaluationAttempt::Unavailable
@@ -726,6 +765,7 @@ mod tests {
                 bytes: b"%PDF-native".to_vec(),
             }))
         );
+        assert_eq!(wakeups.load(Ordering::Relaxed), 3);
         deactivate_browser_runtime();
     }
 }

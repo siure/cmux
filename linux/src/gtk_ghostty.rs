@@ -133,6 +133,13 @@ static NEXT_GHOSTTY_CALLBACK_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static SHARED_GHOSTTY_APP: RefCell<Weak<GtkGhosttyApp>> = RefCell::new(Weak::new());
+    static GHOSTTY_SERVICE_HOSTS: RefCell<HashMap<u64, GhosttyServiceHost>> = RefCell::new(HashMap::new());
+    static GHOSTTY_SERVICE_TIMER_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct GhosttyServiceHost {
+    host: Weak<RefCell<GtkGhosttyHost>>,
+    status: glib::WeakRef<gtk::Label>,
 }
 
 #[link(name = "dl")]
@@ -876,18 +883,61 @@ fn connect_ghostty_area(
         unrealize_host.borrow_mut().unrealize(area);
     });
 
-    let tick_host = Rc::clone(&host);
-    let tick_status = status.clone();
-    let weak_area = area.downgrade();
-    glib::timeout_add_local(Duration::from_millis(16), move || {
-        if weak_area.upgrade().is_none() {
-            return glib::ControlFlow::Break;
-        }
-        // Ghostty's redraw callback queues GLArea paints on this thread. This
-        // timer only services the app loop; painting here leaks idle buffers.
-        tick_host.borrow_mut().tick(&tick_status);
-        glib::ControlFlow::Continue
+    register_ghostty_service_host(&host, &status);
+}
+
+fn register_ghostty_service_host(host: &Rc<RefCell<GtkGhosttyHost>>, status: &gtk::Label) {
+    let token = host.borrow().callbacks.token;
+    GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+        hosts.borrow_mut().insert(
+            token,
+            GhosttyServiceHost {
+                host: Rc::downgrade(host),
+                status: status.downgrade(),
+            },
+        );
     });
+    GHOSTTY_SERVICE_TIMER_ACTIVE.with(|active| {
+        if active.replace(true) {
+            return;
+        }
+        glib::timeout_add_local(GHOSTTY_TEXT_SYNC_INTERVAL, move || {
+            service_ghostty_hosts();
+            let has_hosts = GHOSTTY_SERVICE_HOSTS.with(|hosts| !hosts.borrow().is_empty());
+            if has_hosts {
+                glib::ControlFlow::Continue
+            } else {
+                GHOSTTY_SERVICE_TIMER_ACTIVE.with(|active| active.set(false));
+                glib::ControlFlow::Break
+            }
+        });
+    });
+}
+
+fn service_ghostty_hosts() {
+    let hosts = GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+        hosts
+            .borrow()
+            .iter()
+            .map(|(token, entry)| (*token, entry.host.clone(), entry.status.clone()))
+            .collect::<Vec<_>>()
+    });
+    let mut expired = Vec::new();
+    for (token, host, status) in hosts {
+        let (Some(host), Some(status)) = (host.upgrade(), status.upgrade()) else {
+            expired.push(token);
+            continue;
+        };
+        host.borrow_mut().tick(&status);
+    }
+    if !expired.is_empty() {
+        GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+            let mut hosts = hosts.borrow_mut();
+            for token in expired {
+                hosts.remove(&token);
+            }
+        });
+    }
 }
 
 fn realize_ghostty_area(
@@ -976,6 +1026,7 @@ impl GtkGhosttyApp {
             app_tick: None,
             surfaces: Mutex::new(HashMap::new()),
             focused_surface: AtomicUsize::new(0),
+            tick_scheduled: AtomicBool::new(false),
         });
         register_ghostty_app_userdata(callbacks.as_ref());
         let userdata = callbacks.as_mut() as *mut GtkGhosttyAppCallbacks as *mut c_void;
@@ -1107,6 +1158,7 @@ struct GtkGhosttyAppCallbacks {
     app_tick: Option<GhosttyAppTick>,
     surfaces: Mutex<HashMap<usize, (usize, u64)>>,
     focused_surface: AtomicUsize,
+    tick_scheduled: AtomicBool,
 }
 
 impl Drop for GtkGhosttyAppCallbacks {
@@ -1998,7 +2050,9 @@ impl GtkGhosttyHost {
             return;
         }
         let force_sync = self.selection_sync_requested.swap(false, Ordering::AcqRel);
-        self.sync_app_surface_snapshot(force_sync);
+        if force_sync || !self.options.occluded {
+            self.sync_app_surface_snapshot(force_sync);
+        }
     }
 
     fn drain_app_input(&self) -> bool {
@@ -3129,17 +3183,21 @@ unsafe extern "C" fn gtk_ghostty_wakeup(userdata: *mut c_void) {
     let Some((callbacks, token)) = ghostty_app_callback_ref_from_userdata(userdata) else {
         return;
     };
-    if glib::MainContext::default().is_owner() {
-        gtk_ghostty_wakeup_on_main(callbacks, token);
-    } else {
-        glib::idle_add_once(move || {
-            gtk_ghostty_wakeup_on_main(callbacks, token);
-        });
+    let should_schedule = with_ghostty_app_callbacks(callbacks, token, |callbacks| {
+        !callbacks.tick_scheduled.swap(true, Ordering::AcqRel)
+    })
+    .unwrap_or(false);
+    if !should_schedule {
+        return;
     }
+    glib::idle_add_once(move || {
+        gtk_ghostty_wakeup_on_main(callbacks, token);
+    });
 }
 
 fn gtk_ghostty_wakeup_on_main(callbacks: usize, token: u64) {
     let _ = with_ghostty_app_callbacks(callbacks, token, |callbacks| {
+        callbacks.tick_scheduled.store(false, Ordering::Release);
         let (Some(app), Some(tick)) = (callbacks.app, callbacks.app_tick) else {
             return;
         };
@@ -6382,6 +6440,7 @@ mod tests {
             app_tick: None,
             surfaces: Mutex::new(HashMap::new()),
             focused_surface: AtomicUsize::new(0),
+            tick_scheduled: AtomicBool::new(false),
         }
     }
 

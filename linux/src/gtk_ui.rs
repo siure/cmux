@@ -39,6 +39,7 @@ const GTK_CELL_WIDTH: i32 = 10;
 const GTK_CELL_HEIGHT: i32 = 20;
 const GTK_SPLIT_INITIAL_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 const GTK_SPLIT_STABLE_INTERVAL: Duration = Duration::from_millis(50);
+const GTK_MODEL_SAFETY_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 const BROWSER_FOCUS_ESCAPE_INTERVAL: Duration = Duration::from_millis(1600);
 const BROWSER_FOCUS_RETRY_ATTEMPTS: u8 = 8;
 const BROWSER_RECORDING_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,6 +102,7 @@ fn run_gtk_app_with_renderer(
         .flags(gtk_application_flags(single_instance))
         .build();
     let window_hosts = Rc::new(RefCell::new(HashMap::new()));
+    install_browser_runtime_wakeup(&window_hosts);
     let desktop_notifications = Rc::new(RefCell::new(None));
     let presented_model_window = Rc::new(RefCell::new(None));
     let sync_started = Rc::new(Cell::new(false));
@@ -166,14 +168,6 @@ fn run_gtk_app_with_renderer(
             return;
         }
 
-        let runtime_window_hosts = Rc::clone(&activate_window_hosts);
-        glib::timeout_add_local(Duration::from_millis(10), move || {
-            process_browser_evaluation_requests(&runtime_window_hosts);
-            process_browser_screenshot_requests(&runtime_window_hosts);
-            process_browser_pdf_requests(&runtime_window_hosts);
-            glib::ControlFlow::Continue
-        });
-
         let recording_app_state = Arc::clone(&app_state);
         let recording_window_hosts = Rc::clone(&activate_window_hosts);
         let recording_in_flight = Rc::new(RefCell::new(HashMap::new()));
@@ -193,13 +187,35 @@ fn run_gtk_app_with_renderer(
         let sync_presented_model_window = Rc::clone(&activate_presented_model_window);
         let sync_global_visibility = Rc::clone(&activate_global_visibility);
         let sync_local_refresh = local_refresh.clone();
-        glib::timeout_add_local(Duration::from_millis(500), move || {
-            if !process_global_window_commands(
+        let command_application = sync_application.clone();
+        let command_app_state = Arc::clone(&sync_app_state);
+        let command_window_hosts = Rc::clone(&sync_window_hosts);
+        let command_global_visibility = Rc::clone(&sync_global_visibility);
+        let command_local_refresh = sync_local_refresh.clone();
+        glib::timeout_add_local(Duration::from_millis(250), move || {
+            let (keep_running, changed) = process_global_window_commands(
+                &command_application,
+                &command_app_state,
+                &command_window_hosts,
+                &command_global_visibility,
+            );
+            if changed {
+                command_local_refresh.schedule();
+            }
+            if keep_running {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+        glib::timeout_add_local(GTK_MODEL_SAFETY_SYNC_INTERVAL, move || {
+            let (keep_running, _) = process_global_window_commands(
                 &sync_application,
                 &sync_app_state,
                 &sync_window_hosts,
                 &sync_global_visibility,
-            ) {
+            );
+            if !keep_running {
                 return glib::ControlFlow::Break;
             }
             if !sync_gtk_window_hosts(
@@ -325,6 +341,42 @@ struct GtkWindowHost {
 }
 
 type GtkWindowHosts = Rc<RefCell<HashMap<String, GtkWindowHost>>>;
+
+thread_local! {
+    static BROWSER_RUNTIME_HOSTS: RefCell<Weak<RefCell<HashMap<String, GtkWindowHost>>>> = RefCell::new(Weak::new());
+    static BROWSER_RUNTIME_RETRY_SCHEDULED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn install_browser_runtime_wakeup(hosts: &GtkWindowHosts) {
+    BROWSER_RUNTIME_HOSTS.with(|registered| {
+        *registered.borrow_mut() = Rc::downgrade(hosts);
+    });
+    crate::browser_runtime::set_browser_runtime_wakeup(Some(Arc::new(|| {
+        glib::MainContext::default().invoke(process_pending_browser_runtime_requests);
+    })));
+}
+
+fn process_pending_browser_runtime_requests() {
+    let hosts = BROWSER_RUNTIME_HOSTS.with(|registered| registered.borrow().upgrade());
+    let Some(hosts) = hosts else {
+        return;
+    };
+    process_browser_evaluation_requests(&hosts);
+    process_browser_screenshot_requests(&hosts);
+    process_browser_pdf_requests(&hosts);
+    if !crate::browser_runtime::has_pending_browser_requests() {
+        return;
+    }
+    BROWSER_RUNTIME_RETRY_SCHEDULED.with(|scheduled| {
+        if scheduled.replace(true) {
+            return;
+        }
+        glib::timeout_add_local_once(Duration::from_millis(50), || {
+            BROWSER_RUNTIME_RETRY_SCHEDULED.with(|scheduled| scheduled.set(false));
+            process_pending_browser_runtime_requests();
+        });
+    });
+}
 type PendingBrowserShortcutActions = Rc<RefCell<Vec<Value>>>;
 
 fn sync_ghostty_scrollback_widgets(ghostty_widgets: &GhosttySurfaceWidgets) {
@@ -1250,11 +1302,12 @@ fn process_global_window_commands(
     app_state: &Arc<Mutex<AppState>>,
     hosts: &GtkWindowHosts,
     visibility: &Rc<RefCell<GtkGlobalVisibilityState>>,
-) -> bool {
+) -> (bool, bool) {
     let commands = app_state
         .lock()
         .map(|mut app| app.drain_global_window_commands())
         .unwrap_or_default();
+    let changed = !commands.is_empty();
     for command in commands {
         match command {
             GlobalWindowCommand::ShowCurrent => {
@@ -1314,11 +1367,11 @@ fn process_global_window_commands(
                 sync_all_ghostty_scrollback(hosts);
                 persist_ghostty_session_snapshot(app_state);
                 application.quit();
-                return false;
+                return (false, true);
             }
         }
     }
-    true
+    (true, changed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2188,39 +2241,14 @@ fn snapshot_with_previews(
     let mut app = app_state
         .lock()
         .map_err(|_| anyhow!("app state lock poisoned"))?;
-    let mut snapshot = renderer::snapshot_value(
+    renderer::snapshot_value(
         &mut app,
         &json!({
             "backend": gtk_snapshot_backend(renderer_mode),
             "window_id": window_id
         }),
     )
-    .map_err(|err| anyhow!("{err}"))?;
-
-    if renderer_mode == GtkRendererMode::Ghostty {
-        return Ok(snapshot);
-    }
-
-    if let Some(views) = snapshot
-        .get_mut("surface_views")
-        .and_then(Value::as_array_mut)
-    {
-        for view in views {
-            let Some(surface_id) = view.get("surface_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let preview = app
-                .handle("surface.read_text", &json!({"surface_id": surface_id}))
-                .ok()
-                .and_then(|value| value.get("text").and_then(Value::as_str).map(trim_preview))
-                .unwrap_or_default();
-            if let Some(object) = view.as_object_mut() {
-                object.insert("preview".to_string(), json!(preview));
-            }
-        }
-    }
-
-    Ok(snapshot)
+    .map_err(|err| anyhow!("{err}"))
 }
 
 fn gtk_snapshot_backend(renderer_mode: GtkRendererMode) -> &'static str {
@@ -10679,11 +10707,12 @@ fn agent_session_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) ->
     let refresh_transcript = {
         let app_state = Arc::clone(app_state);
         let surface_id = surface_id.clone();
+        let cursor = Rc::new(Cell::new(0_u64));
         move |buffer: &gtk::TextBuffer| {
             let Some(value) = call_app_value(
                 &app_state,
-                "agent_session.output",
-                json!({"surface_id": surface_id}),
+                "agent_session.output_delta",
+                json!({"surface_id": surface_id, "cursor": cursor.get()}),
             ) else {
                 return;
             };
@@ -10691,11 +10720,13 @@ fn agent_session_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) ->
                 .get("output")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let current = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), true)
-                .to_string();
-            if current != output {
+            if value.get("reset").and_then(Value::as_bool) == Some(true) {
                 buffer.set_text(output);
+            } else if !output.is_empty() {
+                buffer.insert(&mut buffer.end_iter(), output);
+            }
+            if let Some(next_cursor) = value.get("cursor").and_then(Value::as_u64) {
+                cursor.set(next_cursor);
             }
         }
     };
@@ -14656,17 +14687,17 @@ fn connect_pane_allocation_probe(
     app_state: Arc<Mutex<AppState>>,
     pane_allocations: PaneAllocations,
 ) {
-    widget.add_tick_callback(move |widget, _| {
+    let update = Rc::new(move |widget: &gtk::Label| {
         let Some(allocation) =
             pane_allocation_from_pixels(widget.allocated_width(), widget.allocated_height())
         else {
-            return glib::ControlFlow::Continue;
+            return;
         };
 
         {
             let mut allocations = pane_allocations.borrow_mut();
             if allocations.get(&pane_id) == Some(&allocation) {
-                return glib::ControlFlow::Continue;
+                return;
             }
             allocations.insert(pane_id.clone(), allocation);
         }
@@ -14683,8 +14714,12 @@ fn connect_pane_allocation_probe(
                 "pixel_height": allocation.height
             }),
         );
-        glib::ControlFlow::Continue
     });
+    let width_update = Rc::clone(&update);
+    widget.connect_notify_local(Some("width"), move |widget, _| width_update(widget));
+    let height_update = Rc::clone(&update);
+    widget.connect_notify_local(Some("height"), move |widget, _| height_update(widget));
+    widget.connect_map(move |widget| update(widget));
 }
 
 fn pane_allocation_from_pixels(width: i32, height: i32) -> Option<GtkPaneAllocation> {
@@ -17268,17 +17303,6 @@ fn attach_notification_context_menu(
         popover.popup();
     });
     button.add_controller(gesture);
-}
-
-fn trim_preview(text: &str) -> String {
-    let mut lines = text
-        .lines()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-        .take(12)
-        .collect::<Vec<_>>();
-    lines.reverse();
-    lines.join("\n")
 }
 
 #[cfg(test)]

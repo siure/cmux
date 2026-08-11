@@ -27,6 +27,52 @@ pub struct AgentSessionRuntimeSnapshot {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentSessionTranscriptDelta {
+    pub cursor: u64,
+    pub reset: bool,
+    pub text: String,
+}
+
+fn append_bounded_transcript(transcript: &mut String, base_offset: &mut u64, text: &str) {
+    transcript.push_str(text);
+    if transcript.len() <= MAX_TRANSCRIPT_BYTES {
+        return;
+    }
+    let mut keep_from = transcript.len().saturating_sub(RETAINED_TRANSCRIPT_BYTES);
+    while keep_from < transcript.len() && !transcript.is_char_boundary(keep_from) {
+        keep_from += 1;
+    }
+    transcript.replace_range(..keep_from, "");
+    *base_offset = base_offset.saturating_add(keep_from as u64);
+}
+
+fn transcript_delta(
+    transcript: &str,
+    base_offset: u64,
+    cursor: u64,
+) -> AgentSessionTranscriptDelta {
+    let end = base_offset.saturating_add(transcript.len() as u64);
+    let local_offset = cursor
+        .checked_sub(base_offset)
+        .map(|offset| offset as usize);
+    let valid_cursor = local_offset
+        .is_some_and(|offset| offset <= transcript.len() && transcript.is_char_boundary(offset))
+        && cursor <= end;
+    if !valid_cursor {
+        return AgentSessionTranscriptDelta {
+            cursor: end,
+            reset: true,
+            text: transcript.to_string(),
+        };
+    }
+    AgentSessionTranscriptDelta {
+        cursor: end,
+        reset: false,
+        text: transcript[local_offset.unwrap_or_default()..].to_string(),
+    }
+}
+
 pub struct CodexAppServerRuntime {
     child: Arc<Mutex<Child>>,
     writer: Arc<Mutex<ChildStdin>>,
@@ -47,6 +93,7 @@ struct CodexProtocolState {
     failed: bool,
     error: Option<String>,
     transcript: String,
+    transcript_base_offset: u64,
     activities: Vec<Value>,
 }
 
@@ -66,6 +113,7 @@ impl CodexProtocolState {
             failed: false,
             error: None,
             transcript: String::new(),
+            transcript_base_offset: 0,
             activities: Vec::new(),
         }
     }
@@ -77,18 +125,7 @@ impl CodexProtocolState {
     }
 
     fn append_transcript(&mut self, text: &str) {
-        self.transcript.push_str(text);
-        if self.transcript.len() > MAX_TRANSCRIPT_BYTES {
-            let mut keep_from = self
-                .transcript
-                .len()
-                .saturating_sub(RETAINED_TRANSCRIPT_BYTES);
-            while keep_from < self.transcript.len() && !self.transcript.is_char_boundary(keep_from)
-            {
-                keep_from += 1;
-            }
-            self.transcript.replace_range(..keep_from, "");
-        }
+        append_bounded_transcript(&mut self.transcript, &mut self.transcript_base_offset, text);
     }
 
     fn fail(&mut self, message: impl Into<String>) {
@@ -104,7 +141,7 @@ impl CodexProtocolState {
         self.turn_in_flight = false;
         self.active_permission_mode = "default".to_string();
         if !self.transcript.ends_with('\n') {
-            self.transcript.push('\n');
+            self.append_transcript("\n");
         }
     }
 }
@@ -286,6 +323,13 @@ impl CodexAppServerRuntime {
             })
     }
 
+    pub fn transcript_delta(&self, cursor: u64) -> AgentSessionTranscriptDelta {
+        self.state
+            .lock()
+            .map(|state| transcript_delta(&state.transcript, state.transcript_base_offset, cursor))
+            .unwrap_or_default()
+    }
+
     pub fn try_wait(&self) -> Result<Option<u32>> {
         self.child
             .lock()
@@ -316,6 +360,7 @@ struct ClaudeProtocolState {
     failed: bool,
     error: Option<String>,
     transcript: String,
+    transcript_base_offset: u64,
     accumulator: ClaudeStreamJsonAccumulator,
 }
 
@@ -327,23 +372,13 @@ impl ClaudeProtocolState {
             failed: false,
             error: None,
             transcript: String::new(),
+            transcript_base_offset: 0,
             accumulator: ClaudeStreamJsonAccumulator::default(),
         }
     }
 
     fn append_transcript(&mut self, text: &str) {
-        self.transcript.push_str(text);
-        if self.transcript.len() > MAX_TRANSCRIPT_BYTES {
-            let mut keep_from = self
-                .transcript
-                .len()
-                .saturating_sub(RETAINED_TRANSCRIPT_BYTES);
-            while keep_from < self.transcript.len() && !self.transcript.is_char_boundary(keep_from)
-            {
-                keep_from += 1;
-            }
-            self.transcript.replace_range(..keep_from, "");
-        }
+        append_bounded_transcript(&mut self.transcript, &mut self.transcript_base_offset, text);
     }
 
     fn fail(&mut self, message: impl Into<String>) {
@@ -358,7 +393,7 @@ impl ClaudeProtocolState {
     fn complete_turn(&mut self) {
         self.turn_in_flight = false;
         if !self.transcript.ends_with('\n') {
-            self.transcript.push('\n');
+            self.append_transcript("\n");
         }
     }
 }
@@ -499,6 +534,13 @@ impl ClaudeStreamJsonRuntime {
             })
     }
 
+    pub fn transcript_delta(&self, cursor: u64) -> AgentSessionTranscriptDelta {
+        self.state
+            .lock()
+            .map(|state| transcript_delta(&state.transcript, state.transcript_base_offset, cursor))
+            .unwrap_or_default()
+    }
+
     pub fn try_wait(&self) -> Result<Option<u32>> {
         self.child
             .lock()
@@ -543,6 +585,7 @@ struct OpenCodeProtocolState {
     failed: bool,
     error: Option<String>,
     transcript: String,
+    transcript_base_offset: u64,
     queued_input: Option<String>,
     accumulator: OpenCodeEventTextAccumulator,
 }
@@ -560,24 +603,14 @@ impl OpenCodeProtocolState {
             failed: false,
             error: None,
             transcript: String::new(),
+            transcript_base_offset: 0,
             queued_input: None,
             accumulator: OpenCodeEventTextAccumulator::default(),
         }
     }
 
     fn append_transcript(&mut self, text: &str) {
-        self.transcript.push_str(text);
-        if self.transcript.len() > MAX_TRANSCRIPT_BYTES {
-            let mut keep_from = self
-                .transcript
-                .len()
-                .saturating_sub(RETAINED_TRANSCRIPT_BYTES);
-            while keep_from < self.transcript.len() && !self.transcript.is_char_boundary(keep_from)
-            {
-                keep_from += 1;
-            }
-            self.transcript.replace_range(..keep_from, "");
-        }
+        append_bounded_transcript(&mut self.transcript, &mut self.transcript_base_offset, text);
     }
 
     fn fail(&mut self, message: impl Into<String>) {
@@ -592,7 +625,7 @@ impl OpenCodeProtocolState {
     fn complete_turn(&mut self) {
         self.turn_in_flight = false;
         if !self.transcript.ends_with('\n') {
-            self.transcript.push('\n');
+            self.append_transcript("\n");
         }
     }
 }
@@ -786,6 +819,13 @@ impl OpenCodeHttpRuntime {
             })
     }
 
+    pub fn transcript_delta(&self, cursor: u64) -> AgentSessionTranscriptDelta {
+        self.state
+            .lock()
+            .map(|state| transcript_delta(&state.transcript, state.transcript_base_offset, cursor))
+            .unwrap_or_default()
+    }
+
     pub fn try_wait(&self) -> Result<Option<u32>> {
         self.child
             .lock()
@@ -885,6 +925,14 @@ impl AgentSessionRuntime {
             Self::Codex(runtime) => runtime.snapshot(),
             Self::Claude(runtime) => runtime.snapshot(),
             Self::OpenCode(runtime) => runtime.snapshot(),
+        }
+    }
+
+    pub fn transcript_delta(&self, cursor: u64) -> AgentSessionTranscriptDelta {
+        match self {
+            Self::Codex(runtime) => runtime.transcript_delta(cursor),
+            Self::Claude(runtime) => runtime.transcript_delta(cursor),
+            Self::OpenCode(runtime) => runtime.transcript_delta(cursor),
         }
     }
 
@@ -2196,6 +2244,37 @@ fn write_json_line(writer: &Arc<Mutex<ChildStdin>>, value: &Value) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_delta_returns_only_new_utf8_text() {
+        let mut transcript = String::new();
+        let mut base_offset = 0;
+        append_bounded_transcript(&mut transcript, &mut base_offset, "hello ");
+        let first = transcript_delta(&transcript, base_offset, 0);
+        assert_eq!(first.text, "hello ");
+        assert!(!first.reset);
+
+        append_bounded_transcript(&mut transcript, &mut base_offset, "世界");
+        let second = transcript_delta(&transcript, base_offset, first.cursor);
+        assert_eq!(second.text, "世界");
+        assert!(!second.reset);
+        assert_eq!(second.cursor, transcript.len() as u64);
+    }
+
+    #[test]
+    fn transcript_delta_resets_a_cursor_evicted_by_the_size_bound() {
+        let mut transcript = String::new();
+        let mut base_offset = 0;
+        append_bounded_transcript(
+            &mut transcript,
+            &mut base_offset,
+            &"x".repeat(MAX_TRANSCRIPT_BYTES + 1),
+        );
+        let delta = transcript_delta(&transcript, base_offset, 0);
+        assert!(delta.reset);
+        assert_eq!(delta.text, transcript);
+        assert_eq!(delta.cursor, base_offset + transcript.len() as u64);
+    }
 
     #[test]
     fn claude_stream_accumulator_emits_deltas_without_duplicate_final_text() {
