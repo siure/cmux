@@ -20908,6 +20908,104 @@ mod tests {
     }
 
     #[test]
+    fn gtk_fallback_pty_output_refreshes_before_safety_sync() {
+        if gtk::init().is_err() {
+            return;
+        }
+        const OUTPUT_MARKER: &str = "CMUX_GTK_PTY_REFRESH";
+
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.fallback-pty-refresh")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let mut app = AppState::with_paths(None, None).expect("fallback PTY app state");
+        let surface_id = app
+            .handle("system.identify", &json!({}))
+            .expect("current surface")["surface_id"]
+            .as_str()
+            .expect("current surface id")
+            .to_string();
+        app.handle(
+            "surface.respawn",
+            &json!({
+                "surface_id": surface_id,
+                "command": format!("read cmux_ready; printf '\\n{OUTPUT_MARKER}\\n'; exit")
+            }),
+        )
+        .expect("spawn blocked fallback PTY command");
+
+        let app_state = Arc::new(Mutex::new(app));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        assert!(sync_gtk_window_hosts(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+            &local_refresh,
+        ));
+        let initial_preview = hosts
+            .borrow()
+            .values()
+            .next()
+            .and_then(|host| {
+                widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+            })
+            .expect("initial fallback terminal preview")
+            .downcast::<gtk::Label>()
+            .expect("initial fallback terminal label");
+        assert!(!initial_preview.text().contains(OUTPUT_MARKER));
+
+        app_state
+            .lock()
+            .expect("fallback PTY app lock")
+            .handle(
+                "surface.send_text",
+                &json!({"surface_id": surface_id, "text": "ready\n"}),
+            )
+            .expect("release blocked fallback PTY command");
+        gtk_run_main_loop_for(Duration::from_millis(750));
+
+        let refreshed_preview = hosts
+            .borrow()
+            .values()
+            .next()
+            .and_then(|host| {
+                widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+            })
+            .expect("refreshed fallback terminal preview")
+            .downcast::<gtk::Label>()
+            .expect("refreshed fallback terminal label");
+        assert!(
+            refreshed_preview.text().contains(OUTPUT_MARKER),
+            "fallback PTY output must refresh before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync; preview was {:?}",
+            refreshed_preview.text()
+        );
+        for host in hosts.borrow_mut().values_mut() {
+            host.window.destroy();
+        }
+    }
+
+    #[test]
     fn gtk_fallback_terminal_allocation_follows_live_resize() {
         if gtk::init().is_err() {
             return;
