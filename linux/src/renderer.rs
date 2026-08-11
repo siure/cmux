@@ -1770,11 +1770,27 @@ fn attach_ghostty_vt_snapshot(
         render_grid_from_ghostty_vt_snapshot(surface_id, state_seq, &value)
     {
         if let Some(fallback_render_grid) = fallback_render_grid.as_ref() {
+            merge_render_grid_protocol_state(&mut render_grid, fallback_render_grid);
             merge_render_grid_scrollback(&mut render_grid, fallback_render_grid);
         }
         object.insert("render_grid".to_string(), render_grid);
     }
     object.insert("ghostty_vt".to_string(), value);
+}
+
+fn merge_render_grid_protocol_state(render_grid: &mut Value, fallback: &Value) {
+    let Some(target) = render_grid.as_object_mut() else {
+        return;
+    };
+    if let Some(active_screen) = fallback
+        .get("active_screen")
+        .filter(|value| matches!(value.as_str(), Some("primary" | "alternate")))
+    {
+        target.insert("active_screen".to_string(), active_screen.clone());
+    }
+    if let Some(modes) = fallback.get("modes").filter(|value| value.is_array()) {
+        target.insert("modes".to_string(), modes.clone());
+    }
 }
 
 fn merge_render_grid_scrollback(render_grid: &mut Value, fallback: &Value) {
@@ -1951,7 +1967,7 @@ fn render_grid_from_ghostty_vt_snapshot(
         "styles": styles,
         "row_spans": row_spans,
         "active_screen": "primary",
-        "modes": {},
+        "modes": [],
         "scrollback_rows": 0,
         "scrollback_spans": []
     });
@@ -5032,20 +5048,27 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_vt_snapshot_preserves_fallback_active_screen() {
+    fn ghostty_vt_snapshot_preserves_fallback_protocol_state() {
         let native = json!({
             "parser": "ghostty-vt",
             "cols": 8,
             "rows": 1,
             "rows_data": []
         });
-        let fallback = render_grid_from_text("surface-a", 45, 8, 1, "primary\x1b[?1049hALT");
+        let fallback =
+            render_grid_from_text("surface-a", 45, 8, 1, "primary\x1b[?1049h\x1b[?2004hALT");
         assert_eq!(fallback["active_screen"], "alternate");
+        assert!(fallback["modes"]
+            .as_array()
+            .expect("fallback modes")
+            .contains(&json!("bracketed_paste")));
+        let fallback_modes = fallback["modes"].clone();
         let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
 
         attach_ghostty_vt_snapshot(&mut object, "surface-a", 45, native);
 
         assert_eq!(object["render_grid"]["active_screen"], "alternate");
+        assert_eq!(object["render_grid"]["modes"], fallback_modes);
     }
 
     #[test]
