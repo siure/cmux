@@ -1023,6 +1023,22 @@ fn simulate_sidebar_shortcut(socket: &str, combo: &str) -> Value {
     )
 }
 
+fn simulate_non_terminal_shortcut(socket: &str, combo: &str) -> Value {
+    rpc(
+        socket,
+        "debug.shortcut.simulate",
+        json!({
+            "combo": combo,
+            "context": {
+                "terminalFocus": false,
+                "browserFocus": false,
+                "sidebarFocus": false,
+                "markdownFocus": false
+            }
+        }),
+    )
+}
+
 fn free_tcp_port() -> u16 {
     TcpListener::bind(("127.0.0.1", 0))
         .expect("reserve free TCP port")
@@ -30186,11 +30202,7 @@ fn right_sidebar_shortcuts_toggle_focus_and_switch_modes_in_sidebar_context() {
     assert_eq!(focused["focused"], true);
     assert_eq!(focused["focus_generation"], 1);
 
-    let numbered = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+2"}),
-    );
+    let numbered = simulate_non_terminal_shortcut(&server.socket, "ctrl+2");
     assert_eq!(numbered["handled"], true);
     assert_eq!(numbered["action"], "selectSurfaceByNumber");
     assert_eq!(numbered["digit"], 2);
@@ -30263,25 +30275,13 @@ fn numbered_shortcuts_select_surface_and_workspace_families_with_sidebar_priorit
         assert_eq!(row["numbered"], true);
     }
 
-    let selected_second = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+2"}),
-    );
+    let selected_second = simulate_non_terminal_shortcut(&server.socket, "ctrl+2");
     assert_eq!(selected_second["action"], "selectSurfaceByNumber");
     assert_eq!(selected_second["digit"], 2);
     assert_eq!(selected_second["surface_id"], second_surface);
-    let selected_last = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+9"}),
-    );
+    let selected_last = simulate_non_terminal_shortcut(&server.socket, "ctrl+9");
     assert_eq!(selected_last["surface_id"], third_surface);
-    let out_of_range = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+8"}),
-    );
+    let out_of_range = simulate_non_terminal_shortcut(&server.socket, "ctrl+8");
     assert_eq!(out_of_range["handled"], true);
     assert_eq!(out_of_range["selected"], false);
 
