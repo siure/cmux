@@ -10007,6 +10007,11 @@ fn replace_pane_surface_card(old: &gtk::Box, new: &gtk::Box) -> bool {
     false
 }
 
+#[cfg(test)]
+thread_local! {
+    static GTK_TEST_PANE_SURFACE_SYNC_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sync_pane_surface_cards(
     window: &gtk::ApplicationWindow,
@@ -10024,6 +10029,8 @@ fn sync_pane_surface_cards(
     ui_mode: GtkUiMode,
     local_refresh: &GtkLocalRefresh,
 ) -> bool {
+    #[cfg(test)]
+    GTK_TEST_PANE_SURFACE_SYNC_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     let Some(root) = window.child() else {
         return false;
     };
@@ -21046,6 +21053,31 @@ mod tests {
             .downcast::<gtk::Label>()
             .expect("initial fallback terminal label");
         assert!(!initial_preview.text().contains(OUTPUT_MARKER));
+        let window = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("fallback GTK host")
+            .window
+            .clone();
+        window.present();
+        let terminal_search = gtk::SearchEntry::new();
+        terminal_search.add_css_class("cmux-terminal-search");
+        hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("fallback GTK host")
+            .snapshot_view
+            .main_slot
+            .append(&terminal_search);
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(terminal_search.grab_focus());
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-terminal-search"
+        ));
 
         app_state
             .lock()
@@ -21055,6 +21087,22 @@ mod tests {
                 &json!({"surface_id": surface_id, "text": "ready\n"}),
             )
             .expect("release blocked fallback PTY command");
+        gtk_run_main_loop_for(Duration::from_millis(150));
+        let focused_preview = hosts
+            .borrow()
+            .values()
+            .next()
+            .and_then(|host| {
+                widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+            })
+            .expect("focused fallback terminal preview")
+            .downcast::<gtk::Label>()
+            .expect("focused fallback terminal label");
+        assert!(
+            !focused_preview.text().contains(OUTPUT_MARKER),
+            "focused terminal search must retain its mounted terminal card"
+        );
+        gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
         gtk_run_main_loop_for(Duration::from_millis(750));
 
         let refreshed_preview = hosts
@@ -21076,6 +21124,62 @@ mod tests {
         for host in hosts.borrow_mut().values_mut() {
             host.window.destroy();
         }
+    }
+
+    #[test]
+    fn gtk_fallback_output_does_not_reconcile_an_unchanged_window() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.scoped-fallback-output")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let row = json!({
+            "window_id": "window-a",
+            "title": "Scoped output",
+            "selected": true,
+            "fullscreen": false
+        });
+        let snapshot = gtk_tab_test_snapshot("surface-a", "unchanged content");
+        let local_refresh = gtk_test_local_refresh(&application, &app_state);
+        let mut host = create_gtk_window_host(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            "window-a",
+            &row,
+            &snapshot,
+            0,
+            &local_refresh,
+        );
+
+        GTK_TEST_PANE_SURFACE_SYNC_COUNT.with(|count| count.set(0));
+        refresh_gtk_window_host(
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &snapshot,
+            1,
+            &local_refresh,
+        );
+        GTK_TEST_PANE_SURFACE_SYNC_COUNT.with(|count| {
+            assert_eq!(
+                count.get(),
+                0,
+                "output from another window must not reconcile unchanged pane cards"
+            );
+        });
+        host.window.destroy();
     }
 
     fn assert_gtk_external_model_mutations_refresh_before_safety_sync(
