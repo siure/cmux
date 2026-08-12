@@ -5165,6 +5165,62 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_snapshot_keeps_alternate_rows_out_of_primary_scrollback() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "active_screen": "alternate",
+            "rows_data": [{
+                "y": 0,
+                "cells": [{"x": 0, "text": "alt-two", "style": {}}]
+            }]
+        });
+        let fallback = render_grid_from_text_with_scrollback(
+            "surface-a",
+            43,
+            8,
+            1,
+            "primary\x1b[?1049halt-one\nalt-two",
+            10,
+        );
+        assert_eq!(fallback["active_screen"], "alternate");
+        assert_eq!(fallback["scrollback_spans"][0]["text"], "alt-one");
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 43, native);
+
+        assert_eq!(object["render_grid"]["active_screen"], "alternate");
+        assert_eq!(object["render_grid"]["scrollback_rows"], 0);
+        assert_eq!(object["render_grid"]["scrollback_spans"], json!([]));
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_prefers_authoritative_modes_over_truncated_fallback() {
+        let authoritative_modes = json!([
+            {"code": 1, "ansi": false, "on": true},
+            {"code": 2004, "ansi": false, "on": true}
+        ]);
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "active_screen": "primary",
+            "modes": authoritative_modes,
+            "rows_data": []
+        });
+        // This is the retained tail after the sequence that enabled the modes
+        // has fallen outside the bounded transcript.
+        let fallback = render_grid_from_text("surface-a", 44, 8, 1, "retained");
+        assert_eq!(fallback["modes"], json!([]));
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 44, native);
+
+        assert_eq!(object["render_grid"]["modes"], authoritative_modes);
+    }
+
+    #[test]
     fn ghostty_vt_render_grid_preserves_wide_cell_columns() {
         let snapshot = json!({
             "parser": "ghostty-vt",
