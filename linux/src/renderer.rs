@@ -5226,6 +5226,29 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_snapshot_prefers_authoritative_cursor_presentation_over_truncated_fallback() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "active_screen": "primary",
+            "cursor": {"visible": true, "in_viewport": true, "x": 0, "y": 0},
+            "cursor_presentation": {"style": "bar", "blinking": true},
+            "rows_data": []
+        });
+        // The retained tail no longer includes the earlier DECSCUSR sequence.
+        let fallback = render_grid_from_text("surface-a", 45, 8, 1, "retained");
+        assert_eq!(fallback["cursor"]["style"], "block");
+        assert_eq!(fallback["cursor"]["blinking"], false);
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 45, native);
+
+        assert_eq!(object["render_grid"]["cursor"]["style"], "bar");
+        assert_eq!(object["render_grid"]["cursor"]["blinking"], true);
+    }
+
+    #[test]
     fn ghostty_vt_render_grid_preserves_wide_cell_columns() {
         let snapshot = json!({
             "parser": "ghostty-vt",
@@ -5493,6 +5516,20 @@ mod tests {
         assert_eq!(grid["cursor"]["row"], 1);
         assert_eq!(grid["cursor"]["column"], 0);
         assert_eq!(grid["cursor"]["visible"], true);
+    }
+
+    #[test]
+    fn renderer_text_fallback_rebases_absolute_cursor_after_scrollback() {
+        let mut text = (0..31)
+            .map(|line| format!("line-{line}\n"))
+            .collect::<String>();
+        text.push_str("\x1b[1;1Htop");
+
+        let grid = render_grid_from_text("surface-a", 45, 20, 30, &text);
+
+        assert_eq!(grid["cursor"]["row"], 0, "grid was {grid}");
+        assert_eq!(grid["cursor"]["column"], 3, "grid was {grid}");
+        assert_eq!(grid["row_spans"][0]["text"], "top", "grid was {grid}");
     }
 
     #[test]
