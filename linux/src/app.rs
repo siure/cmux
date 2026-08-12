@@ -19690,13 +19690,19 @@ impl AppState {
             .map_err(|err| AppError::not_supported(err.to_string()))?;
         let mut value =
             serde_json::to_value(snapshot).map_err(|err| AppError::internal(err.to_string()))?;
-        if let Some(active_screen) = surface_id
+        if let Some(terminal) = surface_id
             .as_deref()
             .and_then(|surface_id| self.surfaces.get(surface_id))
             .and_then(|surface| surface.terminal.as_ref())
-            .map(TerminalHandle::active_screen)
         {
-            value["active_screen"] = json!(active_screen);
+            value["active_screen"] = json!(terminal.active_screen());
+            value["modes"] = Value::Array(
+                terminal
+                    .mode_settings()
+                    .into_iter()
+                    .map(|mode| json!({"code": mode.code, "ansi": mode.ansi, "on": mode.on}))
+                    .collect(),
+            );
         }
         Ok(value)
     }

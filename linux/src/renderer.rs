@@ -1,4 +1,5 @@
 use crate::app::{AppError, AppState};
+use crate::terminal::TERMINAL_MODE_SETTINGS;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -12,18 +13,6 @@ use unicode_width::UnicodeWidthStr;
 const GHOSTTY_VT_DEBUG_CELL_WIDTH: f64 = 10.0;
 const GHOSTTY_VT_DEBUG_CELL_HEIGHT: f64 = 20.0;
 const RENDER_GRID_SCROLLBACK_LINE_BUDGET: usize = 200;
-const RENDER_GRID_MODE_SETTINGS: [(&str, u64, bool); 10] = [
-    ("application_cursor_keys", 1, false),
-    ("application_keypad", 66, false),
-    ("wraparound", 7, false),
-    ("bracketed_paste", 2004, false),
-    ("focus_events", 1004, false),
-    ("mouse_button_tracking", 1000, false),
-    ("mouse_drag_tracking", 1002, false),
-    ("mouse_any_tracking", 1003, false),
-    ("mouse_sgr", 1006, false),
-    ("mouse_urxvt", 1015, false),
-];
 const GTK4_DEVELOPMENT_PACKAGE_HINT: &str = "Install GTK4 development files: Fedora/RHEL `sudo dnf install gtk4-devel pkgconf-pkg-config`; Debian/Ubuntu `sudo apt install libgtk-4-dev pkg-config`; Arch `sudo pacman -S gtk4 pkgconf`; openSUSE `sudo zypper install gtk4-devel pkgconf-pkg-config`.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1437,7 +1426,7 @@ impl RenderGridScreen {
     }
 
     fn modes_value(&self) -> Vec<Value> {
-        RENDER_GRID_MODE_SETTINGS
+        TERMINAL_MODE_SETTINGS
             .iter()
             .filter_map(|(name, code, ansi)| {
                 self.modes
@@ -1868,11 +1857,22 @@ fn attach_ghostty_vt_snapshot(
     value: Value,
 ) {
     let fallback_render_grid = object.get("render_grid").cloned();
+    let authoritative_modes = value.get("modes").and_then(Value::as_array).map(|modes| {
+        modes
+            .iter()
+            .filter_map(render_grid_v1_mode_setting)
+            .collect::<Vec<_>>()
+    });
     if let Some(mut render_grid) =
         render_grid_from_ghostty_vt_snapshot(surface_id, state_seq, &value)
     {
+        if let Some(modes) = authoritative_modes.as_ref() {
+            render_grid["modes"] = json!(modes);
+        }
         if let Some(fallback_render_grid) = fallback_render_grid.as_ref() {
-            merge_render_grid_protocol_state(&mut render_grid, fallback_render_grid);
+            if authoritative_modes.is_none() {
+                merge_render_grid_protocol_state(&mut render_grid, fallback_render_grid);
+            }
             merge_render_grid_cursor_presentation(&mut render_grid, fallback_render_grid);
             merge_render_grid_scrollback(&mut render_grid, fallback_render_grid);
         }
@@ -1896,7 +1896,7 @@ fn merge_render_grid_protocol_state(render_grid: &mut Value, fallback: &Value) {
 
 fn render_grid_v1_mode_setting(mode: &Value) -> Option<Value> {
     if let Some(name) = mode.as_str() {
-        let (_, code, ansi) = RENDER_GRID_MODE_SETTINGS
+        let (_, code, ansi) = TERMINAL_MODE_SETTINGS
             .iter()
             .find(|(candidate, _, _)| *candidate == name)?;
         return Some(json!({"code": code, "ansi": ansi, "on": true}));
@@ -1932,6 +1932,11 @@ fn merge_render_grid_cursor_presentation(render_grid: &mut Value, fallback: &Val
 }
 
 fn merge_render_grid_scrollback(render_grid: &mut Value, fallback: &Value) {
+    if render_grid.get("active_screen").and_then(Value::as_str) != Some("primary")
+        || fallback.get("active_screen").and_then(Value::as_str) != Some("primary")
+    {
+        return;
+    }
     let Some(target) = render_grid.as_object_mut() else {
         return;
     };

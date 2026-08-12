@@ -14,6 +14,27 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub(crate) const TERMINAL_MODE_SETTINGS: [(&str, u64, bool); 10] = [
+    ("application_cursor_keys", 1, false),
+    ("application_keypad", 66, false),
+    ("wraparound", 7, false),
+    ("bracketed_paste", 2004, false),
+    ("focus_events", 1004, false),
+    ("mouse_button_tracking", 1000, false),
+    ("mouse_drag_tracking", 1002, false),
+    ("mouse_any_tracking", 1003, false),
+    ("mouse_sgr", 1006, false),
+    ("mouse_urxvt", 1015, false),
+];
+const TERMINAL_MODE_ENABLED_SHIFT: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalModeSetting {
+    pub code: u64,
+    pub ansi: bool,
+    pub on: bool,
+}
+
 #[derive(Clone)]
 pub struct TerminalHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
@@ -22,6 +43,7 @@ pub struct TerminalHandle {
     title_events: Arc<Mutex<Vec<String>>>,
     output_generation: Arc<AtomicU64>,
     alternate_screen_active: Arc<AtomicBool>,
+    terminal_modes: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Default)]
@@ -94,6 +116,10 @@ impl TerminalHandle {
         } else {
             "primary"
         }
+    }
+
+    pub(crate) fn mode_settings(&self) -> Vec<TerminalModeSetting> {
+        terminal_mode_settings(self.terminal_modes.load(Ordering::Acquire))
     }
 
     pub fn send_text(&self, text: &str) -> Result<()> {
@@ -199,12 +225,12 @@ enum ActiveScreenScanState {
         private: bool,
         value: u16,
         saw_digit: bool,
-        targets_screen: bool,
+        params: Vec<u16>,
     },
 }
 
 impl ActiveScreenTracker {
-    fn update(&mut self, bytes: &[u8], active: &AtomicBool) {
+    fn update(&mut self, bytes: &[u8], active: &AtomicBool, modes: &AtomicU64) {
         for &byte in bytes {
             self.state = match std::mem::take(&mut self.state) {
                 ActiveScreenScanState::Ground if byte == 0x1b => ActiveScreenScanState::Escape,
@@ -212,17 +238,22 @@ impl ActiveScreenTracker {
                     private: false,
                     value: 0,
                     saw_digit: false,
-                    targets_screen: false,
+                    params: Vec::new(),
                 },
                 ActiveScreenScanState::Ground => ActiveScreenScanState::Ground,
                 ActiveScreenScanState::Escape if byte == b'[' => ActiveScreenScanState::Csi {
                     private: false,
                     value: 0,
                     saw_digit: false,
-                    targets_screen: false,
+                    params: Vec::new(),
                 },
                 ActiveScreenScanState::Escape if byte == b'c' => {
                     active.store(false, Ordering::Release);
+                    modes.store(0, Ordering::Release);
+                    ActiveScreenScanState::Ground
+                }
+                ActiveScreenScanState::Escape if matches!(byte, b'=' | b'>') => {
+                    record_terminal_mode(modes, 1, byte == b'=');
                     ActiveScreenScanState::Ground
                 }
                 ActiveScreenScanState::Escape if byte == 0x1b => ActiveScreenScanState::Escape,
@@ -231,7 +262,7 @@ impl ActiveScreenTracker {
                     mut private,
                     mut value,
                     mut saw_digit,
-                    mut targets_screen,
+                    mut params,
                 } => {
                     if byte == 0x1b {
                         ActiveScreenScanState::Escape
@@ -241,7 +272,7 @@ impl ActiveScreenTracker {
                             private,
                             value,
                             saw_digit,
-                            targets_screen,
+                            params,
                         }
                     } else if byte.is_ascii_digit() {
                         value = value
@@ -252,20 +283,32 @@ impl ActiveScreenTracker {
                             private,
                             value,
                             saw_digit,
-                            targets_screen,
+                            params,
                         }
                     } else if byte == b';' {
-                        targets_screen |= private && saw_digit && matches!(value, 47 | 1047 | 1049);
+                        if saw_digit {
+                            params.push(value);
+                        }
                         ActiveScreenScanState::Csi {
                             private,
                             value: 0,
                             saw_digit: false,
-                            targets_screen,
+                            params,
                         }
                     } else if (0x40..=0x7e).contains(&byte) {
-                        targets_screen |= private && saw_digit && matches!(value, 47 | 1047 | 1049);
-                        if targets_screen && matches!(byte, b'h' | b'l') {
-                            active.store(byte == b'h', Ordering::Release);
+                        if saw_digit {
+                            params.push(value);
+                        }
+                        if private && matches!(byte, b'h' | b'l') {
+                            let enable = byte == b'h';
+                            for value in params {
+                                if matches!(value, 47 | 1047 | 1049) {
+                                    active.store(enable, Ordering::Release);
+                                }
+                                if let Some(index) = tracked_private_mode_index(value) {
+                                    record_terminal_mode(modes, index, enable);
+                                }
+                            }
                         }
                         ActiveScreenScanState::Ground
                     } else {
@@ -273,13 +316,56 @@ impl ActiveScreenTracker {
                             private,
                             value,
                             saw_digit,
-                            targets_screen,
+                            params,
                         }
                     }
                 }
             };
         }
     }
+}
+
+fn tracked_private_mode_index(code: u16) -> Option<usize> {
+    match code {
+        1 => Some(0),
+        7 => Some(2),
+        2004 => Some(3),
+        1004 => Some(4),
+        1000 => Some(5),
+        1002 => Some(6),
+        1003 => Some(7),
+        1006 => Some(8),
+        1015 => Some(9),
+        _ => None,
+    }
+}
+
+fn record_terminal_mode(modes: &AtomicU64, index: usize, on: bool) {
+    let known_bit = 1_u64 << index;
+    let enabled_bit = 1_u64 << (TERMINAL_MODE_ENABLED_SHIFT + index);
+    let _ = modes.fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+        let next = if on {
+            current | known_bit | enabled_bit
+        } else {
+            (current | known_bit) & !enabled_bit
+        };
+        Some(next)
+    });
+}
+
+fn terminal_mode_settings(bits: u64) -> Vec<TerminalModeSetting> {
+    TERMINAL_MODE_SETTINGS
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, code, ansi))| {
+            let known_bit = 1_u64 << index;
+            (bits & known_bit != 0).then_some(TerminalModeSetting {
+                code: *code,
+                ansi: *ansi,
+                on: bits & (1_u64 << (TERMINAL_MODE_ENABLED_SHIFT + index)) != 0,
+            })
+        })
+        .collect()
 }
 
 impl TerminalSize {
@@ -703,6 +789,8 @@ fn spawn_terminal_inner(
     let reader_output_generation = Arc::clone(&output_generation);
     let alternate_screen_active = Arc::new(AtomicBool::new(false));
     let reader_alternate_screen_active = Arc::clone(&alternate_screen_active);
+    let terminal_modes = Arc::new(AtomicU64::new(0));
+    let reader_terminal_modes = Arc::clone(&terminal_modes);
 
     thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
@@ -711,8 +799,11 @@ fn spawn_terminal_inner(
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
-                    active_screen_tracker
-                        .update(&chunk[..n], reader_alternate_screen_active.as_ref());
+                    active_screen_tracker.update(
+                        &chunk[..n],
+                        reader_alternate_screen_active.as_ref(),
+                        reader_terminal_modes.as_ref(),
+                    );
                     let text = String::from_utf8_lossy(&chunk[..n]);
                     let titles = terminal_title_events_from_text(&text);
                     if !titles.is_empty() {
@@ -745,6 +836,7 @@ fn spawn_terminal_inner(
         title_events,
         output_generation,
         alternate_screen_active,
+        terminal_modes,
     })
 }
 
@@ -1303,17 +1395,58 @@ mod tests {
     #[test]
     fn active_screen_tracker_returns_to_primary_after_ris() {
         let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
         let mut tracker = ActiveScreenTracker::default();
 
-        tracker.update(b"\x1b[?1049h", &active);
+        tracker.update(b"\x1b[?1049h", &active, &modes);
         assert!(active.load(Ordering::Acquire));
-        tracker.update(b"prefix\x1b", &active);
-        tracker.update(b"c", &active);
+        tracker.update(b"prefix\x1b", &active, &modes);
+        tracker.update(b"c", &active, &modes);
 
         assert!(
             !active.load(Ordering::Acquire),
             "RIS must reset the authoritative tracked screen to primary"
         );
+    }
+
+    #[test]
+    fn active_screen_tracker_preserves_modes_outside_the_transcript() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[?1;2004", &active, &modes);
+        tracker.update(b"h\x1b=", &active, &modes);
+        tracker.update(&vec![b'x'; 1_000_001], &active, &modes);
+
+        assert_eq!(
+            terminal_mode_settings(modes.load(Ordering::Acquire)),
+            vec![
+                TerminalModeSetting {
+                    code: 1,
+                    ansi: false,
+                    on: true,
+                },
+                TerminalModeSetting {
+                    code: 66,
+                    ansi: false,
+                    on: true,
+                },
+                TerminalModeSetting {
+                    code: 2004,
+                    ansi: false,
+                    on: true,
+                },
+            ]
+        );
+
+        tracker.update(b"\x1b[?1l", &active, &modes);
+        assert_eq!(
+            terminal_mode_settings(modes.load(Ordering::Acquire))[0].on,
+            false
+        );
+        tracker.update(b"\x1bc", &active, &modes);
+        assert!(terminal_mode_settings(modes.load(Ordering::Acquire)).is_empty());
     }
 
     #[test]
