@@ -54276,6 +54276,7 @@ fn method_changes_presented_model(
                 | "help.shortcuts.toggle"
                 | "notification.mark_unread"
                 | "notification.reconcile"
+                | "open.targets"
                 | "settings.global_hotkey.set_enabled"
         )
         || (method.starts_with("settings.") && method.contains(".set"))
