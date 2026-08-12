@@ -20,13 +20,22 @@ require_file_token() {
     grep -Fq -- "$token" "$file" || fail "$message"
 }
 
+reject_file_token() {
+    local file=$1
+    local token=$2
+    local message=$3
+    if grep -Fq -- "$token" "$file"; then
+        fail "$message"
+    fi
+}
+
 for workflow in "$release_workflow" "$nightly_workflow"; do
     require_file_token "$workflow" \
         'uses: ./.github/workflows/build-linux-app.yml' \
         "$(basename "$workflow") must call the validated Linux bundle workflow"
-    require_file_token "$workflow" \
+    reject_file_token "$workflow" \
         'vars.CMUX_LINUX_GHOSTTY_REF' \
-        "$(basename "$workflow") must use the configured immutable Linux Ghostty revision"
+        "$(basename "$workflow") must derive Ghostty from the cmux submodule, not a separate revision"
     require_file_token "$workflow" \
         'name: cmux-linux-desktop-${{ github.run_id }}' \
         "$(basename "$workflow") must download the Linux artifact from the reusable workflow"
