@@ -11987,12 +11987,13 @@ impl AppState {
             "tmux -CC attach-session -t {}",
             shell_word(session)
         ));
-        let runtime = RemoteTmuxRuntime::spawn(command).map_err(|error| {
-            AppError::unavailable(format!(
-                "failed to attach remote tmux session {session} on {}: {error:#}",
-                host.destination
-            ))
-        })?;
+        let runtime =
+            RemoteTmuxRuntime::spawn(command, self.render_activity.clone()).map_err(|error| {
+                AppError::unavailable(format!(
+                    "failed to attach remote tmux session {session} on {}: {error:#}",
+                    host.destination
+                ))
+            })?;
 
         let mut connection =
             self.remote_tmux_record_connection(host, session, "starting", None, None);

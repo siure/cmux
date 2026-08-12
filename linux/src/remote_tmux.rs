@@ -1,3 +1,4 @@
+use crate::terminal::RenderActivity;
 use anyhow::{anyhow, Context, Result};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -374,6 +375,7 @@ struct EventQueue {
     events: VecDeque<RuntimeEvent>,
     estimated_bytes: usize,
     overflowed: bool,
+    render_activity: RenderActivity,
 }
 
 impl EventQueue {
@@ -389,11 +391,13 @@ impl EventQueue {
                 self.estimated_bytes = 0;
                 self.events.push_back(RuntimeEvent::QueueOverflow);
                 self.overflowed = true;
+                self.render_activity.record_model_mutation();
             }
             return;
         }
         self.estimated_bytes += bytes;
         self.events.push_back(event);
+        self.render_activity.record_model_mutation();
     }
 
     fn drain(&mut self) -> Vec<RuntimeEvent> {
@@ -410,7 +414,7 @@ pub(crate) struct RemoteTmuxRuntime {
 }
 
 impl RemoteTmuxRuntime {
-    pub(crate) fn spawn(mut command: Command) -> Result<Self> {
+    pub(crate) fn spawn(mut command: Command, render_activity: RenderActivity) -> Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -433,6 +437,7 @@ impl RemoteTmuxRuntime {
             events: VecDeque::new(),
             estimated_bytes: 0,
             overflowed: false,
+            render_activity,
         }));
         spawn_stdout_reader(stdout, Arc::clone(&events));
         spawn_stderr_reader(stderr, Arc::clone(&events));
