@@ -221,6 +221,10 @@ impl ActiveScreenTracker {
                     saw_digit: false,
                     targets_screen: false,
                 },
+                ActiveScreenScanState::Escape if byte == b'c' => {
+                    active.store(false, Ordering::Release);
+                    ActiveScreenScanState::Ground
+                }
                 ActiveScreenScanState::Escape if byte == 0x1b => ActiveScreenScanState::Escape,
                 ActiveScreenScanState::Escape => ActiveScreenScanState::Ground,
                 ActiveScreenScanState::Csi {

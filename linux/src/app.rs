@@ -54245,6 +54245,15 @@ fn method_changes_presented_model(
     if method == "agent.hibernation.resume" {
         return result.get("resumed").and_then(Value::as_bool) == Some(true);
     }
+    if method == "auth.team.select" {
+        return result
+            .get("team_selection_updated")
+            .and_then(Value::as_bool)
+            == Some(true);
+    }
+    if method == "auth.sign_out" {
+        return result.get("already_signed_out").and_then(Value::as_bool) != Some(true);
+    }
     if method == "history.reopen_closed" {
         return result.get("handled").and_then(Value::as_bool) == Some(true);
     }
@@ -54768,6 +54777,17 @@ mod render_activity_tests {
         assert!(
             activity.model_mutation_generation() > before_sign_out,
             "direct sign out must wake the GTK model watcher"
+        );
+
+        let before_noop = activity.model_mutation_generation();
+        let already_signed_out = app
+            .handle("auth.sign_out", &json!({}))
+            .expect("repeat sign out");
+        assert_eq!(already_signed_out["already_signed_out"], true);
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_noop,
+            "an already-signed-out account must not schedule a redundant rebuild"
         );
     }
 
