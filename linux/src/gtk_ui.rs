@@ -20838,8 +20838,8 @@ mod tests {
                     {"id": 0},
                     {
                         "id": 7,
-                        "fg": {"r": 8, "g": 9, "b": 10},
-                        "bg": {"r": 11, "g": 12, "b": 13},
+                        "foreground": "#08090A",
+                        "background": "#0B0C0D",
                         "bold": true,
                         "italic": true,
                         "underline": true,

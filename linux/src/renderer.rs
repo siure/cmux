@@ -5082,6 +5082,24 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_render_grid_preserves_hidden_cursor() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": false, "in_viewport": true, "x": 3, "y": 1},
+            "rows_data": []
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 46, &snapshot).expect("render grid");
+
+        assert_eq!(grid["cursor"]["row"], 1);
+        assert_eq!(grid["cursor"]["column"], 3);
+        assert_eq!(grid["cursor"]["visible"], false);
+    }
+
+    #[test]
     fn text_fallback_render_grid_styles_follow_v1_color_schema() {
         let grid = render_grid_from_text("surface-a", 46, 2, 1, "\x1b[38;2;10;20;30mX");
         let style = &grid["styles"][1];
