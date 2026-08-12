@@ -54478,6 +54478,7 @@ mod render_activity_tests {
         let activity = app.render_activity();
         let before_generation = activity.model_mutation_generation();
         let before_workspaces = app.workspaces.len();
+        let before_persist = app.session_snapshot_persist_attempt_count_for_test();
 
         let opened = app
             .handle(
@@ -54493,9 +54494,45 @@ mod render_activity_tests {
 
         assert_eq!(opened["count"], 1);
         assert_eq!(app.workspaces.len(), before_workspaces + 1);
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > before_persist);
         assert!(
             activity.model_mutation_generation() > before_generation,
             "open.targets must wake the GTK model watcher after changing presented topology"
+        );
+    }
+
+    #[test]
+    fn open_targets_partial_failure_records_presented_model_mutation() {
+        let directory = tempfile::tempdir().expect("open target directory");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let before_generation = activity.model_mutation_generation();
+        let before_workspaces = app.workspaces.len();
+        let before_persist = app.session_snapshot_persist_attempt_count_for_test();
+
+        let error = app
+            .handle(
+                "open.targets",
+                &json!({
+                    "targets": [
+                        {"kind": "directory", "path": directory.path()},
+                        {"kind": "unsupported", "target": "invalid"}
+                    ]
+                }),
+            )
+            .expect_err("later invalid target must fail the batch");
+
+        assert_eq!(error.code, "invalid_params");
+        assert_eq!(app.workspaces.len(), before_workspaces + 1);
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > before_persist);
+        assert!(
+            activity.model_mutation_generation() > before_generation,
+            "partial open.targets mutations must wake the GTK model watcher"
         );
     }
 
