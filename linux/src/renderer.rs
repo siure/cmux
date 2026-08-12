@@ -5206,6 +5206,39 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_snapshot_emits_decodable_v1_mode_settings() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "rows_data": []
+        });
+        let fallback = render_grid_from_text(
+            "surface-a",
+            46,
+            8,
+            2,
+            "ready\x1b[?1;7;1000;1004;1006;2004h\x1b=",
+        );
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 46, native);
+
+        assert_eq!(
+            object["render_grid"]["modes"],
+            json!([
+                {"code": 1, "ansi": false, "on": true},
+                {"code": 66, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": true},
+                {"code": 2004, "ansi": false, "on": true},
+                {"code": 1004, "ansi": false, "on": true},
+                {"code": 1000, "ansi": false, "on": true},
+                {"code": 1006, "ansi": false, "on": true}
+            ])
+        );
+    }
+
+    #[test]
     fn ghostty_vt_snapshot_preserves_fallback_cursor_presentation() {
         let native = json!({
             "parser": "ghostty-vt",
