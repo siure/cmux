@@ -19126,7 +19126,7 @@ fn mobile_terminal_replay_uses_renderer_fallback_styles_and_modes() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|mode| mode == "bracketed_paste"));
+        .any(|mode| mode["code"] == 2004 && mode["ansi"] == false && mode["on"] == true));
 }
 
 #[test]
@@ -29903,20 +29903,15 @@ fn renderer_snapshot_text_fallback_exposes_cursor_shape_and_modes() {
         if row_text.contains(marker) {
             assert_eq!(grid["cursor"]["style"], "bar", "grid was {grid}");
             assert_eq!(grid["cursor"]["blinking"], true, "grid was {grid}");
-            for expected_mode in [
-                "application_cursor_keys",
-                "application_keypad",
-                "bracketed_paste",
-                "focus_events",
-                "mouse_button_tracking",
-                "mouse_sgr",
-            ] {
+            for expected_mode in [1, 66, 2004, 1004, 1000, 1006] {
                 assert!(
                     grid["modes"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|mode| mode == expected_mode),
+                        .any(|mode| mode["code"] == expected_mode
+                            && mode["ansi"] == false
+                            && mode["on"] == true),
                     "missing mode {expected_mode}: {grid}"
                 );
             }

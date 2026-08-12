@@ -10,6 +10,18 @@ use std::sync::OnceLock;
 const GHOSTTY_VT_DEBUG_CELL_WIDTH: f64 = 10.0;
 const GHOSTTY_VT_DEBUG_CELL_HEIGHT: f64 = 20.0;
 const RENDER_GRID_SCROLLBACK_LINE_BUDGET: usize = 200;
+const RENDER_GRID_MODE_SETTINGS: [(&str, u64, bool); 10] = [
+    ("application_cursor_keys", 1, false),
+    ("application_keypad", 66, false),
+    ("wraparound", 7, false),
+    ("bracketed_paste", 2004, false),
+    ("focus_events", 1004, false),
+    ("mouse_button_tracking", 1000, false),
+    ("mouse_drag_tracking", 1002, false),
+    ("mouse_any_tracking", 1003, false),
+    ("mouse_sgr", 1006, false),
+    ("mouse_urxvt", 1015, false),
+];
 const GTK4_DEVELOPMENT_PACKAGE_HINT: &str = "Install GTK4 development files: Fedora/RHEL `sudo dnf install gtk4-devel pkgconf-pkg-config`; Debian/Ubuntu `sudo apt install libgtk-4-dev pkg-config`; Arch `sudo pacman -S gtk4 pkgconf`; openSUSE `sudo zypper install gtk4-devel pkgconf-pkg-config`.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1362,23 +1374,11 @@ impl RenderGridScreen {
         }
     }
 
-    fn modes_value(&self) -> Vec<&'static str> {
-        const ORDER: [&str; 10] = [
-            "application_cursor_keys",
-            "application_keypad",
-            "wraparound",
-            "bracketed_paste",
-            "focus_events",
-            "mouse_button_tracking",
-            "mouse_drag_tracking",
-            "mouse_any_tracking",
-            "mouse_sgr",
-            "mouse_urxvt",
-        ];
-        ORDER
+    fn modes_value(&self) -> Vec<Value> {
+        RENDER_GRID_MODE_SETTINGS
             .iter()
-            .copied()
-            .filter(|mode| self.modes.contains(mode))
+            .filter(|(name, _, _)| self.modes.contains(name))
+            .map(|(_, code, ansi)| json!({"code": code, "ansi": ansi, "on": true}))
             .collect()
     }
 
@@ -1807,9 +1807,27 @@ fn merge_render_grid_protocol_state(render_grid: &mut Value, fallback: &Value) {
     {
         target.insert("active_screen".to_string(), active_screen.clone());
     }
-    if let Some(modes) = fallback.get("modes").filter(|value| value.is_array()) {
-        target.insert("modes".to_string(), modes.clone());
+    if let Some(modes) = fallback.get("modes").and_then(Value::as_array) {
+        let modes = modes
+            .iter()
+            .filter_map(render_grid_v1_mode_setting)
+            .collect::<Vec<_>>();
+        target.insert("modes".to_string(), json!(modes));
     }
+}
+
+fn render_grid_v1_mode_setting(mode: &Value) -> Option<Value> {
+    if let Some(name) = mode.as_str() {
+        let (_, code, ansi) = RENDER_GRID_MODE_SETTINGS
+            .iter()
+            .find(|(candidate, _, _)| *candidate == name)?;
+        return Some(json!({"code": code, "ansi": ansi, "on": true}));
+    }
+    Some(json!({
+        "code": mode.get("code")?.as_u64()?,
+        "ansi": mode.get("ansi")?.as_bool()?,
+        "on": mode.get("on")?.as_bool()?
+    }))
 }
 
 fn merge_render_grid_cursor_presentation(render_grid: &mut Value, fallback: &Value) {
@@ -5195,7 +5213,7 @@ mod tests {
         assert!(fallback["modes"]
             .as_array()
             .expect("fallback modes")
-            .contains(&json!("bracketed_paste")));
+            .contains(&json!({"code": 2004, "ansi": false, "on": true})));
         let fallback_modes = fallback["modes"].clone();
         let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
 
@@ -5396,13 +5414,13 @@ mod tests {
         assert_eq!(
             grid["modes"],
             json!([
-                "application_cursor_keys",
-                "application_keypad",
-                "wraparound",
-                "bracketed_paste",
-                "focus_events",
-                "mouse_button_tracking",
-                "mouse_sgr"
+                {"code": 1, "ansi": false, "on": true},
+                {"code": 66, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": true},
+                {"code": 2004, "ansi": false, "on": true},
+                {"code": 1004, "ansi": false, "on": true},
+                {"code": 1000, "ansi": false, "on": true},
+                {"code": 1006, "ansi": false, "on": true}
             ])
         );
     }

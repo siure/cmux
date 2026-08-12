@@ -64505,7 +64505,10 @@ mod terminal_text_tests {
             .expect("style");
         assert_eq!(style["foreground"], "#010203");
         assert_eq!(grid["cursor"]["style"], "bar");
-        assert_eq!(grid["modes"], json!(["bracketed_paste"]));
+        assert_eq!(
+            grid["modes"],
+            json!([{"code": 2004, "ansi": false, "on": true}])
+        );
     }
 
     #[test]
