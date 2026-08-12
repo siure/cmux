@@ -54466,6 +54466,39 @@ mod render_activity_tests {
     }
 
     #[test]
+    fn open_targets_records_presented_model_mutation() {
+        let directory = tempfile::tempdir().expect("open target directory");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let before_generation = activity.model_mutation_generation();
+        let before_workspaces = app.workspaces.len();
+
+        let opened = app
+            .handle(
+                "open.targets",
+                &json!({
+                    "targets": [{
+                        "kind": "directory",
+                        "path": directory.path()
+                    }]
+                }),
+            )
+            .expect("open directory target");
+
+        assert_eq!(opened["count"], 1);
+        assert_eq!(app.workspaces.len(), before_workspaces + 1);
+        assert!(
+            activity.model_mutation_generation() > before_generation,
+            "open.targets must wake the GTK model watcher after changing presented topology"
+        );
+    }
+
+    #[test]
     fn agent_output_poll_records_prepared_runtime_state_changes() {
         let directory = tempfile::tempdir().expect("agent runtime tempdir");
         let provider = directory.path().join("fake-claude-stream");
