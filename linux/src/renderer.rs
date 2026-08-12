@@ -5150,6 +5150,30 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_snapshot_preserves_fallback_cursor_presentation() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": false, "in_viewport": true, "x": 3, "y": 1},
+            "rows_data": []
+        });
+        let fallback = render_grid_from_text("surface-a", 47, 8, 2, "ready\x1b[5 q");
+        assert_eq!(fallback["cursor"]["style"], "bar");
+        assert_eq!(fallback["cursor"]["blinking"], true);
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 47, native);
+
+        let cursor = &object["render_grid"]["cursor"];
+        assert_eq!(cursor["row"], 1);
+        assert_eq!(cursor["column"], 3);
+        assert_eq!(cursor["visible"], false);
+        assert_eq!(cursor["style"], "bar");
+        assert_eq!(cursor["blinking"], true);
+    }
+
+    #[test]
     fn renderer_text_fallback_keeps_cursor_only_empty_grid() {
         let grid = render_grid_from_text("surface-a", 43, 8, 2, "");
         assert_eq!(grid["format"], "cmux.render-grid.v1");

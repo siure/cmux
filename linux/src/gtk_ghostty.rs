@@ -135,6 +135,14 @@ thread_local! {
     static SHARED_GHOSTTY_APP: RefCell<Weak<GtkGhosttyApp>> = RefCell::new(Weak::new());
     static GHOSTTY_SERVICE_HOSTS: RefCell<HashMap<u64, GhosttyServiceHost>> = RefCell::new(HashMap::new());
     static GHOSTTY_SERVICE_TIMER_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    #[cfg(test)]
+    static GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_ghostty_service_dispatched_surface_ids_for_test() -> Vec<String> {
+    GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS
+        .with(|surface_ids| std::mem::take(&mut *surface_ids.borrow_mut()))
 }
 
 struct GhosttyServiceHost {

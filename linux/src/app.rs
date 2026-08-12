@@ -63252,12 +63252,30 @@ mod embedded_terminal_action_tests {
             TerminalStartupMode::RendererOwned,
         )
         .expect("app state");
-        let surface_id = app.current_surface_id().expect("current surface");
+        let original_surface_id = app.current_surface_id().expect("current surface");
+        let surface_id = format!("ghostty-service-test-{}", std::process::id());
+        let mut surface = app
+            .surfaces
+            .remove(&original_surface_id)
+            .expect("original surface");
+        surface.id = surface_id.clone();
+        let pane = app.panes.get_mut(&surface.pane_id).expect("surface pane");
+        for pane_surface_id in &mut pane.surfaces {
+            if *pane_surface_id == original_surface_id {
+                *pane_surface_id = surface_id.clone();
+            }
+        }
+        if pane.selected_surface.as_deref() == Some(original_surface_id.as_str()) {
+            pane.selected_surface = Some(surface_id.clone());
+        }
+        app.surfaces.insert(surface_id.clone(), surface);
         let surface_ref = app.surface_ref(&surface_id);
         assert_eq!(
             app.current_terminal_input_route(),
             Some((surface_id.clone(), true))
         );
+        #[cfg(feature = "gtk")]
+        crate::gtk_ghostty::take_ghostty_service_dispatched_surface_ids_for_test();
 
         app.handle(
             "surface.send_text",
@@ -63269,6 +63287,30 @@ mod embedded_terminal_action_tests {
             &json!({"surface_id": surface_id, "key": "enter"}),
         )
         .expect("send key");
+        #[cfg(feature = "gtk")]
+        {
+            let context = gtk4::glib::MainContext::default();
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let dispatched = loop {
+                if let Ok(_guard) = context.acquire() {
+                    while context.pending() {
+                        context.iteration(false);
+                    }
+                }
+                let dispatched =
+                    crate::gtk_ghostty::take_ghostty_service_dispatched_surface_ids_for_test();
+                if dispatched.iter().any(|candidate| candidate == &surface_id)
+                    || std::time::Instant::now() >= deadline
+                {
+                    break dispatched;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            assert!(
+                dispatched.iter().any(|candidate| candidate == &surface_id),
+                "the coalesced idle service must promptly include the queued surface"
+            );
+        }
 
         assert!(app.surfaces[&surface_id].terminal.is_none());
         app.surfaces
