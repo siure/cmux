@@ -54248,6 +54248,15 @@ fn method_changes_presented_model(
     if method == "app.close_confirmation.reply" {
         return result.get("reason").and_then(Value::as_str) != Some("request_not_found");
     }
+    if method == "settings.terminal.resume.update" {
+        return true;
+    }
+    if method == "settings.terminal.resume.delete" {
+        return result.get("deleted").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "settings.terminal.resume.clear" {
+        return result.get("cleared").and_then(Value::as_u64).unwrap_or(0) > 0;
+    }
     if method == "debug.window.close_request" {
         return true;
     }

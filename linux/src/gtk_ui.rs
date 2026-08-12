@@ -908,13 +908,11 @@ fn create_gtk_window_host(
         .default_height(GTK_APP_DEFAULT_HEIGHT)
         .fullscreened(model_window_fullscreen(row))
         .build();
-    if renderer_mode == GtkRendererMode::Gtk {
-        let focus_refresh = local_refresh.clone();
-        let focus_window_id = window_id.to_string();
-        window.connect_notify_local(Some("focus-widget"), move |_, _| {
-            focus_refresh.schedule_terminal_window(focus_window_id.clone());
-        });
-    }
+    let focus_refresh = local_refresh.clone();
+    let focus_window_id = window_id.to_string();
+    window.connect_notify_local(Some("focus-widget"), move |_, _| {
+        focus_refresh.schedule_terminal_window(focus_window_id.clone());
+    });
     connect_terminal_keys(
         &window,
         app_state,
