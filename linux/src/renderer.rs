@@ -5122,6 +5122,27 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_render_grid_hides_cursor_outside_viewport() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": true, "in_viewport": false, "x": 3, "y": 9},
+            "rows_data": []
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 47, &snapshot).expect("render grid");
+
+        assert_eq!(grid["cursor"]["row"], 0);
+        assert_eq!(grid["cursor"]["column"], 0);
+        assert_eq!(
+            grid["cursor"]["visible"], false,
+            "an off-viewport native cursor must explicitly hide replay's cursor"
+        );
+    }
+
+    #[test]
     fn text_fallback_render_grid_styles_follow_v1_color_schema() {
         let grid = render_grid_from_text("surface-a", 46, 2, 1, "\x1b[38;2;10;20;30mX");
         let style = &grid["styles"][1];
