@@ -2009,22 +2009,37 @@ fn render_grid_from_ghostty_vt_snapshot(
         "scrollback_rows": 0,
         "scrollback_spans": []
     });
-    let cursor = snapshot
-        .get("cursor")
-        .filter(|cursor| cursor.get("in_viewport").and_then(Value::as_bool) == Some(true));
-    if let Some((row, column)) =
-        cursor.and_then(|cursor| Some((cursor.get("y")?.as_u64()?, cursor.get("x")?.as_u64()?)))
-    {
-        render_grid["cursor"] = json!({
-            "row": row,
-            "column": column,
-            "visible": cursor
-                .and_then(|cursor| cursor.get("visible"))
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-            "style": "block",
-            "blinking": false
-        });
+    if let Some(cursor) = snapshot.get("cursor") {
+        match cursor.get("in_viewport").and_then(Value::as_bool) {
+            Some(false) => {
+                render_grid["cursor"] = json!({
+                    "row": 0,
+                    "column": 0,
+                    "visible": false,
+                    "style": "block",
+                    "blinking": false
+                });
+            }
+            Some(true) => {
+                if let Some((row, column)) = cursor
+                    .get("y")
+                    .and_then(Value::as_u64)
+                    .zip(cursor.get("x").and_then(Value::as_u64))
+                {
+                    render_grid["cursor"] = json!({
+                        "row": row,
+                        "column": column,
+                        "visible": cursor
+                            .get("visible")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                        "style": "block",
+                        "blinking": false
+                    });
+                }
+            }
+            None => {}
+        }
     }
     Some(render_grid)
 }
