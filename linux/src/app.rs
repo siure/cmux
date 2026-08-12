@@ -54374,6 +54374,7 @@ fn method_changes_presented_model(
                 | "debug.command_palette.rename_input.select_all"
                 | "debug.command_palette.rename_input.interact"
                 | "debug.command_palette.rename_input.delete_backward"
+                | "debug.notification.focus"
                 | "debug.right_sidebar.focus"
                 | "debug.shortcut.simulate"
                 | "debug.type"
