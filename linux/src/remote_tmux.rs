@@ -847,12 +847,14 @@ mod tests {
 
     #[test]
     fn runtime_streams_messages_and_writes_commands() {
+        let render_activity = crate::terminal::RenderActivity::default();
+        let before_event = render_activity.model_mutation_generation();
         let mut command = Command::new("/bin/sh");
         command.args([
             "-c",
             "printf '\\033P1000p%%begin 1 1 0\\n%%end 1 1 0\\n%%output %%3 hello\\\\015\\\\012\\n'; IFS= read -r line; printf 'seen:%s\\n' \"$line\" >&2",
         ]);
-        let runtime = RemoteTmuxRuntime::spawn(command).expect("runtime");
+        let runtime = RemoteTmuxRuntime::spawn(command, render_activity.clone()).expect("runtime");
         runtime.send_keys(3, b"A\n").expect("send keys");
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -875,5 +877,9 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(event, RuntimeEvent::Stderr(text) if text.contains("seen:send-keys -t %3 -H 41 0a"))
         }));
+        assert!(
+            render_activity.model_mutation_generation() > before_event,
+            "remote tmux reader events must wake the GTK model watcher"
+        );
     }
 }
