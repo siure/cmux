@@ -21493,6 +21493,163 @@ mod tests {
     }
 
     #[test]
+    fn gtk_model_mutation_suppressed_by_browser_focus_retries_when_focus_clears() {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.browser-focus-model-retry")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("renderer-owned app state");
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "direction": "right",
+                    "focus": true
+                }),
+            )
+            .expect("create focused split");
+        let split_id = split["surface_id"]
+            .as_str()
+            .expect("split surface id")
+            .to_string();
+        let app_state = Arc::new(Mutex::new(app));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Ghostty,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        let activity_refresh_source = local_refresh
+            .install_render_activity_refresh()
+            .expect("model activity refresh source");
+        let row = model_window_rows(&app_state)
+            .into_iter()
+            .next()
+            .expect("model window row");
+        let window_id = model_window_id(&row).expect("window id").to_string();
+        let mut initial_snapshot =
+            snapshot_or_error(&app_state, GtkRendererMode::Ghostty, &window_id);
+        initial_snapshot["surface_views"] = json!([]);
+        initial_snapshot["window_surfaces"] = json!([]);
+        initial_snapshot["canvas"]["panes"] = json!([]);
+        let host = create_gtk_window_host(
+            &application,
+            &app_state,
+            GtkRendererMode::Ghostty,
+            GtkUiMode::Next,
+            &window_id,
+            &row,
+            &initial_snapshot,
+            &local_refresh,
+        );
+        hosts.borrow_mut().insert(window_id, host);
+        let window = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .window
+            .clone();
+        let mounted_main = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .first_child()
+            .expect("mounted main tree");
+        let location = gtk::Entry::new();
+        location.add_css_class("cmux-browser-location");
+        hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .append(&location);
+        window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        gtk::prelude::GtkWindowExt::set_focus(&window, Some(&location));
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-browser-location"
+        ));
+
+        app_state
+            .lock()
+            .expect("app lock")
+            .handle("surface.close", &json!({"surface_id": split_id}))
+            .expect("close focused split through socket path");
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-browser-location"
+        ));
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-browser-location"
+        ));
+        let focused_main = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .first_child()
+            .expect("focused main tree");
+        assert_eq!(
+            focused_main, mounted_main,
+            "focused browser chrome must suppress destructive main-tree replacement"
+        );
+        // The activity watcher has already acknowledged the model generation. Clearing the
+        // guard must retry that pending model snapshot without another mutation or safety sync.
+        gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+        gtk_run_main_loop_for(Duration::from_millis(750));
+        let retried_main = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .first_child()
+            .expect("retried main tree");
+        assert_ne!(
+            retried_main, mounted_main,
+            "the acknowledged model mutation must retry before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync"
+        );
+
+        activity_refresh_source.remove();
+        for host in hosts.borrow_mut().values_mut() {
+            host.window.destroy();
+        }
+    }
+
+    #[test]
     fn gtk_fallback_terminal_allocation_follows_live_resize() {
         if gtk::init().is_err() {
             return;

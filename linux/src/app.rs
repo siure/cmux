@@ -54396,6 +54396,7 @@ mod render_activity_tests {
     use std::collections::HashMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -54631,6 +54632,107 @@ mod render_activity_tests {
         assert!(
             activity.model_mutation_generation() > before_shortcut,
             "shortcut reopen must keep using the shared mutation path"
+        );
+    }
+
+    #[test]
+    fn resume_approval_mutations_record_presented_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_home = temp.path().join("config");
+        let secret_path = temp.path().join("resume-secret");
+        let snapshot_path = temp.path().join("session.json");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "app::render_activity_tests::resume_approval_mutation_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("XDG_CONFIG_HOME", config_home)
+            .env("CMUX_SURFACE_RESUME_APPROVAL_SECRET_PATH", secret_path)
+            .env("CMUX_SESSION_SNAPSHOT_PATH", snapshot_path)
+            .output()
+            .expect("run isolated resume approval probe");
+
+        assert!(
+            output.status.success(),
+            "resume approval probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn resume_approval_mutation_probe_child() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let approval = app
+            .handle(
+                "surface.resume.set",
+                &json!({
+                    "surface_id": surface_id,
+                    "name": "Model wake approval",
+                    "command": "printf model-wake",
+                    "source": "cli"
+                }),
+            )
+            .expect("create resume approval");
+        let record_id = approval["resume_binding"]["approval_record_id"]
+            .as_str()
+            .expect("approval record id")
+            .to_string();
+
+        let before_update = activity.model_mutation_generation();
+        let updated = app
+            .handle(
+                "settings.terminal.resume.update",
+                &json!({"id": record_id, "policy": "prompt"}),
+            )
+            .expect("update resume approval");
+        assert_eq!(updated["records"][0]["policy"], "prompt");
+        assert!(
+            activity.model_mutation_generation() > before_update,
+            "updating a resume approval must wake the GTK model watcher"
+        );
+
+        let before_delete = activity.model_mutation_generation();
+        let deleted = app
+            .handle("settings.terminal.resume.delete", &json!({"id": record_id}))
+            .expect("delete resume approval");
+        assert_eq!(deleted["deleted"], true);
+        assert!(deleted["records"].as_array().is_some_and(Vec::is_empty));
+        assert!(
+            activity.model_mutation_generation() > before_delete,
+            "deleting a resume approval must wake the GTK model watcher"
+        );
+
+        app.handle(
+            "surface.resume.set",
+            &json!({
+                "surface_id": surface_id,
+                "command": "printf model-wake",
+                "source": "cli"
+            }),
+        )
+        .expect("recreate resume approval");
+        let before_clear = activity.model_mutation_generation();
+        let cleared = app
+            .handle("settings.terminal.resume.clear", &json!({}))
+            .expect("clear resume approvals");
+        assert_eq!(cleared["cleared"], 1);
+        assert!(cleared["status"]["records"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert!(
+            activity.model_mutation_generation() > before_clear,
+            "clearing resume approvals must wake the GTK model watcher"
         );
     }
 
