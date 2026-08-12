@@ -26,14 +26,20 @@ require_token "workflow_call:" \
     "stable and nightly workflows must be able to reuse the Linux bundle builder"
 require_token "cmux_ref:" \
     "release callers must be able to pin the exact cmux commit"
-require_token "ghostty_ref:" \
-    "the workflow must require a published Ghostty revision"
 require_token 'ref: ${{ inputs.cmux_ref || github.sha }}' \
     "the workflow must build the caller-selected cmux commit"
-require_token '[[ ! "$GHOSTTY_REF" =~ ^[0-9a-fA-F]{40}$ ]]' \
-    "the workflow must reject mutable Ghostty tags and branch names"
-require_token "repository: manaflow-ai/ghostty" \
-    "the workflow must only execute the trusted cmux Ghostty fork"
+require_token "git submodule sync -- ghostty" \
+    "the workflow must synchronize Ghostty configuration from the checked-out cmux revision"
+require_token "git submodule update --init --depth 1 ghostty" \
+    "the workflow must check out the Ghostty submodule pinned by cmux"
+require_token 'pinned_ref="$(git ls-tree HEAD ghostty | awk' \
+    "the workflow must read the Ghostty gitlink from the checked-out cmux revision"
+require_token 'ghostty_repository="$(git config -f .gitmodules --get submodule.ghostty.url)"' \
+    "the workflow must derive the Ghostty repository from synchronized submodule configuration"
+require_token 'test "$ghostty_ref" = "$pinned_ref"' \
+    "the workflow must reject a Ghostty checkout that differs from the cmux gitlink"
+require_token 'echo "repository=$ghostty_repository" >> "$GITHUB_OUTPUT"' \
+    "the workflow must pass the synchronized Ghostty repository to later steps"
 require_token 'RUST_VERSION: "1.92.0"' \
     "the workflow must pin the validated Rust version"
 require_token 'ZIG_VERSION: "0.15.2"' \
@@ -44,17 +50,17 @@ require_token "libgtk-4-dev" \
     "the workflow must install GTK development files"
 require_token "libwebkitgtk-6.0-dev" \
     "the workflow must install WebKitGTK development files"
-require_token 'CMUX_GHOSTTY_CHECKOUT="$GITHUB_WORKSPACE/ghostty-linux"' \
-    "the bundle build must use the explicitly checked-out Ghostty revision"
-require_token 'CMUX_LINUX_BUNDLE_GHOSTTY_REPOSITORY="manaflow-ai/ghostty"' \
-    "the archive must record the trusted Ghostty repository"
+require_token 'CMUX_GHOSTTY_CHECKOUT="$GITHUB_WORKSPACE/ghostty"' \
+    "the bundle build must use the checked-out Ghostty submodule"
+require_token 'CMUX_LINUX_BUNDLE_GHOSTTY_REPOSITORY="$GHOSTTY_REPOSITORY"' \
+    "the archive must record the repository derived from the cmux revision"
 require_token "./linux/scripts/build-bundle.sh" \
     "the workflow must use the validated relocatable bundle builder"
 require_token "sha256sum -c" \
     "the workflow must verify the generated archive checksum"
 require_token "cmux.linux-bundle.provenance.v1" \
     "the workflow must record source and toolchain provenance"
-require_token "git -C ghostty-linux rev-parse HEAD" \
+require_token "git -C ghostty rev-parse HEAD" \
     "provenance must contain the resolved Ghostty commit"
 require_token "cmux_dirty: \$cmux_dirty" \
     "provenance must state whether cmux sources were dirty"
@@ -67,5 +73,8 @@ require_token "dist/cmux-linux-build.json" \
 
 grep -Fq "./tests/test_ci_linux_app_bundle_workflow.sh" "$ci_workflow" || \
     fail "the main CI workflow must run the Linux bundle workflow guard"
+
+[[ "$contents" != *"siure/ghostty"* ]] || \
+    fail "the workflow must not hardcode a personal Ghostty fork"
 
 printf 'PASS: Linux desktop bundle workflow pins toolchains, Ghostty, provenance, and artifacts\n'
