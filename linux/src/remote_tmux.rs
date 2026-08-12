@@ -725,6 +725,7 @@ fn consume_layout(bytes: &[u8], index: &mut usize, expected: u8) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -853,13 +854,15 @@ mod tests {
     #[test]
     fn runtime_streams_messages_and_writes_commands() {
         let render_activity = crate::terminal::RenderActivity::default();
-        let before_event = render_activity.model_mutation_generation();
+        let connection_key = "remote.example|work";
         let mut command = Command::new("/bin/sh");
         command.args([
             "-c",
             "printf '\\033P1000p%%begin 1 1 0\\n%%end 1 1 0\\n%%output %%3 hello\\\\015\\\\012\\n'; IFS= read -r line; printf 'seen:%s\\n' \"$line\" >&2",
         ]);
-        let runtime = RemoteTmuxRuntime::spawn(command, render_activity.clone()).expect("runtime");
+        let runtime =
+            RemoteTmuxRuntime::spawn(command, render_activity.clone(), connection_key.to_string())
+                .expect("runtime");
         runtime.send_keys(3, b"A\n").expect("send keys");
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -882,9 +885,47 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(event, RuntimeEvent::Stderr(text) if text.contains("seen:send-keys -t %3 -H 41 0a"))
         }));
+        assert!(render_activity.model_mutation_generation() > 0);
+        assert_eq!(
+            render_activity.take_remote_tmux_connection_keys(),
+            HashSet::from([connection_key.to_string()]),
+            "remote tmux reader events must coalesce a targeted connection wake"
+        );
+    }
+
+    #[test]
+    fn event_queue_scopes_output_but_globally_wakes_topology() {
+        let render_activity = crate::terminal::RenderActivity::default();
+        let connection_key = "remote.example|work".to_string();
+        let mut queue = EventQueue {
+            events: VecDeque::new(),
+            estimated_bytes: 0,
+            overflowed: false,
+            render_activity: render_activity.clone(),
+            connection_key: connection_key.clone(),
+        };
+
+        let initial_model_generation = render_activity.model_mutation_generation();
+        queue.push(RuntimeEvent::Message(ControlMessage::Output {
+            pane_id: 3,
+            data: b"hello".to_vec(),
+        }));
+        assert_eq!(
+            render_activity.model_mutation_generation(),
+            initial_model_generation,
+            "continuous pane output must not request a global GTK model refresh"
+        );
+        assert_eq!(
+            render_activity.take_remote_tmux_connection_keys(),
+            HashSet::from([connection_key])
+        );
+
+        queue.push(RuntimeEvent::Message(ControlMessage::WindowAdd {
+            window_id: 4,
+        }));
         assert!(
-            render_activity.model_mutation_generation() > before_event,
-            "remote tmux reader events must wake the GTK model watcher"
+            render_activity.model_mutation_generation() > initial_model_generation,
+            "remote tmux topology must keep the global model wake"
         );
     }
 }
