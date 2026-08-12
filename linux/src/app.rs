@@ -54579,6 +54579,59 @@ mod render_activity_tests {
     }
 
     #[test]
+    fn reopen_closed_browser_records_presented_model_mutation_for_every_entrypoint() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        app.browser_enabled = true;
+        let activity = app.render_activity();
+        let workspace_id = app.current_workspace_id().expect("current workspace");
+        let browser = app
+            .handle(
+                "surface.create",
+                &json!({
+                    "workspace_id": workspace_id,
+                    "type": "browser",
+                    "url": "https://example.test/reopen",
+                    "focus": true
+                }),
+            )
+            .expect("create browser");
+        let browser_id = browser["surface_id"].as_str().expect("browser id");
+        app.handle("surface.close", &json!({"surface_id": browser_id}))
+            .expect("close browser");
+        let closed_surface_count = app.surfaces.len();
+
+        let before_direct = activity.model_mutation_generation();
+        let direct = app
+            .handle("history.reopen_closed", &json!({}))
+            .expect("direct reopen");
+        assert_eq!(direct["handled"], true);
+        assert_eq!(app.surfaces.len(), closed_surface_count + 1);
+        assert!(
+            activity.model_mutation_generation() > before_direct,
+            "direct reopen must wake the GTK model watcher"
+        );
+
+        let direct_id = direct["surface_id"].as_str().expect("direct surface id");
+        app.handle("surface.close", &json!({"surface_id": direct_id}))
+            .expect("close reopened browser");
+        let before_shortcut = activity.model_mutation_generation();
+        let shortcut = app
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+t"}))
+            .expect("shortcut reopen");
+        assert_eq!(shortcut["handled"], true);
+        assert_eq!(app.surfaces.len(), closed_surface_count + 1);
+        assert!(
+            activity.model_mutation_generation() > before_shortcut,
+            "shortcut reopen must keep using the shared mutation path"
+        );
+    }
+
+    #[test]
     fn surface_send_text_only_records_a_model_mutation_when_it_resumes_hibernation() {
         let mut app = AppState::with_paths_and_terminal_startup(
             None,
