@@ -5350,6 +5350,33 @@ mod tests {
     }
 
     #[test]
+    fn renderer_text_fallback_preserves_unicode_columns_for_mobile_replay() {
+        for (text, expected_width) in [("界x", 3_u64), ("e\u{301}x", 2), ("\u{1fae0}x", 3)] {
+            let grid = render_grid_from_text("surface-a", 45, 6, 1, text);
+            let spans = grid["row_spans"].as_array().expect("row spans");
+
+            assert_eq!(spans.len(), 1, "grid was {grid}");
+            assert_eq!(spans[0]["column"], 0);
+            assert_eq!(spans[0]["text"], text);
+            assert_eq!(
+                spans[0]["cell_width"], expected_width,
+                "fallback span width must use terminal columns for {text:?}"
+            );
+            assert_eq!(
+                grid["cursor"]["column"], expected_width,
+                "mobile replay must restore the cursor after {text:?}"
+            );
+            let painted_end =
+                spans[0]["column"].as_u64().unwrap() + spans[0]["cell_width"].as_u64().unwrap();
+            assert_eq!(
+                6 - painted_end,
+                6 - expected_width,
+                "mobile replay must pad only the unpainted columns after {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn renderer_text_fallback_tracks_active_alternate_screen() {
         let grid = render_grid_from_text(
             "surface-a",
