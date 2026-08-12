@@ -103,7 +103,7 @@ struct RenderGridScreen {
     cursor_visible: bool,
     cursor_style: RenderGridCursorStyle,
     cursor_blinking: bool,
-    modes: HashSet<&'static str>,
+    modes: HashMap<&'static str, bool>,
     style: RenderGridStyle,
 }
 
@@ -118,7 +118,7 @@ impl Default for RenderGridScreen {
             cursor_visible: true,
             cursor_style: RenderGridCursorStyle::Block,
             cursor_blinking: false,
-            modes: HashSet::new(),
+            modes: HashMap::new(),
             style: RenderGridStyle::default(),
         }
     }
@@ -1367,18 +1367,17 @@ impl RenderGridScreen {
     }
 
     fn set_mode(&mut self, mode: &'static str, enable: bool) {
-        if enable {
-            self.modes.insert(mode);
-        } else {
-            self.modes.remove(mode);
-        }
+        self.modes.insert(mode, enable);
     }
 
     fn modes_value(&self) -> Vec<Value> {
         RENDER_GRID_MODE_SETTINGS
             .iter()
-            .filter(|(name, _, _)| self.modes.contains(name))
-            .map(|(_, code, ansi)| json!({"code": code, "ansi": ansi, "on": true}))
+            .filter_map(|(name, code, ansi)| {
+                self.modes
+                    .get(name)
+                    .map(|on| json!({"code": code, "ansi": ansi, "on": on}))
+            })
             .collect()
     }
 
@@ -1823,8 +1822,12 @@ fn render_grid_v1_mode_setting(mode: &Value) -> Option<Value> {
             .find(|(candidate, _, _)| *candidate == name)?;
         return Some(json!({"code": code, "ansi": ansi, "on": true}));
     }
+    let code = mode.get("code")?.as_u64()?;
+    if code > 0x7fff {
+        return None;
+    }
     Some(json!({
-        "code": mode.get("code")?.as_u64()?,
+        "code": code,
         "ansi": mode.get("ansi")?.as_bool()?,
         "on": mode.get("on")?.as_bool()?
     }))
@@ -5224,6 +5227,35 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_snapshot_normalizes_legacy_fallback_modes() {
+        let mut render_grid = json!({"active_screen": "primary", "modes": []});
+        let fallback = json!({
+            "active_screen": "alternate",
+            "modes": [
+                "bracketed_paste",
+                "unknown_mode",
+                {"code": 2027, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": false},
+                {"code": 32768, "ansi": false, "on": true},
+                {"code": "1000", "ansi": false, "on": true},
+                {"code": 1004, "ansi": "false", "on": true}
+            ]
+        });
+
+        merge_render_grid_protocol_state(&mut render_grid, &fallback);
+
+        assert_eq!(render_grid["active_screen"], "alternate");
+        assert_eq!(
+            render_grid["modes"],
+            json!([
+                {"code": 2004, "ansi": false, "on": true},
+                {"code": 2027, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": false}
+            ])
+        );
+    }
+
+    #[test]
     fn ghostty_vt_snapshot_emits_decodable_v1_mode_settings() {
         let native = json!({
             "parser": "ghostty-vt",
@@ -5258,13 +5290,7 @@ mod tests {
 
     #[test]
     fn renderer_text_fallback_preserves_explicit_disabled_modes() {
-        let grid = render_grid_from_text(
-            "surface-a",
-            47,
-            8,
-            2,
-            "ready\x1b[?2004h\x1b[?7;2004l",
-        );
+        let grid = render_grid_from_text("surface-a", 47, 8, 2, "ready\x1b[?2004h\x1b[?7;2004l");
 
         assert_eq!(
             grid["modes"],
@@ -5445,7 +5471,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_text_fallback_clears_cursor_shape_and_modes() {
+    fn renderer_text_fallback_tracks_disabled_cursor_shape_and_modes() {
         let grid = render_grid_from_text(
             "surface-a",
             52,
@@ -5455,7 +5481,14 @@ mod tests {
         );
         assert_eq!(grid["cursor"]["style"], "bar");
         assert_eq!(grid["cursor"]["blinking"], false);
-        assert_eq!(grid["modes"], json!([]));
+        assert_eq!(
+            grid["modes"],
+            json!([
+                {"code": 66, "ansi": false, "on": false},
+                {"code": 2004, "ansi": false, "on": false},
+                {"code": 1006, "ansi": false, "on": false}
+            ])
+        );
     }
 
     #[test]
