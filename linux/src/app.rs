@@ -54297,6 +54297,10 @@ fn legacy_method_changes_presented_model(method: &str) -> bool {
 mod render_activity_tests {
     use super::{method_changes_presented_model, AppState, TerminalStartupMode};
     use serde_json::json;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn model_mutation_activity_excludes_terminal_input() {
@@ -54430,6 +54434,119 @@ mod render_activity_tests {
         app.handle_legacy_v1("new_surface")
             .expect("legacy surface mutation");
         assert!(activity.model_mutation_generation() > before_legacy_read);
+    }
+
+    #[test]
+    fn agent_output_poll_records_prepared_runtime_state_changes() {
+        let directory = tempfile::tempdir().expect("agent runtime tempdir");
+        let provider = directory.path().join("fake-claude-stream");
+        fs::write(
+            &provider,
+            r#"#!/usr/bin/python3
+import json
+import sys
+import time
+
+for raw in sys.stdin:
+    json.loads(raw)
+    print(json.dumps({"type":"message_start","message":{"id":"message-1","role":"assistant"}}), flush=True)
+    print(json.dumps({"type":"assistant","message":{"id":"message-1","role":"assistant","content":[{"type":"text","text":"done"}]}}), flush=True)
+    time.sleep(0.5)
+    print(json.dumps({"type":"result","result":"done"}), flush=True)
+"#,
+        )
+        .expect("write fake Claude stream");
+        let mut permissions = fs::metadata(&provider)
+            .expect("fake provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&provider, permissions).expect("make fake provider executable");
+
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let created = app
+            .handle(
+                "surface.create",
+                &json!({
+                    "type": "agent-session",
+                    "provider": "claude",
+                    "executable": provider,
+                    "working_directory": directory.path(),
+                    "auto_start": false,
+                    "focus": true
+                }),
+            )
+            .expect("create agent session");
+        let surface_id = created["surface_id"].as_str().expect("surface id");
+        app.handle("agent_session.start", &json!({"surface_id": surface_id}))
+            .expect("start agent session");
+        app.handle(
+            "agent_session.send",
+            &json!({"surface_id": surface_id, "text": "reply"}),
+        )
+        .expect("send agent prompt");
+        app.handle(
+            "agent_session.output_delta",
+            &json!({"surface_id": surface_id, "cursor": 0}),
+        )
+        .expect("poll active agent output");
+        assert_eq!(
+            app.surfaces[surface_id]
+                .agent_session
+                .as_ref()
+                .expect("agent state")
+                .turn_in_flight,
+            true
+        );
+        let after_active_poll = activity.model_mutation_generation();
+        app.handle(
+            "agent_session.output_delta",
+            &json!({"surface_id": surface_id, "cursor": 0}),
+        )
+        .expect("poll unchanged active agent output");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            after_active_poll,
+            "an unchanged output poll must not request another GTK model refresh"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = app
+                .agent_session_runtimes
+                .get(surface_id)
+                .expect("agent runtime")
+                .snapshot();
+            if !snapshot.turn_in_flight && snapshot.transcript.contains("done") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "agent turn did not complete");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let before_poll = activity.model_mutation_generation();
+        app.handle(
+            "agent_session.output_delta",
+            &json!({"surface_id": surface_id, "cursor": 0}),
+        )
+        .expect("poll agent output");
+        assert_eq!(
+            app.surfaces[surface_id]
+                .agent_session
+                .as_ref()
+                .expect("agent state")
+                .turn_in_flight,
+            false
+        );
+        assert!(
+            activity.model_mutation_generation() > before_poll,
+            "preparation changed the presented agent state but did not wake the GTK model watcher"
+        );
     }
 }
 
