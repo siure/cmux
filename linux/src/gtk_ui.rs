@@ -340,6 +340,18 @@ impl GtkLocalRefresh {
                         .unwrap_or_default();
                     refresh.schedule_terminal_windows(window_ids);
                 }
+                let remote_tmux_output_targets = render_activity.take_remote_tmux_output_targets();
+                if !remote_tmux_output_targets.is_empty() {
+                    let window_ids = refresh
+                        .app_state
+                        .lock()
+                        .ok()
+                        .map(|mut app| {
+                            app.remote_tmux_output_window_ids(&remote_tmux_output_targets)
+                        })
+                        .unwrap_or_default();
+                    refresh.schedule_terminal_windows(window_ids);
+                }
                 glib::ControlFlow::Continue
             },
         ))

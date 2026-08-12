@@ -376,10 +376,15 @@ struct EventQueue {
     estimated_bytes: usize,
     overflowed: bool,
     render_activity: RenderActivity,
+    connection_key: String,
 }
 
 impl EventQueue {
     fn push(&mut self, event: RuntimeEvent) {
+        let targeted_pane_id = match &event {
+            RuntimeEvent::Message(ControlMessage::Output { pane_id, .. }) => Some(*pane_id),
+            _ => None,
+        };
         let bytes = match &event {
             RuntimeEvent::Message(message) => message.estimated_bytes(),
             RuntimeEvent::Stderr(stderr) => stderr.len(),
@@ -397,7 +402,12 @@ impl EventQueue {
         }
         self.estimated_bytes += bytes;
         self.events.push_back(event);
-        self.render_activity.record_model_mutation();
+        if let Some(pane_id) = targeted_pane_id {
+            self.render_activity
+                .record_remote_tmux_output(&self.connection_key, pane_id);
+        } else {
+            self.render_activity.record_model_mutation();
+        }
     }
 
     fn drain(&mut self) -> Vec<RuntimeEvent> {
@@ -414,7 +424,11 @@ pub(crate) struct RemoteTmuxRuntime {
 }
 
 impl RemoteTmuxRuntime {
-    pub(crate) fn spawn(mut command: Command, render_activity: RenderActivity) -> Result<Self> {
+    pub(crate) fn spawn(
+        mut command: Command,
+        render_activity: RenderActivity,
+        connection_key: String,
+    ) -> Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -438,6 +452,7 @@ impl RemoteTmuxRuntime {
             estimated_bytes: 0,
             overflowed: false,
             render_activity,
+            connection_key,
         }));
         spawn_stdout_reader(stdout, Arc::clone(&events));
         spawn_stderr_reader(stderr, Arc::clone(&events));
@@ -887,9 +902,9 @@ mod tests {
         }));
         assert!(render_activity.model_mutation_generation() > 0);
         assert_eq!(
-            render_activity.take_remote_tmux_connection_keys(),
-            HashSet::from([connection_key.to_string()]),
-            "remote tmux reader events must coalesce a targeted connection wake"
+            render_activity.take_remote_tmux_output_targets(),
+            HashSet::from([(connection_key.to_string(), 3)]),
+            "remote tmux reader events must coalesce a targeted pane wake"
         );
     }
 
@@ -916,8 +931,8 @@ mod tests {
             "continuous pane output must not request a global GTK model refresh"
         );
         assert_eq!(
-            render_activity.take_remote_tmux_connection_keys(),
-            HashSet::from([connection_key])
+            render_activity.take_remote_tmux_output_targets(),
+            HashSet::from([(connection_key, 3)])
         );
 
         queue.push(RuntimeEvent::Message(ControlMessage::WindowAdd {

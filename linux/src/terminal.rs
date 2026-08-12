@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
@@ -27,6 +27,7 @@ pub struct TerminalHandle {
 pub struct RenderActivity {
     terminal_output_generation: Arc<AtomicU64>,
     model_mutation_generation: Arc<AtomicU64>,
+    remote_tmux_output_targets: Arc<Mutex<HashSet<(String, u64)>>>,
 }
 
 impl RenderActivity {
@@ -46,6 +47,19 @@ impl RenderActivity {
     pub(crate) fn record_model_mutation(&self) {
         self.model_mutation_generation
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_remote_tmux_output(&self, connection_key: &str, pane_id: u64) {
+        if let Ok(mut targets) = self.remote_tmux_output_targets.lock() {
+            targets.insert((connection_key.to_string(), pane_id));
+        }
+    }
+
+    pub(crate) fn take_remote_tmux_output_targets(&self) -> HashSet<(String, u64)> {
+        self.remote_tmux_output_targets
+            .lock()
+            .map(|mut targets| std::mem::take(&mut *targets))
+            .unwrap_or_default()
     }
 }
 

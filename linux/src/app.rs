@@ -11987,8 +11987,8 @@ impl AppState {
             "tmux -CC attach-session -t {}",
             shell_word(session)
         ));
-        let runtime =
-            RemoteTmuxRuntime::spawn(command, self.render_activity.clone()).map_err(|error| {
+        let runtime = RemoteTmuxRuntime::spawn(command, self.render_activity.clone(), key.clone())
+            .map_err(|error| {
                 AppError::unavailable(format!(
                     "failed to attach remote tmux session {session} on {}: {error:#}",
                     host.destination
@@ -12064,6 +12064,34 @@ impl AppState {
         for key in reconnect {
             self.remote_tmux_schedule_reconnect(&key);
         }
+    }
+
+    pub(crate) fn remote_tmux_output_window_ids(
+        &mut self,
+        output_targets: &HashSet<(String, u64)>,
+    ) -> HashSet<String> {
+        self.drain_remote_tmux_events();
+        output_targets
+            .iter()
+            .filter_map(|(key, pane_id)| {
+                let connection = self.remote_tmux_connections.get(key)?;
+                let workspace_id = connection.mirrored_workspace_id.as_ref()?;
+                let workspace = self.workspaces.get(workspace_id)?;
+                let window = self.windows.iter().find(|window| {
+                    window.id == workspace.window_id
+                        && window.selected_workspace.as_ref() == Some(workspace_id)
+                })?;
+                let surface_id = connection.surface_id_by_pane.get(pane_id)?;
+                let pane_id = self.surfaces.get(surface_id)?.pane_id.as_str();
+                let pane = self.panes.get(pane_id)?;
+                (pane.selected_surface.as_ref() == Some(surface_id)
+                    && workspace
+                        .zoomed_pane
+                        .as_ref()
+                        .is_none_or(|zoomed_pane| zoomed_pane == pane_id))
+                .then(|| window.id.clone())
+            })
+            .collect()
     }
 
     fn apply_remote_tmux_runtime_event(&mut self, key: &str, event: RuntimeEvent) {
@@ -58574,6 +58602,72 @@ mod embedded_terminal_action_tests {
         if let Some(terminal) = app.surfaces[&background_surface].terminal.as_ref() {
             let _ = terminal.kill();
         }
+    }
+
+    #[test]
+    fn remote_tmux_event_wake_targets_only_the_mirrored_window() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+        let host = RemoteTmuxHostSpec {
+            destination: "remote.example".to_string(),
+            port: None,
+            identity_file: None,
+        };
+        app.ensure_remote_tmux_session(&host, "work");
+        let affected_window_id = app.current_window.clone();
+        let mirrored = app
+            .remote_tmux_mirror_session_in_window(&host, "work", &affected_window_id, false, None)
+            .expect("mirror");
+        let mirrored_workspace_id = mirrored["workspace_id"]
+            .as_str()
+            .expect("mirrored workspace id")
+            .to_string();
+        let key = AppState::remote_tmux_connection_key(&host, "work");
+        let layout = parse_remote_tmux_layout("80x24,0,0,7").expect("layout");
+        let connection = app
+            .remote_tmux_connections
+            .get_mut(&key)
+            .expect("connection");
+        connection.window_ids = vec![3];
+        connection.active_window_id = Some(3);
+        connection.windows.insert(
+            3,
+            RemoteTmuxWindowState {
+                id: 3,
+                index: 0,
+                name: "main".to_string(),
+                active: true,
+                layout: Some(layout),
+                active_pane_id: Some(7),
+            },
+        );
+        app.reconcile_remote_tmux_surfaces(&key);
+        let background_workspace_id = app
+            .workspace_create(&json!({"title": "Background", "focus": true}))
+            .expect("background workspace")["workspace_id"]
+            .as_str()
+            .expect("background workspace id")
+            .to_string();
+        let unrelated_window_id = app.create_window_internal("Unrelated".to_string());
+
+        let hidden_window_ids = app.remote_tmux_output_window_ids(&HashSet::from([
+            (key.clone(), 7),
+            ("unknown-connection".to_string(), 99),
+        ]));
+        assert!(
+            hidden_window_ids.is_empty(),
+            "output in an unselected remote workspace must not refresh its visible window"
+        );
+
+        app.select_workspace_by_id(&mirrored_workspace_id)
+            .expect("select mirrored workspace");
+        let window_ids = app.remote_tmux_output_window_ids(&HashSet::from([(
+            AppState::remote_tmux_connection_key(&host, "work"),
+            7,
+        )]));
+
+        assert_eq!(window_ids, HashSet::from([affected_window_id]));
+        assert!(!window_ids.contains(&unrelated_window_id));
+        assert_ne!(mirrored_workspace_id, background_workspace_id);
     }
 
     #[test]
