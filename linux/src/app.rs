@@ -54675,6 +54675,88 @@ mod render_activity_tests {
     }
 
     #[test]
+    fn workspace_palette_removals_record_presented_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_home = temp.path().join("config");
+        let snapshot_path = temp.path().join("session.json");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "app::render_activity_tests::workspace_palette_mutation_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("XDG_CONFIG_HOME", config_home)
+            .env("CMUX_SESSION_SNAPSHOT_PATH", snapshot_path)
+            .output()
+            .expect("run isolated workspace palette probe");
+
+        assert!(
+            output.status.success(),
+            "workspace palette probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn workspace_palette_mutation_probe_child() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        app.handle(
+            "settings.workspace_colors.color.set",
+            &json!({"name": "Model Wake", "color": "#123456"}),
+        )
+        .expect("create custom workspace color");
+
+        let before_remove = activity.model_mutation_generation();
+        let removed = app
+            .handle(
+                "settings.workspace_colors.color.remove",
+                &json!({"name": "Model Wake"}),
+            )
+            .expect("remove custom workspace color");
+        assert!(!removed["colors"]
+            .as_array()
+            .expect("workspace colors")
+            .iter()
+            .any(|entry| entry["name"] == "Model Wake"));
+        assert!(
+            activity.model_mutation_generation() > before_remove,
+            "removing a workspace color must wake the GTK model watcher"
+        );
+
+        app.handle(
+            "settings.workspace_colors.color.set",
+            &json!({"name": "Model Wake", "color": "#123456"}),
+        )
+        .expect("recreate custom workspace color");
+        let before_reset = activity.model_mutation_generation();
+        let reset = app
+            .handle("settings.workspace_colors.palette.reset", &json!({}))
+            .expect("reset workspace palette");
+        assert_eq!(
+            reset["colors"].as_array().expect("workspace colors").len(),
+            16
+        );
+        assert!(!reset["colors"]
+            .as_array()
+            .expect("workspace colors")
+            .iter()
+            .any(|entry| entry["name"] == "Model Wake"));
+        assert!(
+            activity.model_mutation_generation() > before_reset,
+            "resetting the workspace palette must wake the GTK model watcher"
+        );
+    }
+
+    #[test]
     #[ignore = "helper executed in an isolated child process"]
     fn resume_approval_mutation_probe_child() {
         let mut app = AppState::with_paths_and_terminal_startup(
