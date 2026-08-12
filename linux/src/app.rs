@@ -7493,6 +7493,19 @@ impl AppState {
         self.render_activity.clone()
     }
 
+    pub(crate) fn fallback_terminal_output_generations(&self) -> HashMap<String, u64> {
+        self.surfaces
+            .iter()
+            .filter(|(_, surface)| surface.kind == SurfaceKind::Terminal)
+            .filter_map(|(surface_id, surface)| {
+                Some((
+                    surface_id.clone(),
+                    surface.terminal.as_ref()?.output_generation(),
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn handle_renderer_read(
         &mut self,
         method: &str,
@@ -39012,6 +39025,11 @@ impl AppState {
                         "terminal_command": surface.terminal_command,
                         "terminal_foreground_pid": surface.embedded_terminal_foreground_pid,
                         "terminal_env": terminal_env_value(&surface.terminal_env),
+                        "terminal_output_generation": surface
+                            .terminal
+                            .as_ref()
+                            .map(TerminalHandle::output_generation)
+                            .unwrap_or(0),
                         "remote_tmux_manual_io": surface.terminal_env.contains_key(REMOTE_TMUX_CONNECTION_ENV),
                         "terminal_progress": embedded_terminal_progress_value(surface.embedded_terminal_progress.as_ref()),
                         "terminal_search": embedded_terminal_search_value(surface.embedded_terminal_search.as_ref()),

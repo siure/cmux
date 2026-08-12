@@ -20,6 +20,7 @@ pub struct TerminalHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     title_events: Arc<Mutex<Vec<String>>>,
+    output_generation: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Default)]
@@ -30,7 +31,7 @@ pub struct RenderActivity {
 
 impl RenderActivity {
     pub fn terminal_output_generation(&self) -> u64 {
-        self.terminal_output_generation.load(Ordering::Relaxed)
+        self.terminal_output_generation.load(Ordering::Acquire)
     }
 
     pub fn model_mutation_generation(&self) -> u64 {
@@ -39,7 +40,7 @@ impl RenderActivity {
 
     pub(crate) fn record_terminal_output(&self) {
         self.terminal_output_generation
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn record_model_mutation(&self) {
@@ -68,6 +69,10 @@ impl Default for TerminalSize {
 }
 
 impl TerminalHandle {
+    pub fn output_generation(&self) -> u64 {
+        self.output_generation.load(Ordering::Acquire)
+    }
+
     pub fn send_text(&self, text: &str) -> Result<()> {
         let mut writer = self
             .writer
@@ -574,6 +579,8 @@ fn spawn_terminal_inner(
         .context("failed to take PTY writer")?;
     let title_events = Arc::new(Mutex::new(Vec::new()));
     let reader_title_events = Arc::clone(&title_events);
+    let output_generation = Arc::new(AtomicU64::new(0));
+    let reader_output_generation = Arc::clone(&output_generation);
 
     thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
@@ -595,6 +602,9 @@ fn spawn_terminal_inner(
                             out.replace_range(..keep_from, "");
                         }
                         drop(out);
+                        // Publish the surface-local generation before the global wake counter so
+                        // the GTK watcher can safely discover which window needs refreshing.
+                        reader_output_generation.fetch_add(1, Ordering::Release);
                         render_activity.record_terminal_output();
                     }
                 }
@@ -608,6 +618,7 @@ fn spawn_terminal_inner(
         writer: Arc::new(Mutex::new(writer)),
         child: Arc::new(Mutex::new(child)),
         title_events,
+        output_generation,
     })
 }
 

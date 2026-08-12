@@ -265,7 +265,9 @@ struct GtkLocalRefresh {
     desktop_notifications: Rc<RefCell<Option<DesktopNotificationTracker>>>,
     presented_model_window: Rc<RefCell<Option<String>>>,
     global_visibility: Rc<RefCell<GtkGlobalVisibilityState>>,
-    pending: Rc<Cell<bool>>,
+    idle_pending: Rc<Cell<bool>>,
+    pending_full_sync: Rc<Cell<bool>>,
+    pending_terminal_window_ids: Rc<RefCell<HashSet<String>>>,
 }
 
 impl GtkLocalRefresh {
@@ -289,7 +291,9 @@ impl GtkLocalRefresh {
             desktop_notifications: Rc::clone(desktop_notifications),
             presented_model_window: Rc::clone(presented_model_window),
             global_visibility: Rc::clone(global_visibility),
-            pending: Rc::new(Cell::new(false)),
+            idle_pending: Rc::new(Cell::new(false)),
+            pending_full_sync: Rc::new(Cell::new(false)),
+            pending_terminal_window_ids: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
@@ -315,10 +319,26 @@ impl GtkLocalRefresh {
                 let model_changed = current_model_generation != observed_model_generation;
                 let terminal_changed = observes_terminal_output
                     && current_terminal_generation != observed_terminal_generation;
-                if model_changed || terminal_changed {
+                if model_changed {
                     observed_model_generation = current_model_generation;
-                    observed_terminal_generation = current_terminal_generation;
                     refresh.schedule();
+                }
+                if terminal_changed {
+                    observed_terminal_generation = current_terminal_generation;
+                    let generations = refresh
+                        .app_state
+                        .lock()
+                        .ok()
+                        .map(|app| app.fallback_terminal_output_generations())
+                        .unwrap_or_default();
+                    let window_ids = refresh
+                        .hosts
+                        .upgrade()
+                        .map(|hosts| {
+                            affected_fallback_terminal_window_ids(&hosts.borrow(), &generations)
+                        })
+                        .unwrap_or_default();
+                    refresh.schedule_terminal_windows(window_ids);
                 }
                 glib::ControlFlow::Continue
             },
@@ -326,42 +346,112 @@ impl GtkLocalRefresh {
     }
 
     fn schedule(&self) {
-        if self.pending.replace(true) {
+        self.pending_full_sync.set(true);
+        self.schedule_idle();
+    }
+
+    fn schedule_terminal_window(&self, window_id: String) {
+        self.pending_terminal_window_ids
+            .borrow_mut()
+            .insert(window_id);
+        self.schedule_idle();
+    }
+
+    fn schedule_terminal_windows(&self, window_ids: HashSet<String>) {
+        if window_ids.is_empty() {
+            return;
+        }
+        self.pending_terminal_window_ids
+            .borrow_mut()
+            .extend(window_ids);
+        self.schedule_idle();
+    }
+
+    fn schedule_idle(&self) {
+        if self.idle_pending.replace(true) {
             return;
         }
         let refresh = self.clone();
         glib::idle_add_local_once(move || {
-            refresh.pending.set(false);
+            refresh.idle_pending.set(false);
             let Some(hosts) = refresh.hosts.upgrade() else {
                 return;
             };
-            sync_gtk_window_hosts(
-                &refresh.application,
-                &refresh.app_state,
-                refresh.renderer_mode,
-                refresh.ui_mode,
-                &hosts,
-                &refresh.desktop_notifications,
-                &refresh.presented_model_window,
-                &refresh.global_visibility,
-                &refresh,
-            );
+            let full_sync = refresh.pending_full_sync.replace(false);
+            let terminal_window_ids =
+                std::mem::take(&mut *refresh.pending_terminal_window_ids.borrow_mut());
+            if full_sync {
+                sync_gtk_window_hosts(
+                    &refresh.application,
+                    &refresh.app_state,
+                    refresh.renderer_mode,
+                    refresh.ui_mode,
+                    &hosts,
+                    &refresh.desktop_notifications,
+                    &refresh.presented_model_window,
+                    &refresh.global_visibility,
+                    &refresh,
+                );
+            } else {
+                refresh_gtk_window_host_ids(
+                    &refresh.app_state,
+                    refresh.renderer_mode,
+                    refresh.ui_mode,
+                    &hosts,
+                    &terminal_window_ids,
+                    &refresh,
+                );
+            }
         });
     }
 }
 
-fn fallback_terminal_output_generation(
-    app_state: &Arc<Mutex<AppState>>,
+fn fallback_terminal_output_generations(
+    snapshot: &Value,
     renderer_mode: GtkRendererMode,
-) -> u64 {
+) -> HashMap<String, u64> {
     if renderer_mode != GtkRendererMode::Gtk {
-        return 0;
+        return HashMap::new();
     }
-    app_state
-        .lock()
-        .ok()
-        .map(|app| app.render_activity().terminal_output_generation())
-        .unwrap_or(0)
+    snapshot
+        .get("surface_views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|view| value_bool_or(view, "visible", true))
+        .filter(|view| {
+            view.get("kind")
+                .or_else(|| view.get("type"))
+                .and_then(Value::as_str)
+                == Some("terminal")
+        })
+        .filter_map(|view| {
+            Some((
+                surface_id_or_ref(view)?,
+                view.get("terminal_output_generation")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            ))
+        })
+        .collect()
+}
+
+fn affected_fallback_terminal_window_ids(
+    hosts: &HashMap<String, GtkWindowHost>,
+    generations: &HashMap<String, u64>,
+) -> HashSet<String> {
+    hosts
+        .iter()
+        .filter(|(_, host)| host.window.is_visible())
+        .filter(|(_, host)| {
+            host.last_fallback_terminal_output_generations
+                .iter()
+                .any(|(surface_id, generation)| {
+                    generations.get(surface_id).copied().unwrap_or(0) != *generation
+                })
+        })
+        .map(|(window_id, _)| window_id.clone())
+        .collect()
 }
 
 struct GtkWindowHost {
@@ -388,7 +478,7 @@ struct GtkWindowHost {
     last_header_rebuild_key: Value,
     last_overlay_rebuild_key: Value,
     last_right_sidebar_focus_generation: u64,
-    last_terminal_output_generation: u64,
+    last_fallback_terminal_output_generations: HashMap<String, u64>,
 }
 
 type GtkWindowHosts = Rc<RefCell<HashMap<String, GtkWindowHost>>>;
@@ -677,7 +767,6 @@ fn sync_gtk_window_hosts(
 
     let mut selected_snapshot = None;
     let mut selected_window_id = None;
-    let terminal_output_generation = fallback_terminal_output_generation(app_state, renderer_mode);
     for row in rows {
         let Some(window_id) = model_window_id(&row).map(str::to_string) else {
             continue;
@@ -696,7 +785,6 @@ fn sync_gtk_window_hosts(
                 &window_id,
                 &row,
                 &snapshot,
-                terminal_output_generation,
                 local_refresh,
             );
             if !global_visibility.borrow().hidden {
@@ -711,7 +799,6 @@ fn sync_gtk_window_hosts(
                 ui_mode,
                 &row,
                 &snapshot,
-                terminal_output_generation,
                 local_refresh,
             );
         }
@@ -742,6 +829,47 @@ fn sync_gtk_window_hosts(
     true
 }
 
+fn refresh_gtk_window_host_ids(
+    app_state: &Arc<Mutex<AppState>>,
+    renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
+    hosts: &GtkWindowHosts,
+    window_ids: &HashSet<String>,
+    local_refresh: &GtkLocalRefresh,
+) {
+    if window_ids.is_empty() {
+        return;
+    }
+    let rows = model_window_rows(app_state)
+        .into_iter()
+        .filter_map(|row| Some((model_window_id(&row)?.to_string(), row)))
+        .collect::<HashMap<_, _>>();
+    for window_id in window_ids {
+        let Some(row) = rows.get(window_id) else {
+            continue;
+        };
+        if !hosts
+            .borrow()
+            .get(window_id)
+            .is_some_and(|host| host.window.is_visible())
+        {
+            continue;
+        }
+        let snapshot = snapshot_or_error(app_state, renderer_mode, window_id);
+        if let Some(host) = hosts.borrow_mut().get_mut(window_id) {
+            refresh_gtk_window_host(
+                host,
+                app_state,
+                renderer_mode,
+                ui_mode,
+                row,
+                &snapshot,
+                local_refresh,
+            );
+        }
+    }
+}
+
 fn create_gtk_window_host(
     application: &gtk::Application,
     app_state: &Arc<Mutex<AppState>>,
@@ -750,7 +878,6 @@ fn create_gtk_window_host(
     window_id: &str,
     row: &Value,
     snapshot: &Value,
-    terminal_output_generation: u64,
     local_refresh: &GtkLocalRefresh,
 ) -> GtkWindowHost {
     let pane_allocations = Rc::new(RefCell::new(HashMap::new()));
@@ -769,6 +896,13 @@ fn create_gtk_window_host(
         .default_height(GTK_APP_DEFAULT_HEIGHT)
         .fullscreened(model_window_fullscreen(row))
         .build();
+    if renderer_mode == GtkRendererMode::Gtk {
+        let focus_refresh = local_refresh.clone();
+        let focus_window_id = window_id.to_string();
+        window.connect_notify_local(Some("focus-widget"), move |_, _| {
+            focus_refresh.schedule_terminal_window(focus_window_id.clone());
+        });
+    }
     connect_terminal_keys(
         &window,
         app_state,
@@ -906,7 +1040,10 @@ fn create_gtk_window_host(
         last_header_rebuild_key: shell::header_rebuild_key(snapshot),
         last_overlay_rebuild_key: shell::overlay_rebuild_key(snapshot),
         last_right_sidebar_focus_generation: 0,
-        last_terminal_output_generation: terminal_output_generation,
+        last_fallback_terminal_output_generations: fallback_terminal_output_generations(
+            snapshot,
+            renderer_mode,
+        ),
     };
     sync_resume_command_prompts(&mut host, snapshot, app_state);
     sync_close_confirmation_prompts(&mut host, snapshot, app_state);
@@ -920,7 +1057,6 @@ fn refresh_gtk_window_host(
     ui_mode: GtkUiMode,
     row: &Value,
     snapshot: &Value,
-    terminal_output_generation: u64,
     local_refresh: &GtkLocalRefresh,
 ) {
     host.window.set_title(Some(model_window_title(row)));
@@ -960,8 +1096,9 @@ fn refresh_gtk_window_host(
         widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-right-sidebar-input")
             && !focus_right_sidebar
             && !right_structure_changed;
+    let fallback_output_generations = fallback_terminal_output_generations(snapshot, renderer_mode);
     let fallback_terminal_output_changed =
-        terminal_output_generation != host.last_terminal_output_generation;
+        fallback_output_generations != host.last_fallback_terminal_output_generations;
 
     if host.last_left_rebuild_key != rebuild_keys.left && !left_rebuild_suppressed {
         replace_snapshot_slot_child(
@@ -1064,7 +1201,7 @@ fn refresh_gtk_window_host(
             host.last_pane_rebuild_keys = pane_rebuild_keys;
         }
         if !main_rebuild_suppressed {
-            host.last_terminal_output_generation = terminal_output_generation;
+            host.last_fallback_terminal_output_generations = fallback_output_generations;
         }
     }
     if host.last_right_rebuild_key != rebuild_keys.right && !right_rebuild_suppressed {
@@ -18208,7 +18345,6 @@ mod tests {
             "window-a",
             &row,
             &first,
-            0,
             &local_refresh,
         );
         let mounted_main = host
@@ -18225,7 +18361,6 @@ mod tests {
             GtkUiMode::Next,
             &row,
             &second,
-            0,
             &local_refresh,
         );
         assert_eq!(
@@ -18247,7 +18382,6 @@ mod tests {
             GtkUiMode::Next,
             &row,
             &first,
-            0,
             &local_refresh,
         );
         assert_eq!(
@@ -21157,7 +21291,6 @@ mod tests {
             "window-a",
             &row,
             &snapshot,
-            0,
             &local_refresh,
         );
 
@@ -21169,7 +21302,6 @@ mod tests {
             GtkUiMode::Next,
             &row,
             &snapshot,
-            1,
             &local_refresh,
         );
         GTK_TEST_PANE_SURFACE_SYNC_COUNT.with(|count| {
@@ -21180,6 +21312,41 @@ mod tests {
             );
         });
         host.window.destroy();
+    }
+
+    #[test]
+    fn gtk_fallback_output_generations_include_only_visible_terminals() {
+        let snapshot = json!({
+            "surface_views": [{
+                "surface_id": "visible-terminal",
+                "kind": "terminal",
+                "visible": true,
+                "terminal_output_generation": 7
+            }, {
+                "surface_id": "hidden-terminal",
+                "kind": "terminal",
+                "visible": false,
+                "terminal_output_generation": 9
+            }, {
+                "surface_id": "agent-transport",
+                "kind": "agent-session",
+                "visible": true,
+                "terminal_output_generation": 11
+            }, {
+                "surface_id": "browser",
+                "kind": "browser",
+                "visible": true,
+                "terminal_output_generation": 13
+            }]
+        });
+
+        assert_eq!(
+            fallback_terminal_output_generations(&snapshot, GtkRendererMode::Gtk),
+            HashMap::from([("visible-terminal".to_string(), 7)])
+        );
+        assert!(
+            fallback_terminal_output_generations(&snapshot, GtkRendererMode::Ghostty).is_empty()
+        );
     }
 
     fn assert_gtk_external_model_mutations_refresh_before_safety_sync(

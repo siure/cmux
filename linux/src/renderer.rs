@@ -648,6 +648,10 @@ fn surface_views(layout: &Value, surfaces: &Value) -> Value {
                 "terminal_initial_input": surface.and_then(|row| row.get("terminal_initial_input")).cloned().unwrap_or(Value::Null),
                 "terminal_restore_output": surface.and_then(|row| row.get("terminal_restore_output")).cloned().unwrap_or(Value::Null),
                 "terminal_env": surface.and_then(|row| row.get("terminal_env")).cloned().unwrap_or(Value::Null),
+                "terminal_output_generation": surface
+                    .and_then(|row| row.get("terminal_output_generation"))
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
                 "remote_tmux_manual_io": surface.and_then(|row| row.get("remote_tmux_manual_io")).cloned().unwrap_or_else(|| json!(false)),
                 "embedded_terminal_size": surface.and_then(|row| row.get("embedded_terminal_size")).cloned().unwrap_or(Value::Null),
                 "terminal_size": surface.and_then(|row| row.get("terminal_size")).cloned().unwrap_or(Value::Null),
