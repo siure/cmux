@@ -54365,6 +54365,7 @@ fn legacy_method_changes_presented_model(method: &str) -> bool {
 mod render_activity_tests {
     use super::{method_changes_presented_model, AppState, TerminalStartupMode};
     use serde_json::json;
+    use std::collections::HashMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::thread;
@@ -54502,6 +54503,113 @@ mod render_activity_tests {
         app.handle_legacy_v1("new_surface")
             .expect("legacy surface mutation");
         assert!(activity.model_mutation_generation() > before_legacy_read);
+    }
+
+    #[test]
+    fn close_confirmation_transitions_record_presented_model_mutations() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let second_window = app
+            .handle("window.create", &json!({"title": "Second"}))
+            .expect("create second window")["window_id"]
+            .as_str()
+            .expect("second window id")
+            .to_string();
+
+        let before_confirmation = activity.model_mutation_generation();
+        let blocked = app
+            .handle(
+                "debug.window.close_request",
+                &json!({"window_id": second_window, "source": "shortcut"}),
+            )
+            .expect("enqueue close confirmation");
+        assert_eq!(blocked["confirmation_required"], true);
+        assert!(
+            activity.model_mutation_generation() > before_confirmation,
+            "presenting a close confirmation must wake the GTK model watcher"
+        );
+
+        let confirmation_id = blocked["confirmation"]["id"]
+            .as_str()
+            .expect("confirmation id")
+            .to_string();
+        let before_accept = activity.model_mutation_generation();
+        let accepted = app
+            .handle(
+                "app.close_confirmation.reply",
+                &json!({"id": confirmation_id, "confirmed": true}),
+            )
+            .expect("accept close confirmation");
+        assert_eq!(accepted["closed"], true);
+        assert!(!app.windows.iter().any(|window| window.id == second_window));
+        assert!(
+            activity.model_mutation_generation() > before_accept,
+            "accepted close topology must wake the GTK model watcher"
+        );
+    }
+
+    #[test]
+    fn surface_send_text_only_records_a_model_mutation_when_it_resumes_hibernation() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let surface = app.surfaces.get_mut(&surface_id).expect("surface");
+        surface.resume_binding = Some(super::ResumeBinding {
+            name: Some("Codex".to_string()),
+            kind: Some("codex".to_string()),
+            command: "printf resumed".to_string(),
+            cwd: None,
+            checkpoint_id: Some("checkpoint-input-resume".to_string()),
+            source: Some("agent-hook".to_string()),
+            environment: HashMap::new(),
+            auto_resume: true,
+            approval_policy: Some("auto".to_string()),
+            approval_record_id: None,
+            updated_at: 1.0,
+        });
+        surface.agent_hibernation = Some(super::AgentHibernationSurfaceState {
+            hibernated_at_ms: 1,
+            last_activity_ms: 1,
+        });
+        surface.resume_restore_state = Some("hibernated".to_string());
+
+        let before_resume = activity.model_mutation_generation();
+        let resumed = app
+            .handle(
+                "surface.send_text",
+                &json!({"surface_id": surface_id, "text": "continue"}),
+            )
+            .expect("resume through terminal input");
+        assert_eq!(resumed["resumed"], true);
+        assert!(app.surfaces[&surface_id].agent_hibernation.is_none());
+        assert!(
+            activity.model_mutation_generation() > before_resume,
+            "hibernation resume hidden inside terminal input must wake the GTK model watcher"
+        );
+
+        let before_pure_input = activity.model_mutation_generation();
+        let pure_input = app
+            .handle(
+                "surface.send_text",
+                &json!({"surface_id": surface_id, "text": "again"}),
+            )
+            .expect("pure terminal input");
+        assert_eq!(pure_input["resumed"], false);
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_pure_input,
+            "ordinary terminal input must stay off the presented-model hot path"
+        );
     }
 
     #[test]

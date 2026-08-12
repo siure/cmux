@@ -29821,6 +29821,109 @@ fn renderer_snapshot_text_fallback_restores_primary_after_alternate_screen() {
 }
 
 #[test]
+fn ghostty_vt_adapter_preserves_active_screen_across_transcript_truncation() {
+    let server = start_server();
+    let fixture = tempfile::tempdir().expect("active-screen fixture");
+    let ready = fixture.path().join("alternate-ready");
+    let ready_text = ready.display().to_string();
+    let command = format!(
+        "printf '\\033[?1049h'; head -c 1100000 /dev/zero | tr '\\000' x; printf '\\nCMUX_ALT_TAIL\\n'; touch '{}'; IFS= read -r _; printf '\\033[?1049lCMUX_PRIMARY_RESTORED\\n'; sleep 1",
+        ready_text.replace('\'', "'\\''")
+    );
+    let created = rpc(
+        &server.socket,
+        "surface.create",
+        json!({
+            "type": "terminal",
+            "title": "truncated alternate screen",
+            "command": command
+        }),
+    );
+    let surface_id = created["surface_id"].as_str().expect("surface id");
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !ready.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        ready.exists(),
+        "alternate-screen fixture did not become ready"
+    );
+    let retained = rpc(
+        &server.socket,
+        "surface.read_text",
+        json!({"surface_id": surface_id, "raw": true}),
+    )["text"]
+        .as_str()
+        .expect("retained transcript")
+        .to_string();
+    assert!(retained.contains("CMUX_ALT_TAIL"));
+    assert!(
+        !retained.contains("\u{1b}[?1049h"),
+        "fixture did not truncate the alternate-screen entry sequence"
+    );
+
+    let alternate = rpc(
+        &server.socket,
+        "renderer.snapshot",
+        json!({"backend": "ghostty-vt"}),
+    );
+    let alternate_view = alternate["surface_views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["surface_id"].as_str() == Some(surface_id))
+        .unwrap_or_else(|| panic!("terminal view missing: {alternate}"));
+    if alternate_view.get("ghostty_vt_error").is_some() {
+        assert!(alternate_view["ghostty_vt_error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("libghostty-vt was not found"));
+        eprintln!("SKIP: libghostty-vt is not available");
+        return;
+    }
+    assert_eq!(
+        alternate_view["render_grid"]["active_screen"], "alternate",
+        "truncated replay lost authoritative alternate-screen state: {alternate_view}"
+    );
+
+    rpc(
+        &server.socket,
+        "surface.send_text",
+        json!({"surface_id": surface_id, "text": "continue\\n"}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let restored = loop {
+        let snapshot = rpc(
+            &server.socket,
+            "renderer.snapshot",
+            json!({"backend": "ghostty-vt"}),
+        );
+        let view = snapshot["surface_views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["surface_id"].as_str() == Some(surface_id))
+            .expect("restored terminal view");
+        if view["render_grid"]["active_screen"] == "primary" {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "alternate-screen exit did not restore primary: {view}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let restored_view = restored["surface_views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["surface_id"].as_str() == Some(surface_id))
+        .expect("restored terminal view");
+    assert_eq!(restored_view["render_grid"]["active_screen"], "primary");
+}
+
+#[test]
 fn renderer_snapshot_text_fallback_models_partial_display_erase() {
     let server = start_server();
     let expected = "CMUX_ERASE_ABCZ";
