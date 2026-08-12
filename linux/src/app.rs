@@ -19703,6 +19703,10 @@ impl AppState {
                     .map(|mode| json!({"code": mode.code, "ansi": mode.ansi, "on": mode.on}))
                     .collect(),
             );
+            if let Some(cursor) = terminal.cursor_presentation() {
+                value["cursor_presentation"] =
+                    json!({"style": cursor.style, "blinking": cursor.blinking});
+            }
         }
         Ok(value)
     }

@@ -97,6 +97,7 @@ struct RenderGridScreen {
     cursor_blinking: bool,
     modes: HashMap<&'static str, bool>,
     style: RenderGridStyle,
+    viewport_rows: usize,
 }
 
 impl Default for RenderGridScreen {
@@ -112,6 +113,7 @@ impl Default for RenderGridScreen {
             cursor_blinking: false,
             modes: HashMap::new(),
             style: RenderGridStyle::default(),
+            viewport_rows: 1,
         }
     }
 }
@@ -883,7 +885,7 @@ pub(crate) fn render_grid_from_text_with_scrollback(
 ) -> Value {
     let columns = usize::from(columns.max(1));
     let rows = usize::from(rows.max(1));
-    let screen = render_grid_screen(text);
+    let screen = render_grid_screen(text, rows);
     let lines = screen.render_lines();
     let viewport_start = lines.len().saturating_sub(rows);
     let viewport_end = viewport_start.saturating_add(rows);
@@ -935,8 +937,11 @@ pub(crate) fn render_grid_from_text_with_scrollback(
     value
 }
 
-fn render_grid_screen(text: &str) -> RenderGridScreen {
-    let mut screen = RenderGridScreen::default();
+fn render_grid_screen(text: &str, viewport_rows: usize) -> RenderGridScreen {
+    let mut screen = RenderGridScreen {
+        viewport_rows: viewport_rows.max(1),
+        ..RenderGridScreen::default()
+    };
     screen.current_line_mut();
     let chars = text.chars().collect::<Vec<_>>();
     let mut index = 0;
@@ -1343,7 +1348,11 @@ impl RenderGridScreen {
     }
 
     fn reset(&mut self) {
-        *self = Self::default();
+        let viewport_rows = self.viewport_rows;
+        *self = Self {
+            viewport_rows,
+            ..Self::default()
+        };
         self.current_line_mut();
     }
 
@@ -1376,7 +1385,9 @@ impl RenderGridScreen {
             }
             'G' => self.active_buffer_mut().col = csi_position(params.first().copied()),
             'H' | 'f' => {
-                let row = csi_position(params.first().copied());
+                let row = self
+                    .viewport_origin()
+                    .saturating_add(csi_position(params.first().copied()));
                 let col = csi_position(params.get(1).copied());
                 let buffer = self.active_buffer_mut();
                 buffer.row = row;
@@ -1393,6 +1404,13 @@ impl RenderGridScreen {
             'u' => self.restore_cursor(),
             _ => {}
         }
+    }
+
+    fn viewport_origin(&self) -> usize {
+        self.active_buffer()
+            .lines
+            .len()
+            .saturating_sub(self.viewport_rows)
     }
 
     fn apply_private_mode(&mut self, params: &[usize], enable: bool) {
@@ -1863,6 +1881,7 @@ fn attach_ghostty_vt_snapshot(
             .filter_map(render_grid_v1_mode_setting)
             .collect::<Vec<_>>()
     });
+    let authoritative_cursor_presentation = value.get("cursor_presentation");
     if let Some(mut render_grid) =
         render_grid_from_ghostty_vt_snapshot(surface_id, state_seq, &value)
     {
@@ -1873,8 +1892,13 @@ fn attach_ghostty_vt_snapshot(
             if authoritative_modes.is_none() {
                 merge_render_grid_protocol_state(&mut render_grid, fallback_render_grid);
             }
-            merge_render_grid_cursor_presentation(&mut render_grid, fallback_render_grid);
+            if authoritative_cursor_presentation.is_none() {
+                merge_render_grid_cursor_presentation(&mut render_grid, fallback_render_grid);
+            }
             merge_render_grid_scrollback(&mut render_grid, fallback_render_grid);
+        }
+        if let Some(cursor_presentation) = authoritative_cursor_presentation {
+            merge_render_grid_cursor_presentation(&mut render_grid, cursor_presentation);
         }
         object.insert("render_grid".to_string(), render_grid);
     }
@@ -1916,9 +1940,7 @@ fn merge_render_grid_cursor_presentation(render_grid: &mut Value, fallback: &Val
     let Some(target) = render_grid.get_mut("cursor").and_then(Value::as_object_mut) else {
         return;
     };
-    let Some(source) = fallback.get("cursor") else {
-        return;
-    };
+    let source = fallback.get("cursor").unwrap_or(fallback);
     if let Some(style) = source
         .get("style")
         .and_then(Value::as_str)
@@ -5529,7 +5551,7 @@ mod tests {
 
         assert_eq!(grid["cursor"]["row"], 0, "grid was {grid}");
         assert_eq!(grid["cursor"]["column"], 3, "grid was {grid}");
-        assert_eq!(grid["row_spans"][0]["text"], "top", "grid was {grid}");
+        assert_eq!(grid["row_spans"][0]["text"], "tope-2", "grid was {grid}");
     }
 
     #[test]

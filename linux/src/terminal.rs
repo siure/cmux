@@ -35,6 +35,16 @@ pub(crate) struct TerminalModeSetting {
     pub on: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalCursorPresentation {
+    pub style: &'static str,
+    pub blinking: bool,
+}
+
+const CURSOR_PRESENTATION_KNOWN: u64 = 1;
+const CURSOR_PRESENTATION_STYLE_SHIFT: usize = 1;
+const CURSOR_PRESENTATION_BLINKING: u64 = 1 << 3;
+
 #[derive(Clone)]
 pub struct TerminalHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
@@ -44,6 +54,7 @@ pub struct TerminalHandle {
     output_generation: Arc<AtomicU64>,
     alternate_screen_active: Arc<AtomicBool>,
     terminal_modes: Arc<AtomicU64>,
+    cursor_presentation: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Default)]
@@ -120,6 +131,10 @@ impl TerminalHandle {
 
     pub(crate) fn mode_settings(&self) -> Vec<TerminalModeSetting> {
         terminal_mode_settings(self.terminal_modes.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn cursor_presentation(&self) -> Option<TerminalCursorPresentation> {
+        terminal_cursor_presentation(self.cursor_presentation.load(Ordering::Acquire))
     }
 
     pub fn send_text(&self, text: &str) -> Result<()> {
@@ -230,7 +245,13 @@ enum ActiveScreenScanState {
 }
 
 impl ActiveScreenTracker {
-    fn update(&mut self, bytes: &[u8], active: &AtomicBool, modes: &AtomicU64) {
+    fn update(
+        &mut self,
+        bytes: &[u8],
+        active: &AtomicBool,
+        modes: &AtomicU64,
+        cursor_presentation: &AtomicU64,
+    ) {
         for &byte in bytes {
             self.state = match std::mem::take(&mut self.state) {
                 ActiveScreenScanState::Ground if byte == 0x1b => ActiveScreenScanState::Escape,
@@ -250,6 +271,7 @@ impl ActiveScreenTracker {
                 ActiveScreenScanState::Escape if byte == b'c' => {
                     active.store(false, Ordering::Release);
                     modes.store(0, Ordering::Release);
+                    record_terminal_cursor_presentation(cursor_presentation, 0);
                     ActiveScreenScanState::Ground
                 }
                 ActiveScreenScanState::Escape if matches!(byte, b'=' | b'>') => {
@@ -309,6 +331,11 @@ impl ActiveScreenTracker {
                                     record_terminal_mode(modes, index, enable);
                                 }
                             }
+                        } else if !private && byte == b'q' {
+                            record_terminal_cursor_presentation(
+                                cursor_presentation,
+                                params.first().copied().unwrap_or(0),
+                            );
                         }
                         ActiveScreenScanState::Ground
                     } else {
@@ -366,6 +393,44 @@ fn terminal_mode_settings(bits: u64) -> Vec<TerminalModeSetting> {
             })
         })
         .collect()
+}
+
+fn record_terminal_cursor_presentation(presentation: &AtomicU64, code: u16) {
+    let (style, blinking) = match code {
+        0 => (0_u64, false),
+        1 => (0, true),
+        2 => (0, false),
+        3 => (1, true),
+        4 => (1, false),
+        5 => (2, true),
+        6 => (2, false),
+        _ => return,
+    };
+    presentation.store(
+        CURSOR_PRESENTATION_KNOWN
+            | (style << CURSOR_PRESENTATION_STYLE_SHIFT)
+            | if blinking {
+                CURSOR_PRESENTATION_BLINKING
+            } else {
+                0
+            },
+        Ordering::Release,
+    );
+}
+
+fn terminal_cursor_presentation(bits: u64) -> Option<TerminalCursorPresentation> {
+    if bits & CURSOR_PRESENTATION_KNOWN == 0 {
+        return None;
+    }
+    let style = match (bits >> CURSOR_PRESENTATION_STYLE_SHIFT) & 0b11 {
+        1 => "underline",
+        2 => "bar",
+        _ => "block",
+    };
+    Some(TerminalCursorPresentation {
+        style,
+        blinking: bits & CURSOR_PRESENTATION_BLINKING != 0,
+    })
 }
 
 impl TerminalSize {
@@ -791,6 +856,8 @@ fn spawn_terminal_inner(
     let reader_alternate_screen_active = Arc::clone(&alternate_screen_active);
     let terminal_modes = Arc::new(AtomicU64::new(0));
     let reader_terminal_modes = Arc::clone(&terminal_modes);
+    let cursor_presentation = Arc::new(AtomicU64::new(0));
+    let reader_cursor_presentation = Arc::clone(&cursor_presentation);
 
     thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
@@ -803,6 +870,7 @@ fn spawn_terminal_inner(
                         &chunk[..n],
                         reader_alternate_screen_active.as_ref(),
                         reader_terminal_modes.as_ref(),
+                        reader_cursor_presentation.as_ref(),
                     );
                     let text = String::from_utf8_lossy(&chunk[..n]);
                     let titles = terminal_title_events_from_text(&text);
@@ -837,6 +905,7 @@ fn spawn_terminal_inner(
         output_generation,
         alternate_screen_active,
         terminal_modes,
+        cursor_presentation,
     })
 }
 
@@ -1396,12 +1465,13 @@ mod tests {
     fn active_screen_tracker_returns_to_primary_after_ris() {
         let active = AtomicBool::new(false);
         let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
         let mut tracker = ActiveScreenTracker::default();
 
-        tracker.update(b"\x1b[?1049h", &active, &modes);
+        tracker.update(b"\x1b[?1049h", &active, &modes, &cursor);
         assert!(active.load(Ordering::Acquire));
-        tracker.update(b"prefix\x1b", &active, &modes);
-        tracker.update(b"c", &active, &modes);
+        tracker.update(b"prefix\x1b", &active, &modes, &cursor);
+        tracker.update(b"c", &active, &modes, &cursor);
 
         assert!(
             !active.load(Ordering::Acquire),
@@ -1413,11 +1483,12 @@ mod tests {
     fn active_screen_tracker_preserves_modes_outside_the_transcript() {
         let active = AtomicBool::new(false);
         let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
         let mut tracker = ActiveScreenTracker::default();
 
-        tracker.update(b"\x1b[?1;2004", &active, &modes);
-        tracker.update(b"h\x1b=", &active, &modes);
-        tracker.update(&vec![b'x'; 1_000_001], &active, &modes);
+        tracker.update(b"\x1b[?1;2004", &active, &modes, &cursor);
+        tracker.update(b"h\x1b=", &active, &modes, &cursor);
+        tracker.update(&vec![b'x'; 1_000_001], &active, &modes, &cursor);
 
         assert_eq!(
             terminal_mode_settings(modes.load(Ordering::Acquire)),
@@ -1440,13 +1511,42 @@ mod tests {
             ]
         );
 
-        tracker.update(b"\x1b[?1l", &active, &modes);
+        tracker.update(b"\x1b[?1l", &active, &modes, &cursor);
         assert_eq!(
             terminal_mode_settings(modes.load(Ordering::Acquire))[0].on,
             false
         );
-        tracker.update(b"\x1bc", &active, &modes);
+        tracker.update(b"\x1bc", &active, &modes, &cursor);
         assert!(terminal_mode_settings(modes.load(Ordering::Acquire)).is_empty());
+    }
+
+    #[test]
+    fn active_screen_tracker_preserves_cursor_presentation_outside_the_transcript() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[5 ", &active, &modes, &cursor);
+        tracker.update(b"q", &active, &modes, &cursor);
+        tracker.update(&vec![b'x'; 1_000_001], &active, &modes, &cursor);
+
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "bar",
+                blinking: true,
+            })
+        );
+
+        tracker.update(b"\x1bc", &active, &modes, &cursor);
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "block",
+                blinking: false,
+            })
+        );
     }
 
     #[test]
