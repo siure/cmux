@@ -1459,7 +1459,7 @@ impl RenderGridScreen {
         match code {
             0 | 1 => {
                 self.cursor_style = RenderGridCursorStyle::Block;
-                self.cursor_blinking = code == 1;
+                self.cursor_blinking = true;
             }
             2 => {
                 self.cursor_style = RenderGridCursorStyle::Block;

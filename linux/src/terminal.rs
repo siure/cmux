@@ -346,6 +346,9 @@ impl ActiveScreenTracker {
                                 if matches!(value, 47 | 1047 | 1049) {
                                     active.store(enable, Ordering::Release);
                                 }
+                                if value == 12 {
+                                    record_terminal_cursor_blink(cursor_presentation, enable);
+                                }
                                 if let Some(index) = tracked_private_mode_index(value) {
                                     record_terminal_mode(modes, index, enable);
                                 }
@@ -423,8 +426,7 @@ fn terminal_mode_settings(bits: u64) -> Vec<TerminalModeSetting> {
 
 fn record_terminal_cursor_presentation(presentation: &AtomicU64, code: u16) {
     let (style, blinking) = match code {
-        0 => (0_u64, false),
-        1 => (0, true),
+        0 | 1 => (0_u64, true),
         2 => (0, false),
         3 => (1, true),
         4 => (1, false),
@@ -442,6 +444,17 @@ fn record_terminal_cursor_presentation(presentation: &AtomicU64, code: u16) {
             },
         Ordering::Release,
     );
+}
+
+fn record_terminal_cursor_blink(presentation: &AtomicU64, blinking: bool) {
+    let _ = presentation.fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+        let current = current | CURSOR_PRESENTATION_KNOWN;
+        Some(if blinking {
+            current | CURSOR_PRESENTATION_BLINKING
+        } else {
+            current & !CURSOR_PRESENTATION_BLINKING
+        })
+    });
 }
 
 fn terminal_cursor_presentation(bits: u64) -> Option<TerminalCursorPresentation> {
@@ -1570,7 +1583,7 @@ mod tests {
             terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
             Some(TerminalCursorPresentation {
                 style: "block",
-                blinking: false,
+                blinking: true,
             })
         );
 
