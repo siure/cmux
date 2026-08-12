@@ -54706,6 +54706,72 @@ mod render_activity_tests {
     }
 
     #[test]
+    fn direct_account_mutations_record_presented_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_state_path = temp.path().join("auth.json");
+        let credentials_path = temp.path().join("auth-credentials.json");
+        let snapshot_path = temp.path().join("session.json");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "app::render_activity_tests::direct_account_mutation_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CMUX_AUTH_STATE_PATH", auth_state_path)
+            .env("CMUX_AUTH_CREDENTIALS_PATH", credentials_path)
+            .env("CMUX_AUTH_CREDENTIAL_STORE", "file")
+            .env("CMUX_SESSION_SNAPSHOT_PATH", snapshot_path)
+            .output()
+            .expect("run isolated account mutation probe");
+
+        assert!(
+            output.status.success(),
+            "account mutation probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn direct_account_mutation_probe_child() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        app.auth_state.signed_in = true;
+        app.auth_state.teams = vec![super::AuthTeam {
+            id: "team-direct".to_string(),
+            display_name: "Direct Team".to_string(),
+            slug: Some("direct".to_string()),
+        }];
+
+        let before_team = activity.model_mutation_generation();
+        let selected = app
+            .handle("auth.team.select", &json!({"team_id": "team-direct"}))
+            .expect("select account team");
+        assert_eq!(selected["selected_team_id"], "team-direct");
+        assert!(
+            activity.model_mutation_generation() > before_team,
+            "direct team selection must wake the GTK model watcher"
+        );
+
+        let before_sign_out = activity.model_mutation_generation();
+        let signed_out = app
+            .handle("auth.sign_out", &json!({}))
+            .expect("sign out account");
+        assert_eq!(signed_out["signed_in"], false);
+        assert!(
+            activity.model_mutation_generation() > before_sign_out,
+            "direct sign out must wake the GTK model watcher"
+        );
+    }
+
+    #[test]
     #[ignore = "helper executed in an isolated child process"]
     fn workspace_palette_mutation_probe_child() {
         let mut app = AppState::with_paths_and_terminal_startup(

@@ -1297,6 +1297,22 @@ mod tests {
     }
 
     #[test]
+    fn active_screen_tracker_returns_to_primary_after_ris() {
+        let active = AtomicBool::new(false);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[?1049h", &active);
+        assert!(active.load(Ordering::Acquire));
+        tracker.update(b"prefix\x1b", &active);
+        tracker.update(b"c", &active);
+
+        assert!(
+            !active.load(Ordering::Acquire),
+            "RIS must reset the authoritative tracked screen to primary"
+        );
+    }
+
+    #[test]
     fn terminal_spawn_env_protects_terminal_identity() {
         let env = terminal_spawn_env(HashMap::from([
             ("TERM".to_string(), "dumb".to_string()),
