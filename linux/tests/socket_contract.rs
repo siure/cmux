@@ -19120,7 +19120,7 @@ fn mobile_terminal_replay_uses_renderer_fallback_styles_and_modes() {
         .iter()
         .find(|style| style["id"].as_u64() == Some(style_id))
         .unwrap_or_else(|| panic!("style missing from replay: {replay}"));
-    assert_eq!(style["fg"], json!({"r": 7, "g": 8, "b": 9}));
+    assert_eq!(style["foreground"], "#070809");
     assert_eq!(grid["cursor"]["style"], "bar");
     assert!(grid["modes"]
         .as_array()
@@ -29761,8 +29761,8 @@ fn renderer_snapshot_text_fallback_preserves_ansi_styles() {
         .iter()
         .find(|style| style["id"].as_u64() == Some(style_id))
         .unwrap_or_else(|| panic!("style missing for marker span: {snapshot}"));
-    assert_eq!(style["fg"], json!({"r": 1, "g": 2, "b": 3}));
-    assert_eq!(style["bg"], json!({"r": 4, "g": 5, "b": 6}));
+    assert_eq!(style["foreground"], "#010203");
+    assert_eq!(style["background"], "#040506");
     assert_eq!(style["bold"], true);
     assert_eq!(style["italic"], true);
     assert_eq!(style["underline"], true);

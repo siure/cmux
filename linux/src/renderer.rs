@@ -1113,10 +1113,10 @@ fn render_grid_style_value(id: u64, style: RenderGridStyle) -> Value {
     let mut value = serde_json::Map::new();
     value.insert("id".to_string(), json!(id));
     if let Some(fg) = style.fg {
-        value.insert("fg".to_string(), render_grid_rgb_value(fg));
+        value.insert("foreground".to_string(), json!(render_grid_rgb_hex(fg)));
     }
     if let Some(bg) = style.bg {
-        value.insert("bg".to_string(), render_grid_rgb_value(bg));
+        value.insert("background".to_string(), json!(render_grid_rgb_hex(bg)));
     }
     for (key, enabled) in [
         ("bold", style.bold),
@@ -1136,8 +1136,22 @@ fn render_grid_style_value(id: u64, style: RenderGridStyle) -> Value {
     Value::Object(value)
 }
 
-fn render_grid_rgb_value(rgb: RenderGridRgb) -> Value {
-    json!({"r": rgb.r, "g": rgb.g, "b": rgb.b})
+fn render_grid_rgb_hex(rgb: RenderGridRgb) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb.r, rgb.g, rgb.b)
+}
+
+fn render_grid_rgb_object_hex(value: &Value) -> Option<String> {
+    let component = |key| {
+        value
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+    };
+    Some(render_grid_rgb_hex(RenderGridRgb {
+        r: component("r")?,
+        g: component("g")?,
+        b: component("b")?,
+    }))
 }
 
 impl RenderGridBuffer {
@@ -1998,9 +2012,9 @@ fn render_grid_style_from_ghostty_vt(style: Option<&Value>) -> Value {
         return json!({});
     };
     let mut normalized = serde_json::Map::new();
-    for key in ["fg", "bg"] {
-        if let Some(value) = style.get(key).filter(|value| value.is_object()) {
-            normalized.insert(key.to_string(), value.clone());
+    for (source, target) in [("fg", "foreground"), ("bg", "background")] {
+        if let Some(value) = style.get(source).and_then(render_grid_rgb_object_hex) {
+            normalized.insert(target.to_string(), json!(value));
         }
     }
     for key in [
@@ -4999,13 +5013,13 @@ mod tests {
         assert_eq!(object["render_grid"]["state_seq"], 42);
         assert_eq!(object["render_grid"]["row_spans"][0]["text"], "ready");
         assert_eq!(object["render_grid"]["row_spans"][0]["style_id"], 1);
-        assert_eq!(object["render_grid"]["styles"][1]["fg"]["r"], 10);
+        assert_eq!(object["render_grid"]["styles"][1]["foreground"], "#0A141E");
         assert_eq!(object["render_grid"]["styles"][1]["bold"], true);
         assert_eq!(object["render_grid"]["cursor"]["column"], 3);
         assert_eq!(object["render_grid"]["scrollback_rows"], 1);
         assert_eq!(object["render_grid"]["scrollback_spans"][0]["text"], "old");
         assert_eq!(object["render_grid"]["scrollback_spans"][0]["style_id"], 2);
-        assert_eq!(object["render_grid"]["styles"][2]["fg"]["r"], 205);
+        assert_eq!(object["render_grid"]["styles"][2]["foreground"], "#CD3131");
     }
 
     #[test]
@@ -5295,8 +5309,8 @@ mod tests {
             .iter()
             .find(|style| style["id"].as_u64() == Some(style_id))
             .expect("styled span style");
-        assert_eq!(style["fg"], json!({"r": 205, "g": 49, "b": 49}));
-        assert_eq!(style["bg"], json!({"r": 1, "g": 2, "b": 3}));
+        assert_eq!(style["foreground"], "#CD3131");
+        assert_eq!(style["background"], "#010203");
         assert_eq!(style["bold"], true);
         assert_eq!(style["italic"], true);
         assert_eq!(style["underline"], true);
@@ -5322,7 +5336,7 @@ mod tests {
             .iter()
             .find(|style| style["id"].as_u64() == Some(style_id))
             .expect("styled span style");
-        assert_eq!(style["fg"], json!({"r": 255, "g": 0, "b": 0}));
+        assert_eq!(style["foreground"], "#FF0000");
         assert_eq!(grid["cursor"]["row"], 1);
         assert_eq!(grid["cursor"]["column"], 0);
     }

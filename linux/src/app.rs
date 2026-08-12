@@ -64135,7 +64135,7 @@ mod terminal_text_tests {
             .iter()
             .find(|style| style["id"].as_u64() == Some(style_id))
             .expect("style");
-        assert_eq!(style["fg"], json!({"r": 1, "g": 2, "b": 3}));
+        assert_eq!(style["foreground"], "#010203");
         assert_eq!(grid["cursor"]["style"], "bar");
         assert_eq!(grid["modes"], json!(["bracketed_paste"]));
     }
