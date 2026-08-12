@@ -1550,6 +1550,72 @@ mod tests {
     }
 
     #[test]
+    fn active_screen_tracker_resets_persistent_modes_on_decstr() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[?1;7;1000;2004h\x1b[!p", &active, &modes, &cursor);
+
+        assert_eq!(
+            terminal_mode_settings(modes.load(Ordering::Acquire)),
+            vec![
+                TerminalModeSetting {
+                    code: 1,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 66,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 7,
+                    ansi: false,
+                    on: true,
+                },
+                TerminalModeSetting {
+                    code: 2004,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1004,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1000,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1002,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1003,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1006,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1015,
+                    ansi: false,
+                    on: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn terminal_spawn_env_protects_terminal_identity() {
         let env = terminal_spawn_env(HashMap::from([
             ("TERM".to_string(), "dumb".to_string()),

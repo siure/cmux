@@ -6464,6 +6464,7 @@ mod tests {
     static TEST_CLIPBOARD_COMPLETE_REQUEST: AtomicUsize = AtomicUsize::new(0);
     static TEST_CLIPBOARD_COMPLETE_TEXT_LEN: AtomicUsize = AtomicUsize::new(0);
     static TEST_CLIPBOARD_COMPLETE_CONFIRMED: AtomicBool = AtomicBool::new(false);
+    static TEST_SERVICE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn ghostty_service_targeting_selects_only_requested_surface() {
@@ -6479,6 +6480,25 @@ mod tests {
         assert!(!ghostty_service_host_is_selected(None, Some(&requested)));
         assert!(ghostty_service_host_is_selected(Some("surface-b"), None));
         assert!(ghostty_service_host_is_selected(None, None));
+    }
+
+    #[test]
+    fn ghostty_selection_change_requests_targeted_host_service() {
+        let _guard = TEST_SERVICE_LOCK.lock().expect("service test lock");
+        pending_ghostty_service_surface_ids()
+            .lock()
+            .expect("pending service ids")
+            .clear();
+        let mut target = test_reload_target(None, None);
+        target.surface_id = Some("surface-selection".to_string());
+
+        gtk_ghostty_selection_changed(&target);
+
+        assert!(target.selection_sync_requested.load(Ordering::Acquire));
+        assert!(pending_ghostty_service_surface_ids()
+            .lock()
+            .expect("pending service ids")
+            .contains("surface-selection"));
     }
 
     unsafe extern "C" fn test_complete_clipboard_request(
