@@ -54622,6 +54622,47 @@ mod render_activity_tests {
     }
 
     #[test]
+    fn app_quit_only_records_blocked_confirmation_model_changes() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        assert!(app
+            .update_embedded_terminal_close_confirmation(&surface_id, true)
+            .expect("mark terminal dirty"));
+
+        let before_blocked = activity.model_mutation_generation();
+        let blocked = app
+            .handle(
+                "app.quit.request",
+                &json!({"source": "ghostty", "surface_id": surface_id}),
+            )
+            .expect("request interactive quit");
+        assert_eq!(blocked["blocked"], true);
+        assert_eq!(blocked["confirmation_required"], true);
+        assert!(
+            activity.model_mutation_generation() > before_blocked,
+            "blocked Ghostty quit must wake the model watcher for its confirmation"
+        );
+
+        let before_unblocked = activity.model_mutation_generation();
+        let unblocked = app
+            .handle("app.quit.request", &json!({"source": "api"}))
+            .expect("request non-interactive quit");
+        assert_eq!(unblocked["blocked"], false);
+        assert_eq!(unblocked["quit"], true);
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_unblocked,
+            "an unblocked quit command must not schedule a redundant model rebuild"
+        );
+    }
+
+    #[test]
     fn reopen_closed_browser_records_presented_model_mutation_for_every_entrypoint() {
         let mut app = AppState::with_paths_and_terminal_startup(
             None,
