@@ -5703,6 +5703,15 @@ mod tests {
     }
 
     #[test]
+    fn renderer_text_fallback_treats_decscusr_zero_as_blinking_block() {
+        for sequence in ["\x1b[0 q", "\x1b[ q"] {
+            let grid = render_grid_from_text("surface-a", 52, 20, 2, sequence);
+            assert_eq!(grid["cursor"]["style"], "block");
+            assert_eq!(grid["cursor"]["blinking"], true);
+        }
+    }
+
+    #[test]
     fn renderer_text_fallback_tracks_disabled_cursor_shape_and_modes() {
         let grid = render_grid_from_text(
             "surface-a",

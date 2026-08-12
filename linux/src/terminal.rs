@@ -1573,6 +1573,16 @@ mod tests {
                 blinking: false,
             })
         );
+
+        let omitted = AtomicU64::new(0);
+        tracker.update(b"\x1b[ q", &active, &modes, &omitted);
+        assert_eq!(
+            terminal_cursor_presentation(omitted.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "block",
+                blinking: true,
+            })
+        );
     }
 
     #[test]
@@ -1638,6 +1648,52 @@ mod tests {
                     on: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn active_screen_tracker_treats_decscusr_zero_as_blinking_block() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[0 q", &active, &modes, &cursor);
+
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "block",
+                blinking: true,
+            })
+        );
+    }
+
+    #[test]
+    fn active_screen_tracker_applies_cursor_blink_private_mode() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[5 q\x1b[?12", &active, &modes, &cursor);
+        tracker.update(b"l", &active, &modes, &cursor);
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "bar",
+                blinking: false,
+            })
+        );
+
+        tracker.update(b"\x1b[?12", &active, &modes, &cursor);
+        tracker.update(b"h", &active, &modes, &cursor);
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "bar",
+                blinking: true,
+            })
         );
     }
 
