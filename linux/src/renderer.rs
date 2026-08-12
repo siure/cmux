@@ -5037,6 +5037,46 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_render_grid_styles_follow_v1_color_schema() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 2,
+            "rows": 1,
+            "rows_data": [{
+                "y": 0,
+                "cells": [{
+                    "x": 0,
+                    "text": "x",
+                    "style": {
+                        "fg": {"r": 10, "g": 20, "b": 30},
+                        "bg": {"r": 221, "g": 238, "b": 255},
+                        "bold": true
+                    }
+                }]
+            }]
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 45, &snapshot).expect("render grid");
+        let style = &grid["styles"][1];
+
+        assert_eq!(style["foreground"], "#0A141E");
+        assert_eq!(style["background"], "#DDEEFF");
+        assert_eq!(style["bold"], true);
+        assert!(style.get("fg").is_none());
+        assert!(style.get("bg").is_none());
+    }
+
+    #[test]
+    fn text_fallback_render_grid_styles_follow_v1_color_schema() {
+        let grid = render_grid_from_text("surface-a", 46, 2, 1, "\x1b[38;2;10;20;30mX");
+        let style = &grid["styles"][1];
+
+        assert_eq!(style["foreground"], "#0A141E");
+        assert!(style.get("fg").is_none());
+    }
+
+    #[test]
     fn ghostty_vt_render_grid_modes_follow_v1_array_schema() {
         let snapshot = json!({
             "parser": "ghostty-vt",
