@@ -54242,6 +54242,9 @@ fn method_changes_presented_model(
     if method == "surface.send_text" {
         return result.get("resumed").and_then(Value::as_bool) == Some(true);
     }
+    if method == "agent.hibernation.resume" {
+        return result.get("resumed").and_then(Value::as_bool) == Some(true);
+    }
     if method == "history.reopen_closed" {
         return result.get("handled").and_then(Value::as_bool) == Some(true);
     }

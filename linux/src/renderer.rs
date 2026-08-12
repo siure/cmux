@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const GHOSTTY_VT_DEBUG_CELL_WIDTH: f64 = 10.0;
 const GHOSTTY_VT_DEBUG_CELL_HEIGHT: f64 = 20.0;
@@ -46,10 +48,11 @@ struct RenderGridStyle {
     overline: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderGridCell {
-    ch: char,
+    text: String,
     style: RenderGridStyle,
+    continuation: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1007,7 +1010,18 @@ fn render_grid_screen(text: &str) -> RenderGridScreen {
             '\u{8}' => screen.backspace(),
             '\t' => screen.tab(),
             ch if ch.is_control() => {}
-            ch => screen.put(ch),
+            _ => {
+                let start = index;
+                while index < chars.len() && chars[index] != '\u{1b}' && !chars[index].is_control()
+                {
+                    index += 1;
+                }
+                let printable = chars[start..index].iter().collect::<String>();
+                for grapheme in UnicodeSegmentation::graphemes(printable.as_str(), true) {
+                    screen.put(grapheme);
+                }
+                continue;
+            }
         }
         index += 1;
     }
@@ -1044,6 +1058,7 @@ fn append_render_grid_line_spans(
             flush_render_grid_span(
                 row,
                 start_column,
+                column,
                 active_style,
                 &mut text,
                 styles,
@@ -1053,10 +1068,27 @@ fn append_render_grid_line_spans(
             active_style = None;
             continue;
         };
+        if !cell.continuation
+            && column.saturating_add(UnicodeWidthStr::width(cell.text.as_str())) > limit
+        {
+            flush_render_grid_span(
+                row,
+                start_column,
+                column,
+                active_style,
+                &mut text,
+                styles,
+                style_ids,
+                spans,
+            );
+            active_style = None;
+            break;
+        }
         if active_style != Some(cell.style) {
             flush_render_grid_span(
                 row,
                 start_column,
+                column,
                 active_style,
                 &mut text,
                 styles,
@@ -1066,11 +1098,14 @@ fn append_render_grid_line_spans(
             active_style = Some(cell.style);
             start_column = column;
         }
-        text.push(cell.ch);
+        if !cell.continuation {
+            text.push_str(&cell.text);
+        }
     }
     flush_render_grid_span(
         row,
         start_column,
+        limit,
         active_style,
         &mut text,
         styles,
@@ -1082,6 +1117,7 @@ fn append_render_grid_line_spans(
 fn flush_render_grid_span(
     row: usize,
     column: usize,
+    end_column: usize,
     style: Option<RenderGridStyle>,
     text: &mut String,
     styles: &mut Vec<Value>,
@@ -1096,7 +1132,7 @@ fn flush_render_grid_span(
         text.clear();
         return;
     }
-    let cell_width = text.chars().count();
+    let cell_width = end_column.saturating_sub(column);
     let style_id = render_grid_style_id(style, styles, style_ids);
     spans.push(json!({
         "row": row,
@@ -1194,7 +1230,7 @@ impl RenderGridBuffer {
         }
         for line in &mut lines {
             while line.last().is_some_and(|cell| match cell {
-                Some(cell) => default_blank_cell(*cell),
+                Some(cell) => default_blank_cell(cell),
                 None => true,
             }) {
                 line.pop();
@@ -1231,27 +1267,57 @@ impl RenderGridScreen {
         self.active_buffer().col
     }
 
-    fn put(&mut self, ch: char) {
+    fn put(&mut self, text: &str) {
         let style = self.style;
         let buffer = self.active_buffer_mut();
         let col = buffer.col;
         let line = buffer.current_line_mut();
+        let width = UnicodeWidthStr::width(text);
+        if width == 0 {
+            let occupied = col.min(line.len());
+            if let Some(cell) = line
+                .iter_mut()
+                .take(occupied)
+                .rev()
+                .flatten()
+                .find(|cell| !cell.continuation)
+            {
+                cell.text.push_str(text);
+            }
+            return;
+        }
         while line.len() < col {
             line.push(None);
         }
-        let cell = Some(RenderGridCell { ch, style });
-        if col < line.len() {
-            line[col] = cell;
-        } else {
-            line.push(cell);
+        while line.len() < col.saturating_add(width) {
+            line.push(None);
         }
-        buffer.col += 1;
+        for index in col..col.saturating_add(width) {
+            clear_render_grid_glyph_at(line, index);
+        }
+        line[col] = Some(RenderGridCell {
+            text: text.to_string(),
+            style,
+            continuation: false,
+        });
+        for cell in line
+            .iter_mut()
+            .skip(col.saturating_add(1))
+            .take(width.saturating_sub(1))
+        {
+            *cell = Some(RenderGridCell {
+                text: String::new(),
+                style,
+                continuation: true,
+            });
+        }
+        buffer.col = buffer.col.saturating_add(width);
     }
 
     fn tab(&mut self) {
         let spaces = 4 - (self.cursor_col() % 4);
         for _ in 0..spaces {
-            self.put(' ');
+            self.put(" ");
         }
     }
 
@@ -1566,8 +1632,27 @@ impl RenderGridScreen {
     }
 }
 
-fn default_blank_cell(cell: RenderGridCell) -> bool {
-    cell.ch == ' ' && cell.style == RenderGridStyle::default()
+fn clear_render_grid_glyph_at(line: &mut [Option<RenderGridCell>], index: usize) {
+    let Some(cell) = line.get(index).and_then(Option::as_ref) else {
+        return;
+    };
+    let mut start = index;
+    if cell.continuation {
+        while start > 0 && line[start].as_ref().is_some_and(|cell| cell.continuation) {
+            start -= 1;
+        }
+    }
+    line[start] = None;
+    for cell in line.iter_mut().skip(start.saturating_add(1)) {
+        if !cell.as_ref().is_some_and(|cell| cell.continuation) {
+            break;
+        }
+        *cell = None;
+    }
+}
+
+fn default_blank_cell(cell: &RenderGridCell) -> bool {
+    cell.text == " " && !cell.continuation && cell.style == RenderGridStyle::default()
 }
 
 fn is_csi_final_byte(ch: char) -> bool {
