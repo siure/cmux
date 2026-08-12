@@ -1989,17 +1989,19 @@ fn render_grid_from_ghostty_vt_snapshot(
         "scrollback_rows": 0,
         "scrollback_spans": []
     });
-    let cursor = snapshot.get("cursor").filter(|cursor| {
-        cursor.get("visible").and_then(Value::as_bool) == Some(true)
-            && cursor.get("in_viewport").and_then(Value::as_bool) == Some(true)
-    });
+    let cursor = snapshot
+        .get("cursor")
+        .filter(|cursor| cursor.get("in_viewport").and_then(Value::as_bool) == Some(true));
     if let Some((row, column)) =
         cursor.and_then(|cursor| Some((cursor.get("y")?.as_u64()?, cursor.get("x")?.as_u64()?)))
     {
         render_grid["cursor"] = json!({
             "row": row,
             "column": column,
-            "visible": true,
+            "visible": cursor
+                .and_then(|cursor| cursor.get("visible"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
             "style": "block",
             "blinking": false
         });

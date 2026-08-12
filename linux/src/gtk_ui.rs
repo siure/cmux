@@ -16817,8 +16817,8 @@ fn cell_markup(cell: &Value, text: &str) -> String {
 
 fn terminal_style_attrs(style: &Value) -> Vec<String> {
     let mut attrs = Vec::new();
-    let mut fg = style_rgb_hex(style, "fg");
-    let mut bg = style_rgb_hex(style, "bg");
+    let mut fg = style_color_hex(style, "foreground", "fg");
+    let mut bg = style_color_hex(style, "background", "bg");
     if style_bool(style, "inverse") {
         std::mem::swap(&mut fg, &mut bg);
         fg.get_or_insert_with(|| "#070809".to_string());
@@ -16854,6 +16854,22 @@ fn terminal_style_attrs(style: &Value) -> Vec<String> {
         attrs.push("strikethrough=\"true\"".to_string());
     }
     attrs
+}
+
+fn style_color_hex(style: &Value, render_grid_key: &str, native_key: &str) -> Option<String> {
+    style
+        .get(render_grid_key)
+        .and_then(Value::as_str)
+        .and_then(normalize_style_hex)
+        .or_else(|| style_rgb_hex(style, native_key))
+}
+
+fn normalize_style_hex(color: &str) -> Option<String> {
+    let hex = color.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("#{}", hex.to_ascii_lowercase()))
 }
 
 fn style_rgb_hex(style: &Value, key: &str) -> Option<String> {
