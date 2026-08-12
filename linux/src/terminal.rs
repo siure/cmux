@@ -241,6 +241,7 @@ enum ActiveScreenScanState {
         value: u16,
         saw_digit: bool,
         params: Vec<u16>,
+        soft_reset: bool,
     },
 }
 
@@ -260,6 +261,7 @@ impl ActiveScreenTracker {
                     value: 0,
                     saw_digit: false,
                     params: Vec::new(),
+                    soft_reset: false,
                 },
                 ActiveScreenScanState::Ground => ActiveScreenScanState::Ground,
                 ActiveScreenScanState::Escape if byte == b'[' => ActiveScreenScanState::Csi {
@@ -267,6 +269,7 @@ impl ActiveScreenTracker {
                     value: 0,
                     saw_digit: false,
                     params: Vec::new(),
+                    soft_reset: false,
                 },
                 ActiveScreenScanState::Escape if byte == b'c' => {
                     active.store(false, Ordering::Release);
@@ -285,6 +288,7 @@ impl ActiveScreenTracker {
                     mut value,
                     mut saw_digit,
                     mut params,
+                    mut soft_reset,
                 } => {
                     if byte == 0x1b {
                         ActiveScreenScanState::Escape
@@ -295,6 +299,7 @@ impl ActiveScreenTracker {
                             value,
                             saw_digit,
                             params,
+                            soft_reset,
                         }
                     } else if byte.is_ascii_digit() {
                         value = value
@@ -306,6 +311,16 @@ impl ActiveScreenTracker {
                             value,
                             saw_digit,
                             params,
+                            soft_reset,
+                        }
+                    } else if byte == b'!' && !private && !saw_digit && params.is_empty() {
+                        soft_reset = true;
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            params,
+                            soft_reset,
                         }
                     } else if byte == b';' {
                         if saw_digit {
@@ -316,12 +331,16 @@ impl ActiveScreenTracker {
                             value: 0,
                             saw_digit: false,
                             params,
+                            soft_reset,
                         }
                     } else if (0x40..=0x7e).contains(&byte) {
                         if saw_digit {
                             params.push(value);
                         }
-                        if private && matches!(byte, b'h' | b'l') {
+                        if soft_reset && byte == b'p' {
+                            reset_terminal_modes(modes);
+                            record_terminal_cursor_presentation(cursor_presentation, 0);
+                        } else if private && matches!(byte, b'h' | b'l') {
                             let enable = byte == b'h';
                             for value in params {
                                 if matches!(value, 47 | 1047 | 1049) {
@@ -344,6 +363,7 @@ impl ActiveScreenTracker {
                             value,
                             saw_digit,
                             params,
+                            soft_reset,
                         }
                     }
                 }
@@ -378,6 +398,12 @@ fn record_terminal_mode(modes: &AtomicU64, index: usize, on: bool) {
         };
         Some(next)
     });
+}
+
+fn reset_terminal_modes(modes: &AtomicU64) {
+    let known = (1_u64 << TERMINAL_MODE_SETTINGS.len()) - 1;
+    let wraparound_enabled = 1_u64 << (TERMINAL_MODE_ENABLED_SHIFT + 2);
+    modes.store(known | wraparound_enabled, Ordering::Release);
 }
 
 fn terminal_mode_settings(bits: u64) -> Vec<TerminalModeSetting> {

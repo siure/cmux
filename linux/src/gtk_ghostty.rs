@@ -3920,12 +3920,7 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
     }
 
     if matches!(event, GtkGhosttyActionEvent::SelectionChanged { .. }) {
-        target
-            .selection_sync_requested
-            .store(true, Ordering::Release);
-        if let Some(area) = target.area.as_ref() {
-            area.queue_render();
-        }
+        gtk_ghostty_selection_changed(&target);
         return;
     }
 
@@ -4230,6 +4225,18 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
         GtkGhosttyActionEvent::MouseShape { .. }
         | GtkGhosttyActionEvent::MouseOverLink { .. }
         | GtkGhosttyActionEvent::MouseVisibility { .. } => {}
+    }
+}
+
+fn gtk_ghostty_selection_changed(target: &GtkGhosttyActionTarget) {
+    target
+        .selection_sync_requested
+        .store(true, Ordering::Release);
+    if let Some(surface_id) = target.surface_id.as_deref() {
+        request_ghostty_service(surface_id);
+    }
+    if let Some(area) = target.area.as_ref() {
+        area.queue_render();
     }
 }
 
@@ -6489,6 +6496,7 @@ mod tests {
             .lock()
             .expect("pending service ids")
             .clear();
+        take_ghostty_service_dispatched_surface_ids_for_test();
         let mut target = test_reload_target(None, None);
         target.surface_id = Some("surface-selection".to_string());
 
@@ -6499,6 +6507,12 @@ mod tests {
             .lock()
             .expect("pending service ids")
             .contains("surface-selection"));
+        let context = glib::MainContext::default();
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(take_ghostty_service_dispatched_surface_ids_for_test()
+            .contains(&"surface-selection".to_string()));
     }
 
     unsafe extern "C" fn test_complete_clipboard_request(
