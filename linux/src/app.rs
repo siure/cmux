@@ -54270,6 +54270,9 @@ fn method_changes_presented_model(
     if method == "app.close_confirmation.reply" {
         return result.get("reason").and_then(Value::as_str) != Some("request_not_found");
     }
+    if method == "app.quit.request" {
+        return result.get("blocked").and_then(Value::as_bool) == Some(true);
+    }
     if method == "settings.terminal.resume.update" {
         return true;
     }
