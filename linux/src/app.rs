@@ -12826,6 +12826,7 @@ impl AppState {
                 surface
                     .embedded_terminal_input
                     .push_back(EmbeddedTerminalInput::ProcessOutput(data.to_vec()));
+                request_renderer_owned_terminal_service(surface_id);
             }
             surface.present_count += 1;
         }
@@ -22591,6 +22592,7 @@ impl AppState {
         surface
             .embedded_terminal_input
             .push_back(EmbeddedTerminalInput::Text(text));
+        request_renderer_owned_terminal_service(surface_id);
         true
     }
 
@@ -22616,6 +22618,7 @@ impl AppState {
         surface
             .embedded_terminal_input
             .push_back(EmbeddedTerminalInput::Key(trimmed.to_string()));
+        request_renderer_owned_terminal_service(surface_id);
         Ok(true)
     }
 
@@ -22633,6 +22636,7 @@ impl AppState {
         surface
             .embedded_terminal_input
             .push_back(EmbeddedTerminalInput::BindingAction(action.to_string()));
+        request_renderer_owned_terminal_service(surface_id);
         true
     }
 
@@ -54582,6 +54586,11 @@ fn env_truthy(key: &str) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+fn request_renderer_owned_terminal_service(surface_id: &str) {
+    #[cfg(feature = "gtk")]
+    crate::gtk_ghostty::request_ghostty_service(surface_id);
 }
 
 fn diff_comments_dir() -> PathBuf {

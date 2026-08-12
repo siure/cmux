@@ -130,24 +130,60 @@ const GHOSTTY_SCROLL_MOD_PRECISION: c_int = 1;
 const GHOSTTY_STYLUS_NORMAL_PRESSURE: f64 = 0.5;
 const GHOSTTY_STYLUS_DEEP_PRESSURE_THRESHOLD: f64 = 0.75;
 static NEXT_GHOSTTY_CALLBACK_TOKEN: AtomicU64 = AtomicU64::new(1);
+static GHOSTTY_SERVICE_IDLE_PENDING: AtomicBool = AtomicBool::new(false);
+static GHOSTTY_SERVICE_SURFACE_IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+#[cfg(test)]
+static GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 thread_local! {
     static SHARED_GHOSTTY_APP: RefCell<Weak<GtkGhosttyApp>> = RefCell::new(Weak::new());
     static GHOSTTY_SERVICE_HOSTS: RefCell<HashMap<u64, GhosttyServiceHost>> = RefCell::new(HashMap::new());
     static GHOSTTY_SERVICE_TIMER_ACTIVE: Cell<bool> = const { Cell::new(false) };
-    #[cfg(test)]
-    static GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
 pub(crate) fn take_ghostty_service_dispatched_surface_ids_for_test() -> Vec<String> {
-    GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS
-        .with(|surface_ids| std::mem::take(&mut *surface_ids.borrow_mut()))
+    let mut surface_ids = GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *surface_ids)
+}
+
+pub(crate) fn request_ghostty_service(surface_id: &str) {
+    pending_ghostty_service_surface_ids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(surface_id.to_string());
+    if GHOSTTY_SERVICE_IDLE_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    glib::idle_add_once(|| {
+        GHOSTTY_SERVICE_IDLE_PENDING.store(false, Ordering::Release);
+        let surface_ids = {
+            let mut pending = pending_ghostty_service_surface_ids()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *pending)
+        };
+        #[cfg(test)]
+        GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(surface_ids.iter().cloned());
+        service_ghostty_surface_ids(&surface_ids);
+    });
+}
+
+fn pending_ghostty_service_surface_ids() -> &'static Mutex<HashSet<String>> {
+    GHOSTTY_SERVICE_SURFACE_IDS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 struct GhosttyServiceHost {
     host: Weak<RefCell<GtkGhosttyHost>>,
     status: glib::WeakRef<gtk::Label>,
+    surface_id: Option<String>,
 }
 
 #[link(name = "dl")]
@@ -895,13 +931,20 @@ fn connect_ghostty_area(
 }
 
 fn register_ghostty_service_host(host: &Rc<RefCell<GtkGhosttyHost>>, status: &gtk::Label) {
-    let token = host.borrow().callbacks.token;
+    let (token, surface_id) = {
+        let host = host.borrow();
+        (
+            host.callbacks.token,
+            host.callbacks.close_surface_id.clone(),
+        )
+    };
     GHOSTTY_SERVICE_HOSTS.with(|hosts| {
         hosts.borrow_mut().insert(
             token,
             GhosttyServiceHost {
                 host: Rc::downgrade(host),
                 status: status.downgrade(),
+                surface_id: surface_id.clone(),
             },
         );
     });
@@ -920,13 +963,38 @@ fn register_ghostty_service_host(host: &Rc<RefCell<GtkGhosttyHost>>, status: &gt
             }
         });
     });
+    if let Some(surface_id) = surface_id.as_deref() {
+        request_ghostty_service(surface_id);
+    }
 }
 
 fn service_ghostty_hosts() {
+    service_ghostty_hosts_matching(None);
+}
+
+fn service_ghostty_surface_ids(surface_ids: &HashSet<String>) {
+    if surface_ids.is_empty() {
+        return;
+    }
+    service_ghostty_hosts_matching(Some(surface_ids));
+}
+
+fn ghostty_service_host_is_selected(
+    surface_id: Option<&str>,
+    requested_surface_ids: Option<&HashSet<String>>,
+) -> bool {
+    requested_surface_ids
+        .is_none_or(|requested| surface_id.is_some_and(|surface_id| requested.contains(surface_id)))
+}
+
+fn service_ghostty_hosts_matching(surface_ids: Option<&HashSet<String>>) {
     let hosts = GHOSTTY_SERVICE_HOSTS.with(|hosts| {
         hosts
             .borrow()
             .iter()
+            .filter(|(_, entry)| {
+                ghostty_service_host_is_selected(entry.surface_id.as_deref(), surface_ids)
+            })
             .map(|(token, entry)| (*token, entry.host.clone(), entry.status.clone()))
             .collect::<Vec<_>>()
     });
@@ -953,8 +1021,14 @@ fn realize_ghostty_area(
     status: &gtk::Label,
     host: &Rc<RefCell<GtkGhosttyHost>>,
 ) {
-    match host.borrow_mut().realize(area) {
-        Ok(()) => status.set_text(GHOSTTY_RENDERER_ACTIVE_STATUS),
+    let realize_result = host.borrow_mut().realize(area);
+    match realize_result {
+        Ok(()) => {
+            status.set_text(GHOSTTY_RENDERER_ACTIVE_STATUS);
+            if let Some(surface_id) = host.borrow().callbacks.close_surface_id.as_deref() {
+                request_ghostty_service(surface_id);
+            }
+        }
         Err(err) => {
             eprintln!("cmux: Ghostty surface realization failed: {err:#}");
             status.set_text(&format!("Ghostty renderer failed: {err}"));
@@ -6390,6 +6464,22 @@ mod tests {
     static TEST_CLIPBOARD_COMPLETE_REQUEST: AtomicUsize = AtomicUsize::new(0);
     static TEST_CLIPBOARD_COMPLETE_TEXT_LEN: AtomicUsize = AtomicUsize::new(0);
     static TEST_CLIPBOARD_COMPLETE_CONFIRMED: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn ghostty_service_targeting_selects_only_requested_surface() {
+        let requested = HashSet::from(["surface-a".to_string()]);
+        assert!(ghostty_service_host_is_selected(
+            Some("surface-a"),
+            Some(&requested)
+        ));
+        assert!(!ghostty_service_host_is_selected(
+            Some("surface-b"),
+            Some(&requested)
+        ));
+        assert!(!ghostty_service_host_is_selected(None, Some(&requested)));
+        assert!(ghostty_service_host_is_selected(Some("surface-b"), None));
+        assert!(ghostty_service_host_is_selected(None, None));
+    }
 
     unsafe extern "C" fn test_complete_clipboard_request(
         surface: GhosttySurface,

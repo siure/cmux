@@ -1789,6 +1789,7 @@ fn attach_ghostty_vt_snapshot(
     {
         if let Some(fallback_render_grid) = fallback_render_grid.as_ref() {
             merge_render_grid_protocol_state(&mut render_grid, fallback_render_grid);
+            merge_render_grid_cursor_presentation(&mut render_grid, fallback_render_grid);
             merge_render_grid_scrollback(&mut render_grid, fallback_render_grid);
         }
         object.insert("render_grid".to_string(), render_grid);
@@ -1808,6 +1809,25 @@ fn merge_render_grid_protocol_state(render_grid: &mut Value, fallback: &Value) {
     }
     if let Some(modes) = fallback.get("modes").filter(|value| value.is_array()) {
         target.insert("modes".to_string(), modes.clone());
+    }
+}
+
+fn merge_render_grid_cursor_presentation(render_grid: &mut Value, fallback: &Value) {
+    let Some(target) = render_grid.get_mut("cursor").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(source) = fallback.get("cursor") else {
+        return;
+    };
+    if let Some(style) = source
+        .get("style")
+        .and_then(Value::as_str)
+        .filter(|style| matches!(*style, "block" | "underline" | "bar"))
+    {
+        target.insert("style".to_string(), json!(style));
+    }
+    if let Some(blinking) = source.get("blinking").and_then(Value::as_bool) {
+        target.insert("blinking".to_string(), json!(blinking));
     }
 }
 
