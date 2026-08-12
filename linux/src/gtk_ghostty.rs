@@ -6515,6 +6515,92 @@ mod tests {
             .contains(&"surface-selection".to_string()));
     }
 
+    #[test]
+    fn gtk_ghostty_presented_model_actions_record_only_real_changes() {
+        let surface = 0xbeefusize as GhosttySurface;
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths_and_terminal_startup(
+                None,
+                None,
+                crate::app::TerminalStartupMode::RendererOwned,
+            )
+            .expect("app state"),
+        ));
+        let (surface_id, activity) = {
+            let mut app = app_state.lock().expect("app lock");
+            (
+                app.handle("surface.current", &json!({}))
+                    .expect("current surface")["surface_id"]
+                    .as_str()
+                    .expect("surface id")
+                    .to_string(),
+                app.render_activity(),
+            )
+        };
+        let mut callbacks = Box::new(test_ghostty_callbacks(Some(surface)));
+        callbacks.close_surface_id = Some(surface_id);
+        callbacks.app_state = Some(Arc::clone(&app_state));
+        let ptr = ghostty_callback_ptr(callbacks.as_ref());
+        let token = callbacks.token;
+        register_ghostty_callbacks(callbacks.as_ref());
+
+        let before_title = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::SetTitle {
+                surface: surface as usize,
+                title: "runtime title".to_string(),
+            },
+        );
+        assert!(activity.model_mutation_generation() > before_title);
+
+        let after_title = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::SetTitle {
+                surface: surface as usize,
+                title: "runtime title".to_string(),
+            },
+        );
+        assert_eq!(activity.model_mutation_generation(), after_title);
+
+        let before_pwd = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::Pwd {
+                surface: surface as usize,
+                pwd: "/tmp/cmux-ghostty".to_string(),
+            },
+        );
+        assert!(activity.model_mutation_generation() > before_pwd);
+
+        let after_pwd = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::Pwd {
+                surface: surface as usize,
+                pwd: "/tmp/cmux-ghostty".to_string(),
+            },
+        );
+        assert_eq!(activity.model_mutation_generation(), after_pwd);
+
+        let before_palette = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::ToggleCommandPalette {
+                surface: surface as usize,
+            },
+        );
+        assert!(activity.model_mutation_generation() > before_palette);
+
+        unregister_ghostty_callbacks(callbacks.as_ref());
+    }
+
     unsafe extern "C" fn test_complete_clipboard_request(
         surface: GhosttySurface,
         text: *const c_char,

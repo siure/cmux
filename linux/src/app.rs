@@ -55099,6 +55099,50 @@ mod render_activity_tests {
     }
 
     #[test]
+    fn notification_focus_records_presented_model_changes() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let notification_id = app
+            .handle(
+                "notification.create",
+                &json!({
+                    "surface_id": surface_id,
+                    "title": "Needs attention"
+                }),
+            )
+            .expect("create notification")["notification_id"]
+            .as_str()
+            .expect("notification id")
+            .to_string();
+        assert!(app
+            .notifications
+            .iter()
+            .any(|notification| notification.id == notification_id && !notification.read));
+
+        let before = activity.model_mutation_generation();
+        app.handle(
+            "debug.notification.focus",
+            &json!({"surface_id": surface_id}),
+        )
+        .expect("focus notification");
+
+        assert!(app
+            .notifications
+            .iter()
+            .any(|notification| notification.id == notification_id && notification.read));
+        assert!(
+            activity.model_mutation_generation() > before,
+            "focusing a GTK notification row must wake the model watcher"
+        );
+    }
+
+    #[test]
     fn open_targets_records_presented_model_mutation() {
         let directory = tempfile::tempdir().expect("open target directory");
         let mut app = AppState::with_paths_and_terminal_startup(
