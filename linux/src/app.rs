@@ -55051,6 +55051,53 @@ mod render_activity_tests {
     }
 
     #[test]
+    fn disabling_agent_hibernation_directly_records_resumed_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        app.agent_hibernation_settings_use_cmux_config = false;
+        app.agent_hibernation_settings_path = temp.path().join("agent-hibernation.json");
+        app.agent_hibernation_settings.enabled = true;
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let surface = app.surfaces.get_mut(&surface_id).expect("surface");
+        surface.resume_binding = Some(super::ResumeBinding {
+            name: Some("Codex".to_string()),
+            kind: Some("codex".to_string()),
+            command: "printf resumed".to_string(),
+            cwd: None,
+            checkpoint_id: Some("checkpoint-disable-hibernation".to_string()),
+            source: Some("agent-hook".to_string()),
+            environment: HashMap::new(),
+            auto_resume: true,
+            approval_policy: Some("auto".to_string()),
+            approval_record_id: None,
+            updated_at: 1.0,
+        });
+        surface.agent_hibernation = Some(super::AgentHibernationSurfaceState {
+            hibernated_at_ms: 1,
+            last_activity_ms: 1,
+        });
+        surface.resume_restore_state = Some("hibernated".to_string());
+
+        let before = activity.model_mutation_generation();
+        let result = app
+            .handle("agent.hibernation.set", &json!({"enabled": false}))
+            .expect("disable hibernation");
+
+        assert_eq!(result["enabled"], false);
+        assert!(app.surfaces[&surface_id].agent_hibernation.is_none());
+        assert!(
+            activity.model_mutation_generation() > before,
+            "direct hibernation settings must wake the GTK model watcher after resuming a surface"
+        );
+    }
+
+    #[test]
     fn open_targets_records_presented_model_mutation() {
         let directory = tempfile::tempdir().expect("open target directory");
         let mut app = AppState::with_paths_and_terminal_startup(
