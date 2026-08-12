@@ -24539,7 +24539,16 @@ impl AppState {
         let focus = bool_param(params, "focus").unwrap_or(true);
         let mut opened = Vec::new();
         for target in targets {
-            opened.push(self.open_target(target, params, focus)?);
+            match self.open_target(target, params, focus) {
+                Ok(value) => opened.push(value),
+                Err(error) => {
+                    if !opened.is_empty() {
+                        self.render_activity.record_model_mutation();
+                        self.persist_session_snapshot_after_method("open.targets");
+                    }
+                    return Err(error);
+                }
+            }
         }
         Ok(json!({
             "count": opened.len(),
@@ -54141,6 +54150,7 @@ fn method_persists_session_snapshot(method: &str) -> bool {
     matches!(
         method,
         "session.restore_previous"
+            | "open.targets"
             | "settings.open"
             | "settings.set_target"
             | "settings.shortcuts"
@@ -54276,7 +54286,6 @@ fn method_changes_presented_model(
                 | "help.shortcuts.toggle"
                 | "notification.mark_unread"
                 | "notification.reconcile"
-                | "open.targets"
                 | "settings.global_hotkey.set_enabled"
         )
         || (method.starts_with("settings.") && method.contains(".set"))
