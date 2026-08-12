@@ -54366,7 +54366,8 @@ fn method_changes_presented_model(
         || socket_event_mapping(method).is_some()
         || matches!(
             method,
-            "config.reload"
+            "agent.hibernation.set"
+                | "config.reload"
                 | "debug.command_palette.toggle"
                 | "debug.command_palette.delete_backward"
                 | "debug.command_palette.rename_tab.open"
