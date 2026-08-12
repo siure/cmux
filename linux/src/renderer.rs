@@ -5257,6 +5257,25 @@ mod tests {
     }
 
     #[test]
+    fn renderer_text_fallback_preserves_explicit_disabled_modes() {
+        let grid = render_grid_from_text(
+            "surface-a",
+            47,
+            8,
+            2,
+            "ready\x1b[?2004h\x1b[?7;2004l",
+        );
+
+        assert_eq!(
+            grid["modes"],
+            json!([
+                {"code": 7, "ansi": false, "on": false},
+                {"code": 2004, "ansi": false, "on": false}
+            ])
+        );
+    }
+
+    #[test]
     fn ghostty_vt_snapshot_preserves_fallback_cursor_presentation() {
         let native = json!({
             "parser": "ghostty-vt",
