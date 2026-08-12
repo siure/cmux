@@ -1800,12 +1800,6 @@ fn merge_render_grid_protocol_state(render_grid: &mut Value, fallback: &Value) {
     let Some(target) = render_grid.as_object_mut() else {
         return;
     };
-    if let Some(active_screen) = fallback
-        .get("active_screen")
-        .filter(|value| matches!(value.as_str(), Some("primary" | "alternate")))
-    {
-        target.insert("active_screen".to_string(), active_screen.clone());
-    }
     if let Some(modes) = fallback.get("modes").and_then(Value::as_array) {
         let modes = modes
             .iter()
@@ -1946,6 +1940,11 @@ fn render_grid_from_ghostty_vt_snapshot(
 ) -> Option<Value> {
     let columns = snapshot.get("cols")?.as_u64()?.max(1);
     let rows = snapshot.get("rows")?.as_u64()?.max(1);
+    let active_screen = snapshot
+        .get("active_screen")
+        .and_then(Value::as_str)
+        .filter(|screen| matches!(*screen, "primary" | "alternate"))
+        .unwrap_or("primary");
     let rows_data = snapshot.get("rows_data")?.as_array()?;
     let mut styles = vec![json!({"id": 0})];
     let mut style_ids = HashMap::from([("{}".to_string(), 0_u64)]);
@@ -2025,7 +2024,7 @@ fn render_grid_from_ghostty_vt_snapshot(
         "cleared_rows": [],
         "styles": styles,
         "row_spans": row_spans,
-        "active_screen": "primary",
+        "active_screen": active_screen,
         "modes": [],
         "scrollback_rows": 0,
         "scrollback_spans": []
@@ -5203,11 +5202,12 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_vt_snapshot_preserves_fallback_protocol_state() {
+    fn ghostty_vt_snapshot_preserves_native_screen_and_fallback_modes() {
         let native = json!({
             "parser": "ghostty-vt",
             "cols": 8,
             "rows": 1,
+            "active_screen": "primary",
             "rows_data": []
         });
         let fallback =
@@ -5222,7 +5222,7 @@ mod tests {
 
         attach_ghostty_vt_snapshot(&mut object, "surface-a", 45, native);
 
-        assert_eq!(object["render_grid"]["active_screen"], "alternate");
+        assert_eq!(object["render_grid"]["active_screen"], "primary");
         assert_eq!(object["render_grid"]["modes"], fallback_modes);
     }
 
@@ -5244,7 +5244,7 @@ mod tests {
 
         merge_render_grid_protocol_state(&mut render_grid, &fallback);
 
-        assert_eq!(render_grid["active_screen"], "alternate");
+        assert_eq!(render_grid["active_screen"], "primary");
         assert_eq!(
             render_grid["modes"],
             json!([

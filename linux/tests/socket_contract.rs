@@ -29890,7 +29890,7 @@ fn ghostty_vt_adapter_preserves_active_screen_across_transcript_truncation() {
     rpc(
         &server.socket,
         "surface.send_text",
-        json!({"surface_id": surface_id, "text": "continue\\n"}),
+        json!({"surface_id": surface_id, "text": "continue\n"}),
     );
     let deadline = Instant::now() + Duration::from_secs(4);
     let restored = loop {

@@ -8,6 +8,7 @@ const RTLD_NOW: c_int = 2;
 const GHOSTTY_SUCCESS: c_int = 0;
 const GHOSTTY_INVALID_VALUE: c_int = -2;
 const GHOSTTY_OUT_OF_SPACE: c_int = -3;
+const TERMINAL_DATA_ACTIVE_SCREEN: c_int = 6;
 const GHOSTTY_FORMATTER_FORMAT_PLAIN: c_int = 0;
 const RENDER_DATA_COLS: c_int = 1;
 const RENDER_DATA_ROWS: c_int = 2;
@@ -48,6 +49,7 @@ type GhosttyTerminalNew =
     unsafe extern "C" fn(*const c_void, *mut GhosttyTerminal, GhosttyTerminalOptions) -> c_int;
 type GhosttyTerminalFree = unsafe extern "C" fn(GhosttyTerminal);
 type GhosttyTerminalVtWrite = unsafe extern "C" fn(GhosttyTerminal, *const u8, usize);
+type GhosttyTerminalGet = unsafe extern "C" fn(GhosttyTerminal, c_int, *mut c_void) -> c_int;
 type GhosttyFormatterTerminalNew = unsafe extern "C" fn(
     *const c_void,
     *mut GhosttyFormatter,
@@ -182,6 +184,7 @@ pub struct RenderSnapshot {
     pub cols: u16,
     pub rows: u16,
     pub dirty: i32,
+    pub active_screen: &'static str,
     pub cursor: RenderCursor,
     pub row_count: usize,
     pub rows_data: Vec<RenderRow>,
@@ -249,6 +252,7 @@ struct GhosttyVtLibrary {
     terminal_new: GhosttyTerminalNew,
     terminal_free: GhosttyTerminalFree,
     terminal_vt_write: GhosttyTerminalVtWrite,
+    terminal_get: GhosttyTerminalGet,
     formatter_terminal_new: GhosttyFormatterTerminalNew,
     formatter_format_alloc: GhosttyFormatterFormatAlloc,
     formatter_free: GhosttyFormatterFree,
@@ -282,6 +286,7 @@ impl GhosttyVtLibrary {
             terminal_new: load_symbol(handle, "ghostty_terminal_new")?,
             terminal_free: load_symbol(handle, "ghostty_terminal_free")?,
             terminal_vt_write: load_symbol(handle, "ghostty_terminal_vt_write")?,
+            terminal_get: load_symbol(handle, "ghostty_terminal_get")?,
             formatter_terminal_new: load_symbol(handle, "ghostty_formatter_terminal_new")?,
             formatter_format_alloc: load_symbol(handle, "ghostty_formatter_format_alloc")?,
             formatter_free: load_symbol(handle, "ghostty_formatter_free")?,
@@ -390,6 +395,15 @@ impl GhosttyVtLibrary {
         let snapshot_cols = self.render_get_u16(render_guard.state, RENDER_DATA_COLS)?;
         let snapshot_rows = self.render_get_u16(render_guard.state, RENDER_DATA_ROWS)?;
         let dirty = self.render_get_i32(render_guard.state, RENDER_DATA_DIRTY)?;
+        let mut active_screen: c_int = 0;
+        let result = unsafe {
+            (self.terminal_get)(
+                terminal_guard.terminal,
+                TERMINAL_DATA_ACTIVE_SCREEN,
+                (&mut active_screen as *mut c_int).cast(),
+            )
+        };
+        ensure_success(result, "ghostty_terminal_get(active_screen)")?;
         let cursor = RenderCursor {
             visible: self.render_get_bool(render_guard.state, RENDER_DATA_CURSOR_VISIBLE)?,
             in_viewport: self
@@ -468,6 +482,11 @@ impl GhosttyVtLibrary {
             cols: snapshot_cols,
             rows: snapshot_rows,
             dirty,
+            active_screen: if active_screen == 1 {
+                "alternate"
+            } else {
+                "primary"
+            },
             cursor,
             row_count: rows_data.len(),
             rows_data,

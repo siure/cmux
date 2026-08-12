@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -21,6 +21,7 @@ pub struct TerminalHandle {
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     title_events: Arc<Mutex<Vec<String>>>,
     output_generation: Arc<AtomicU64>,
+    alternate_screen_active: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
@@ -85,6 +86,14 @@ impl Default for TerminalSize {
 impl TerminalHandle {
     pub fn output_generation(&self) -> u64 {
         self.output_generation.load(Ordering::Acquire)
+    }
+
+    pub fn active_screen(&self) -> &'static str {
+        if self.alternate_screen_active.load(Ordering::Acquire) {
+            "alternate"
+        } else {
+            "primary"
+        }
     }
 
     pub fn send_text(&self, text: &str) -> Result<()> {
@@ -172,6 +181,99 @@ impl TerminalHandle {
                 return Ok(None);
             }
             thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActiveScreenTracker {
+    state: ActiveScreenScanState,
+}
+
+#[derive(Default)]
+enum ActiveScreenScanState {
+    #[default]
+    Ground,
+    Escape,
+    Csi {
+        private: bool,
+        value: u16,
+        saw_digit: bool,
+        targets_screen: bool,
+    },
+}
+
+impl ActiveScreenTracker {
+    fn update(&mut self, bytes: &[u8], active: &AtomicBool) {
+        for &byte in bytes {
+            self.state = match std::mem::take(&mut self.state) {
+                ActiveScreenScanState::Ground if byte == 0x1b => ActiveScreenScanState::Escape,
+                ActiveScreenScanState::Ground if byte == 0x9b => ActiveScreenScanState::Csi {
+                    private: false,
+                    value: 0,
+                    saw_digit: false,
+                    targets_screen: false,
+                },
+                ActiveScreenScanState::Ground => ActiveScreenScanState::Ground,
+                ActiveScreenScanState::Escape if byte == b'[' => ActiveScreenScanState::Csi {
+                    private: false,
+                    value: 0,
+                    saw_digit: false,
+                    targets_screen: false,
+                },
+                ActiveScreenScanState::Escape if byte == 0x1b => ActiveScreenScanState::Escape,
+                ActiveScreenScanState::Escape => ActiveScreenScanState::Ground,
+                ActiveScreenScanState::Csi {
+                    mut private,
+                    mut value,
+                    mut saw_digit,
+                    mut targets_screen,
+                } => {
+                    if byte == 0x1b {
+                        ActiveScreenScanState::Escape
+                    } else if byte == b'?' && !private && !saw_digit {
+                        private = true;
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            targets_screen,
+                        }
+                    } else if byte.is_ascii_digit() {
+                        value = value
+                            .saturating_mul(10)
+                            .saturating_add(u16::from(byte - b'0'));
+                        saw_digit = true;
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            targets_screen,
+                        }
+                    } else if byte == b';' {
+                        targets_screen |= private && saw_digit && matches!(value, 47 | 1047 | 1049);
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value: 0,
+                            saw_digit: false,
+                            targets_screen,
+                        }
+                    } else if (0x40..=0x7e).contains(&byte) {
+                        targets_screen |= private && saw_digit && matches!(value, 47 | 1047 | 1049);
+                        if targets_screen && matches!(byte, b'h' | b'l') {
+                            active.store(byte == b'h', Ordering::Release);
+                        }
+                        ActiveScreenScanState::Ground
+                    } else {
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            targets_screen,
+                        }
+                    }
+                }
+            };
         }
     }
 }
@@ -595,13 +697,18 @@ fn spawn_terminal_inner(
     let reader_title_events = Arc::clone(&title_events);
     let output_generation = Arc::new(AtomicU64::new(0));
     let reader_output_generation = Arc::clone(&output_generation);
+    let alternate_screen_active = Arc::new(AtomicBool::new(false));
+    let reader_alternate_screen_active = Arc::clone(&alternate_screen_active);
 
     thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
+        let mut active_screen_tracker = ActiveScreenTracker::default();
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    active_screen_tracker
+                        .update(&chunk[..n], reader_alternate_screen_active.as_ref());
                     let text = String::from_utf8_lossy(&chunk[..n]);
                     let titles = terminal_title_events_from_text(&text);
                     if !titles.is_empty() {
@@ -633,6 +740,7 @@ fn spawn_terminal_inner(
         child: Arc::new(Mutex::new(child)),
         title_events,
         output_generation,
+        alternate_screen_active,
     })
 }
 

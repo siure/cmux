@@ -19074,7 +19074,7 @@ impl AppState {
             })
             .ok_or_else(|| AppError::not_found("no selected surface"))?;
         let text = string_param(params, "text").unwrap_or_default();
-        self.resume_agent_hibernated_surface(&surface_id)?;
+        let resumed = self.resume_agent_hibernated_surface(&surface_id)?;
         self.record_agent_hibernation_activity(&surface_id, true, false);
         if let Some(surface) = self.surfaces.get_mut(&surface_id) {
             append_surface_input_history(surface, &text);
@@ -19084,7 +19084,8 @@ impl AppState {
             self.mark_remote_surface_exited(&surface_id)?;
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         if let Some(output) = self.detachable_pty_probe_output(&surface_id, &text) {
@@ -19096,7 +19097,8 @@ impl AppState {
             }
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         let handled_remote_command = self.handle_remote_surface_text(&surface_id, &text)?;
@@ -19107,7 +19109,8 @@ impl AppState {
             }
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         if let Some(surface) = self.surfaces.get_mut(&surface_id) {
@@ -19116,13 +19119,15 @@ impl AppState {
         if handled_remote_command {
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         if self.enqueue_renderer_owned_terminal_text(&surface_id, text.clone()) {
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         self.ensure_surface_terminal_started(&surface_id)?;
@@ -19141,7 +19146,8 @@ impl AppState {
         }
         Ok(json!({
             "surface_id": surface_id,
-            "surface_ref": self.surface_ref(&surface_id)
+            "surface_ref": self.surface_ref(&surface_id),
+            "resumed": resumed
         }))
     }
 
@@ -19682,7 +19688,17 @@ impl AppState {
             .unwrap_or_else(|| requested_terminal_size(params));
         let snapshot = ghostty_vt::render_snapshot(&input, size.cols, size.rows)
             .map_err(|err| AppError::not_supported(err.to_string()))?;
-        serde_json::to_value(snapshot).map_err(|err| AppError::internal(err.to_string()))
+        let mut value =
+            serde_json::to_value(snapshot).map_err(|err| AppError::internal(err.to_string()))?;
+        if let Some(active_screen) = surface_id
+            .as_deref()
+            .and_then(|surface_id| self.surfaces.get(surface_id))
+            .and_then(|surface| surface.terminal.as_ref())
+            .map(TerminalHandle::active_screen)
+        {
+            value["active_screen"] = json!(active_screen);
+        }
+        Ok(value)
     }
 
     fn ghostty_vt_input_bytes(&mut self, params: &Value) -> AppResult<(Vec<u8>, Option<String>)> {
@@ -54210,11 +54226,12 @@ fn method_changes_presented_model(
     debug_shortcut_was_terminal_input: bool,
 ) -> bool {
     if method == "debug.type" {
-        return command_palette_was_visible;
+        return command_palette_was_visible
+            || result.get("resumed").and_then(Value::as_bool) == Some(true);
     }
     if method == "debug.shortcut.simulate" {
         if debug_shortcut_was_terminal_input {
-            return false;
+            return result.get("resumed").and_then(Value::as_bool) == Some(true);
         }
     }
     if matches!(method, "debug.shortcut.simulate" | "debug.type")
@@ -54222,10 +54239,18 @@ fn method_changes_presented_model(
     {
         return false;
     }
+    if method == "surface.send_text" {
+        return result.get("resumed").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "app.close_confirmation.reply" {
+        return result.get("reason").and_then(Value::as_str) != Some("request_not_found");
+    }
+    if method == "debug.window.close_request" {
+        return true;
+    }
     if matches!(
         method,
-        "surface.send_text"
-            | "mobile.terminal.input"
+        "mobile.terminal.input"
             | "mobile.terminal.mouse"
             | "mobile.terminal.paste"
             | "mobile.terminal.paste_image"
@@ -54336,7 +54361,7 @@ fn result_is_terminal_input(result: &Value) -> bool {
             || (object.contains_key("surface_id")
                 && object
                     .keys()
-                    .all(|key| matches!(key.as_str(), "surface_id" | "surface_ref")))
+                    .all(|key| matches!(key.as_str(), "surface_id" | "surface_ref" | "resumed")))
     })
 }
 
