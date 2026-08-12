@@ -54260,6 +54260,12 @@ fn method_changes_presented_model(
     if method == "settings.terminal.resume.clear" {
         return result.get("cleared").and_then(Value::as_u64).unwrap_or(0) > 0;
     }
+    if matches!(
+        method,
+        "settings.workspace_colors.color.remove" | "settings.workspace_colors.palette.reset"
+    ) {
+        return true;
+    }
     if method == "debug.window.close_request" {
         return true;
     }
