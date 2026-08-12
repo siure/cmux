@@ -7480,7 +7480,9 @@ impl AppState {
     fn prepare_for_request(&mut self) -> AppResult<()> {
         self.drain_remote_tmux_events();
         self.flush_terminal_title_events()?;
-        self.refresh_agent_session_processes();
+        if self.refresh_agent_session_processes() {
+            self.render_activity.record_model_mutation();
+        }
         self.maybe_evaluate_agent_hibernation();
         Ok(())
     }
@@ -16381,7 +16383,8 @@ impl AppState {
         }))
     }
 
-    fn refresh_agent_session_processes(&mut self) {
+    fn refresh_agent_session_processes(&mut self) -> bool {
+        let mut changed = false;
         let structured_snapshots = self
             .agent_session_runtimes
             .iter()
@@ -16397,6 +16400,14 @@ impl AppState {
         for (surface_id, snapshot, exit_code) in structured_snapshots {
             if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                 if let Some(state) = surface.agent_session.as_mut() {
+                    let before = (
+                        state.status.clone(),
+                        state.session_id.clone(),
+                        state.last_error.clone(),
+                        state.ready,
+                        state.turn_in_flight,
+                        state.was_running_at_snapshot,
+                    );
                     apply_agent_session_runtime_snapshot(state, &snapshot);
                     if let Some(exit_code) = exit_code {
                         state.status = if exit_code == 0 {
@@ -16415,6 +16426,18 @@ impl AppState {
                             ));
                         }
                         finished_structured.push(surface_id.clone());
+                    }
+                    let after = (
+                        state.status.clone(),
+                        state.session_id.clone(),
+                        state.last_error.clone(),
+                        state.ready,
+                        state.turn_in_flight,
+                        state.was_running_at_snapshot,
+                    );
+                    if before != after {
+                        surface.present_count += 1;
+                        changed = true;
                     }
                 }
             }
@@ -16454,8 +16477,10 @@ impl AppState {
                         .then(|| format!("agent provider exited with status {exit_code}"));
                 }
                 surface.present_count += 1;
+                changed = true;
             }
         }
+        changed
     }
 
     fn surface_current(&self, params: &Value) -> AppResult<Value> {
