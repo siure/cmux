@@ -1173,6 +1173,24 @@ mod tests {
         fs::set_permissions(path, permissions).expect("make unspawnable shell executable");
     }
 
+    fn write_shell_with_shebang(path: &Path, shebang: &str) {
+        fs::write(path, format!("#!{shebang}\n")).expect("write shell shebang");
+        let mut permissions = fs::metadata(path)
+            .expect("shell shebang metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make shell shebang executable");
+    }
+
+    fn write_shell_probe_with_shebang(path: &Path, shebang: &str) {
+        write_shell_with_shebang(path, shebang);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .and_then(|mut file| writeln!(file, "printf '%s%s\\n' '{SHELL_PROBE_PREFIX}' \"$0\""))
+            .expect("write shebang shell probe");
+    }
+
     fn current_passwd_shell() -> String {
         let uid = fs::metadata("/proc/self")
             .expect("current process metadata")
@@ -1403,6 +1421,153 @@ mod tests {
             broken_shell.to_str(),
             env_shell.to_str(),
             env_shell.to_str().expect("environment shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_override_with_nested_missing_shebang_interpreter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let broken_interpreter = temp.path().join("broken-interpreter");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_interpreter);
+        write_shell_with_shebang(
+            &broken_shell,
+            broken_interpreter.to_str().expect("interpreter path"),
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_nested_unspawnable_override_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let broken_interpreter = temp.path().join("broken-interpreter");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_interpreter);
+        write_shell_with_shebang(
+            &broken_shell,
+            broken_interpreter.to_str().expect("interpreter path"),
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe_with_command(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_env_override_with_missing_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_shebang(&broken_shell, "/usr/bin/env cmux-missing-shell-command");
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_env_split_string_override_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_shebang(
+            &broken_shell,
+            "/usr/bin/env -S cmux-missing-shell-command --interactive",
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe_with_command(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_cyclic_shebang_interpreters() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let cyclic_interpreter = temp.path().join("cyclic-interpreter");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_shebang(
+            &broken_shell,
+            cyclic_interpreter
+                .to_str()
+                .expect("cyclic interpreter path"),
+        );
+        write_shell_with_shebang(
+            &cyclic_interpreter,
+            broken_shell.to_str().expect("broken shell path"),
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_excessively_deep_shebang_chain() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chain = (0..5)
+            .map(|index| temp.path().join(format!("shell-{index}")))
+            .collect::<Vec<_>>();
+        for (shell, interpreter) in chain.iter().zip(chain.iter().skip(1)) {
+            write_shell_with_shebang(shell, interpreter.to_str().expect("interpreter path"));
+        }
+        write_shell_with_shebang(chain.last().expect("last shell"), "/bin/sh");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            chain.first().and_then(|path| path.to_str()),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_accepts_env_path_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        write_shell_probe_with_shebang(&cmux_shell, "/usr/bin/env sh");
+
+        run_shell_selection_probe(
+            cmux_shell.to_str(),
+            None,
+            cmux_shell.to_str().expect("cmux shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_accepts_env_split_string_path_command_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        write_shell_probe_with_shebang(&cmux_shell, "/usr/bin/env -S sh --");
+
+        run_shell_selection_probe_with_command(
+            cmux_shell.to_str(),
+            None,
+            cmux_shell.to_str().expect("cmux shell path"),
             Some("printf initial-command-path"),
         );
     }
