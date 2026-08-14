@@ -1132,6 +1132,16 @@ mod tests {
         fs::set_permissions(path, permissions).expect("make shell probe executable");
     }
 
+    fn write_shell_with_missing_interpreter(path: &Path) {
+        fs::write(path, "#!/definitely/missing/cmux-shell-interpreter\n")
+            .expect("write shell with missing interpreter");
+        let mut permissions = fs::metadata(path)
+            .expect("unspawnable shell metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make unspawnable shell executable");
+    }
+
     fn current_passwd_shell() -> String {
         let uid = fs::metadata("/proc/self")
             .expect("current process metadata")
@@ -1332,6 +1342,37 @@ mod tests {
             blocked_shell.to_str(),
             env_shell.to_str(),
             env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_override_with_missing_shebang_interpreter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_shell);
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_unspawnable_override_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_shell);
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe_with_command(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+            Some("printf initial-command-path"),
         );
     }
 
