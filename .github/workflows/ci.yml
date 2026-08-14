@@ -364,10 +364,12 @@ jobs:
       - name: Validate Linux distribution bundle
         working-directory: .
         run: |
+          bash -n linux/scripts/run-dev.sh
           bash -n linux/scripts/install-dev.sh
           bash -n linux/scripts/build-bundle.sh
           sh -n linux/dist/cmux-linux-app
           sh -n linux/dist/install-bundle.sh
+          ./tests/test_linux_dev_launcher.sh
           ./tests/test_linux_bundle.sh
 
   remote-daemon-tests:

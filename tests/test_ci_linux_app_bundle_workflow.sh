@@ -42,9 +42,9 @@ require_token 'echo "repository=$ghostty_repository" >> "$GITHUB_OUTPUT"' \
     "the workflow must pass the synchronized Ghostty repository to later steps"
 require_token 'RUST_VERSION: "1.92.0"' \
     "the workflow must pin the validated Rust version"
-require_token 'ZIG_VERSION: "0.15.2"' \
+require_token 'ZIG_VERSION: "0.16.0"' \
     "the workflow must pin the validated Zig version"
-require_token 'ZIG_SHA256: "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"' \
+require_token 'ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"' \
     "the downloaded Zig archive must have a pinned checksum"
 require_token "libgtk-4-dev" \
     "the workflow must install GTK development files"
