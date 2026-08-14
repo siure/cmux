@@ -6,8 +6,47 @@ linux_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 repo_root=$(CDPATH= cd -- "$linux_dir/.." && pwd)
 ghostty_dir=$repo_root/ghostty
 
-if [[ ! -f "$ghostty_dir/build.zig" ]]; then
+expected_ghostty_commit=$(git -C "$repo_root" rev-parse HEAD:ghostty 2>/dev/null) || {
+    echo "error: could not resolve the Ghostty commit pinned by cmux" >&2
+    exit 1
+}
+
+if [[ ! -e "$ghostty_dir/.git" ]]; then
     git -C "$repo_root" submodule update --init --recursive ghostty
+fi
+
+actual_ghostty_commit=$(git -C "$ghostty_dir" rev-parse HEAD 2>/dev/null) || {
+    echo "error: Ghostty submodule is not initialized correctly: $ghostty_dir" >&2
+    exit 1
+}
+if [[ "$actual_ghostty_commit" != "$expected_ghostty_commit" ]]; then
+    ghostty_changes=$(git -C "$ghostty_dir" status --porcelain --untracked-files=normal) || {
+        echo "error: could not inspect the Ghostty submodule working tree" >&2
+        exit 1
+    }
+    if [[ -n "$ghostty_changes" ]]; then
+        echo "error: Ghostty submodule is at $actual_ghostty_commit but cmux pins $expected_ghostty_commit; refusing to update a checkout with local changes" >&2
+        exit 1
+    fi
+    if ghostty_branch=$(git -C "$ghostty_dir" symbolic-ref --quiet --short HEAD); then
+        echo "error: Ghostty submodule is at $actual_ghostty_commit on branch $ghostty_branch but cmux pins $expected_ghostty_commit; refusing to move an attached branch" >&2
+        exit 1
+    fi
+
+    git -C "$repo_root" submodule update --init --recursive ghostty
+    actual_ghostty_commit=$(git -C "$ghostty_dir" rev-parse HEAD 2>/dev/null) || {
+        echo "error: Ghostty submodule update did not produce a usable checkout" >&2
+        exit 1
+    }
+    if [[ "$actual_ghostty_commit" != "$expected_ghostty_commit" ]]; then
+        echo "error: Ghostty submodule update left $actual_ghostty_commit checked out; expected $expected_ghostty_commit" >&2
+        exit 1
+    fi
+fi
+
+if [[ ! -f "$ghostty_dir/build.zig" ]]; then
+    echo "error: Ghostty submodule is missing build.zig: $ghostty_dir" >&2
+    exit 1
 fi
 
 required_zig=$(sed -nE \
