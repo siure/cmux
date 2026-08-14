@@ -62,14 +62,20 @@ require_token "sha256sum -c" \
     "the workflow must verify the generated archive checksum"
 require_token "Smoke source launcher with pinned Ghostty" \
     "the workflow must exercise the source launcher with the pinned Ghostty checkout"
-require_token "timeout 300s xvfb-run -a sh -ceu" \
+require_token "dbus-x11" \
+    "the live source launcher smoke must have an isolated D-Bus session helper"
+require_token "timeout 300s xvfb-run -a dbus-run-session -- sh -ceu" \
     "the source launcher smoke must keep the real Ghostty renderer alive under Xvfb"
 require_token '"$launcher" >"$app_log" 2>&1 &' \
     "the source launcher smoke must enter the live app path"
 require_token '"$cmux" --socket "$socket" ping' \
     "the source launcher smoke must wait for the live app socket"
+require_token '"runtime_surface_ready"[[:space:]]*:[[:space:]]*true' \
+    "the source launcher smoke must wait for the Ghostty terminal runtime"
 require_token 'renderer diagnostics --backend ghostty' \
     "the source launcher smoke must validate the live Ghostty backend"
+require_token '"embedding_status"[[:space:]]*:[[:space:]]*"available"' \
+    "the source launcher smoke must require an available Ghostty embedding"
 require_token 'rpc app.quit.request "{}"' \
     "the source launcher smoke must stop the live app externally"
 require_token "cmux.linux-bundle.provenance.v1" \
