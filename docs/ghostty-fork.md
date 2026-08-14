@@ -14,15 +14,30 @@ parent submodule SHA.
 
 ## Current fork changes
 
-Current cmux pinned fork patch head: `479baf4d5`. It merges the Linux embedding
-ABI v15 checkpoint with the macOS fork head `b211341be`, pins the Linux C ABI
-fingerprints in regression tests, and is published on `siure/ghostty` `main`.
+Current cmux pinned fork patch head: `3f13636a9`. It includes the Linux
+embedding ABI v15 checkpoint, the embedded callback/status contracts, and the
+Zig 0.16 Linux PTY translation fix. It is published on `siure/ghostty` `main`.
+The ABI checkpoint merges the Linux port with the macOS fork head `b211341be`
+and pins the Linux C ABI fingerprints in regression tests.
 The macOS fork head combines indented hard-newline link continuations with the
 presentation-token runtime from `24284c3ba` and was published through
 https://github.com/manaflow-ai/ghostty/pull/124.
 Its corresponding universal ReleaseFast GhosttyKit archive is published at
 https://github.com/manaflow-ai/ghostty/releases/tag/xcframework-b211341be1ba902e772f57fc67c3e65d35205676-crashsubdir-cmux-crash-v1
 and pinned in `scripts/ghosttykit-checksums.txt`.
+
+### Zig 0.16 Linux PTY translation
+
+- Commit: `3f13636a9` (fix: avoid fortified ptsname translation on Linux)
+- File: `src/pty.c`
+- Summary:
+  - Declares the Linux `ptsname_r` libc function directly instead of exposing
+    glibc's fortified `stdlib.h` inline wrapper to Zig translate-c.
+  - Preserves the exact libc signature and runtime symbol while allowing the
+    pinned fork to build with Zig 0.16 on newer glibc systems.
+  - Conflict note: future PTY header refactors must keep `ptsname_r` available
+    without reintroducing translation of the fortified glibc wrapper until
+    translate-c supports that expression.
 
 ### Indented hard-newline link continuations
 
