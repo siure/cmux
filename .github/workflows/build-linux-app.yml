@@ -70,6 +70,8 @@ jobs:
             libwebkitgtk-6.0-dev \
             mesa-utils \
             pkg-config \
+            xauth \
+            xvfb \
             xz-utils
 
       - name: Configure Rust
@@ -117,6 +119,22 @@ jobs:
           CMUX_LINUX_BUNDLE_VERSION="$version" \
             ./linux/scripts/build-bundle.sh
           (cd dist && sha256sum -c "cmux-linux-$(uname -m).tar.gz.sha256")
+
+      - name: Smoke source launcher with pinned Ghostty
+        run: |
+          set -euo pipefail
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          mkdir -p "$smoke_root/config" "$smoke_root/state"
+          export XDG_CONFIG_HOME="$smoke_root/config"
+          export XDG_STATE_HOME="$smoke_root/state"
+          export CMUX_LINUX_SOCKET_PATH="$smoke_root/cmux.sock"
+          export CMUX_ZIG="$(command -v zig)"
+          timeout 300s xvfb-run -a ./linux/scripts/run-dev.sh \
+            --script $'status\nquit' > "$smoke_root/output.log"
+          grep -Fx 'window=window:1 workspace=workspace:1 pane=pane:1 surface=surface:1' \
+            "$smoke_root/output.log"
+          grep -Fx 'bye' "$smoke_root/output.log"
 
       - name: Record source provenance
         env:

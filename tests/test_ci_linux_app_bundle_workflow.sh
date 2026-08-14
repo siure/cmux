@@ -50,6 +50,8 @@ require_token "libgtk-4-dev" \
     "the workflow must install GTK development files"
 require_token "libwebkitgtk-6.0-dev" \
     "the workflow must install WebKitGTK development files"
+require_token "xvfb" \
+    "the workflow must install the virtual display used by the source launcher smoke"
 require_token 'CMUX_GHOSTTY_CHECKOUT="$GITHUB_WORKSPACE/ghostty"' \
     "the bundle build must use the checked-out Ghostty submodule"
 require_token 'CMUX_LINUX_BUNDLE_GHOSTTY_REPOSITORY="$GHOSTTY_REPOSITORY"' \
@@ -58,6 +60,10 @@ require_token "./linux/scripts/build-bundle.sh" \
     "the workflow must use the validated relocatable bundle builder"
 require_token "sha256sum -c" \
     "the workflow must verify the generated archive checksum"
+require_token "Smoke source launcher with pinned Ghostty" \
+    "the workflow must exercise the source launcher with the pinned Ghostty checkout"
+require_token "timeout 300s xvfb-run -a ./linux/scripts/run-dev.sh" \
+    "the source launcher smoke must start the real Ghostty renderer under Xvfb"
 require_token "cmux.linux-bundle.provenance.v1" \
     "the workflow must record source and toolchain provenance"
 require_token "git -C ghostty rev-parse HEAD" \
