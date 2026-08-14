@@ -1020,6 +1020,8 @@ fn passwd_shell_for_uid(uid: libc::uid_t) -> Option<PathBuf> {
 }
 
 fn shell_path_is_executable(path: &Path) -> bool {
+    const MAX_SHEBANG_DEPTH: usize = 4;
+
     let executable_file = |candidate: &Path| {
         if !candidate.is_absolute()
             || !fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file())
@@ -1041,26 +1043,121 @@ fn shell_path_is_executable(path: &Path) -> bool {
             ) == 0
         }
     };
+    let resolve_path_command = |command: &OsStr| {
+        let command_path = Path::new(command);
+        if command.as_bytes().contains(&b'/') {
+            return executable_file(command_path).then(|| command_path.to_path_buf());
+        }
 
-    if !executable_file(path) {
-        return false;
-    }
-
-    let mut header = [0_u8; 256];
-    let Ok(read) = fs::File::open(path).and_then(|mut file| file.read(&mut header)) else {
-        // Execute-only binaries remain valid candidates even when cmux cannot inspect them.
-        return true;
+        let search_path = std::env::var_os("PATH")?;
+        std::env::split_paths(&search_path)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(command_path))
+            .find(|candidate| executable_file(candidate))
     };
-    if !header[..read].starts_with(b"#!") {
-        return true;
-    }
 
-    let interpreter = header[2..read]
-        .split(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
-        .find(|part| !part.is_empty())
-        .map(OsStr::from_bytes)
-        .map(Path::new);
-    interpreter.is_some_and(executable_file)
+    let mut candidate = path.to_path_buf();
+    let mut visited = HashSet::new();
+    let mut shebang_depth = 0;
+
+    loop {
+        if !executable_file(&candidate) {
+            return false;
+        }
+        let identity = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if !visited.insert(identity) {
+            return false;
+        }
+
+        let mut header = [0_u8; 256];
+        let Ok(read) = fs::File::open(&candidate).and_then(|mut file| file.read(&mut header))
+        else {
+            // Execute-only binaries remain valid candidates even when cmux cannot inspect them.
+            return true;
+        };
+        if !header[..read].starts_with(b"#!") {
+            return true;
+        }
+        if shebang_depth >= MAX_SHEBANG_DEPTH {
+            return false;
+        }
+        shebang_depth += 1;
+
+        let line_end = header[2..read]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(read, |offset| offset + 2);
+        let directive = &header[2..line_end];
+        let Some(interpreter_start) = directive
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t'))
+        else {
+            return false;
+        };
+        let interpreter_tail = &directive[interpreter_start..];
+        let interpreter_end = interpreter_tail
+            .iter()
+            .position(|byte| matches!(byte, b' ' | b'\t'))
+            .unwrap_or(interpreter_tail.len());
+        let interpreter = PathBuf::from(OsStr::from_bytes(&interpreter_tail[..interpreter_end]));
+
+        if !matches!(
+            interpreter.as_os_str().as_bytes(),
+            b"/usr/bin/env" | b"/bin/env"
+        ) {
+            candidate = interpreter;
+            continue;
+        }
+        if !executable_file(&interpreter) {
+            return false;
+        }
+        let env_identity = fs::canonicalize(&interpreter).unwrap_or(interpreter);
+        if !visited.insert(env_identity) {
+            return false;
+        }
+
+        let optional = &interpreter_tail[interpreter_end..];
+        let optional_start = optional
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t'))
+            .unwrap_or(optional.len());
+        let optional_end = optional
+            .iter()
+            .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+            .map_or(optional_start, |index| index + 1);
+        let optional = &optional[optional_start..optional_end];
+
+        let env_command = if let Some(split_string) = optional.strip_prefix(b"-S") {
+            if !split_string
+                .first()
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                return false;
+            }
+            let Ok(split_string) = std::str::from_utf8(split_string) else {
+                return false;
+            };
+            let Ok(arguments) = shell_words::split(split_string) else {
+                return false;
+            };
+            let Some(command) = arguments.first() else {
+                return false;
+            };
+            if command.starts_with('-') || command.contains('=') {
+                return false;
+            }
+            OsString::from(command)
+        } else {
+            if optional.is_empty() || optional.iter().any(|byte| matches!(byte, b' ' | b'\t')) {
+                return false;
+            }
+            OsString::from(OsStr::from_bytes(optional))
+        };
+        let Some(resolved) = resolve_path_command(&env_command) else {
+            return false;
+        };
+        candidate = resolved;
+    }
 }
 
 fn terminal_spawn_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
