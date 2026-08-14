@@ -1020,16 +1020,47 @@ fn passwd_shell_for_uid(uid: libc::uid_t) -> Option<PathBuf> {
 }
 
 fn shell_path_is_executable(path: &Path) -> bool {
-    if !path.is_absolute() || !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+    let executable_file = |candidate: &Path| {
+        if !candidate.is_absolute()
+            || !fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file())
+        {
+            return false;
+        }
+        let Ok(candidate) = CString::new(candidate.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: candidate is NUL-terminated and remains alive for the call. AT_EACCESS
+        // checks the effective credentials execve will use, including ACL/noexec
+        // policy that cannot be inferred from mode bits alone.
+        unsafe {
+            libc::faccessat(
+                libc::AT_FDCWD,
+                candidate.as_ptr(),
+                libc::X_OK,
+                libc::AT_EACCESS,
+            ) == 0
+        }
+    };
+
+    if !executable_file(path) {
         return false;
     }
-    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
-        return false;
+
+    let mut header = [0_u8; 256];
+    let Ok(read) = fs::File::open(path).and_then(|mut file| file.read(&mut header)) else {
+        // Execute-only binaries remain valid candidates even when cmux cannot inspect them.
+        return true;
     };
-    // SAFETY: path is NUL-terminated and remains alive for the call. AT_EACCESS
-    // checks the effective credentials execve will use, including ACL/noexec
-    // policy that cannot be inferred from mode bits alone.
-    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+    if !header[..read].starts_with(b"#!") {
+        return true;
+    }
+
+    let interpreter = header[2..read]
+        .split(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+        .find(|part| !part.is_empty())
+        .map(OsStr::from_bytes)
+        .map(Path::new);
+    interpreter.is_some_and(executable_file)
 }
 
 fn terminal_spawn_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
