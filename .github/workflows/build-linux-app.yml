@@ -130,11 +130,42 @@ jobs:
           export XDG_STATE_HOME="$smoke_root/state"
           export CMUX_LINUX_SOCKET_PATH="$smoke_root/cmux.sock"
           export CMUX_ZIG="$(command -v zig)"
-          timeout 300s xvfb-run -a ./linux/scripts/run-dev.sh \
-            --script $'status\nquit' > "$smoke_root/output.log"
-          grep -Fx 'window=window:1 workspace=workspace:1 pane=pane:1 surface=surface:1' \
-            "$smoke_root/output.log"
-          grep -Fx 'bye' "$smoke_root/output.log"
+          timeout 300s xvfb-run -a sh -ceu '
+            launcher="$1"
+            cmux="$2"
+            socket="$3"
+            app_log="$4"
+            diagnostics="$5"
+            quit_output="$6"
+            "$launcher" >"$app_log" 2>&1 &
+            app_pid=$!
+            trap '\''kill "$app_pid" 2>/dev/null || true'\'' EXIT INT TERM
+
+            attempt=0
+            until [ -x "$cmux" ] && "$cmux" --socket "$socket" ping >/dev/null 2>&1; do
+              kill -0 "$app_pid"
+              attempt=$((attempt + 1))
+              [ "$attempt" -lt 1200 ]
+              sleep 0.1
+            done
+
+            "$cmux" --socket "$socket" --json renderer diagnostics --backend ghostty \
+              >"$diagnostics"
+            grep -Eq '\''"linux_embedding_supported"[[:space:]]*:[[:space:]]*true'\'' \
+              "$diagnostics"
+            "$cmux" --socket "$socket" rpc app.quit.request "{}" >"$quit_output"
+            grep -Eq '\''"quit"[[:space:]]*:[[:space:]]*true'\'' "$quit_output"
+            attempt=0
+            while kill -0 "$app_pid" 2>/dev/null; do
+              attempt=$((attempt + 1))
+              [ "$attempt" -lt 100 ]
+              sleep 0.05
+            done
+            wait "$app_pid"
+            trap - EXIT INT TERM
+          ' sh "$GITHUB_WORKSPACE/linux/scripts/run-dev.sh" \
+            "$GITHUB_WORKSPACE/linux/target/debug/cmux" "$CMUX_LINUX_SOCKET_PATH" \
+            "$smoke_root/app.log" "$smoke_root/diagnostics.json" "$smoke_root/quit.json"
 
       - name: Record source provenance
         env:
