@@ -14,9 +14,10 @@ parent submodule SHA.
 
 ## Current fork changes
 
-Current cmux pinned fork patch head: `3f13636a9`. It includes the Linux
+Current cmux pinned fork patch head: `772b5c15d`. It includes the Linux
 embedding ABI v15 checkpoint, the embedded callback/status contracts, and the
-Zig 0.16 Linux PTY translation fix. It is published on `siure/ghostty` `main`.
+Zig 0.16 Linux PTY and shared-library export fixes. It is published on
+`siure/ghostty` `main`.
 The ABI checkpoint merges the Linux port with the macOS fork head `b211341be`
 and pins the Linux C ABI fingerprints in regression tests.
 The macOS fork head combines indented hard-newline link continuations with the
@@ -25,6 +26,21 @@ https://github.com/manaflow-ai/ghostty/pull/124.
 Its corresponding universal ReleaseFast GhosttyKit archive is published at
 https://github.com/manaflow-ai/ghostty/releases/tag/xcframework-b211341be1ba902e772f57fc67c3e65d35205676-crashsubdir-cmux-crash-v1
 and pinned in `scripts/ghosttykit-checksums.txt`.
+
+### Linux embedding export boundary
+
+- Commit: `772b5c15d` (fix: restore Linux embedding export boundary)
+- Files:
+  - `src/build/GhosttyLib.zig`
+  - `src/build/ghostty-internal-linux.map`
+- Summary:
+  - Restores the Linux ELF version script that was dropped while merging the
+    Zig 0.16 and Linux embedding branches.
+  - Exposes exactly the 98 symbols required by cmux plus seven optional Ghostty
+    C API symbols, while hiding vendored and internal helper symbols.
+  - Conflict note: future `GhosttyLib` merges must preserve the Linux-only
+    `setVersionScript` call and update the tracked allowlist whenever the cmux
+    embedding ABI intentionally adds or removes a symbol.
 
 ### Zig 0.16 Linux PTY translation
 
