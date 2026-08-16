@@ -1,24 +1,59 @@
-# Ghostty Fork Changes (manaflow-ai/ghostty)
+# Ghostty Fork Changes
 
-This repo uses a fork of Ghostty for local patches that aren't upstream yet.
-When we change the fork, update this document and the parent submodule SHA.
+This repo uses `siure/ghostty` as the published source for the `ghostty/`
+submodule. It contains the cmux patches from `manaflow-ai/ghostty` plus the
+Linux embedding port. When we change the fork, update this document and the
+parent submodule SHA.
 
 ## Fork update checklist
 
 1) Make changes in `ghostty/`.
-2) Commit and push to `manaflow-ai/ghostty`.
+2) Commit and push to the `main` branch of `siure/ghostty`.
 3) Update this file with the new change summary + conflict notes.
 4) In the parent repo: `git add ghostty` and commit the submodule SHA.
 
 ## Current fork changes
 
-Current cmux pinned fork patch head: `b211341be`. It combines indented
-hard-newline link continuations with the presentation-token runtime from
-`24284c3ba` and is published through
+Current cmux pinned fork patch head: `772b5c15d`. It includes the Linux
+embedding ABI v15 checkpoint, the embedded callback/status contracts, and the
+Zig 0.16 Linux PTY and shared-library export fixes. It is published on
+`siure/ghostty` `main`.
+The ABI checkpoint merges the Linux port with the macOS fork head `b211341be`
+and pins the Linux C ABI fingerprints in regression tests.
+The macOS fork head combines indented hard-newline link continuations with the
+presentation-token runtime from `24284c3ba` and was published through
 https://github.com/manaflow-ai/ghostty/pull/124.
-The corresponding universal ReleaseFast GhosttyKit archive is published at
+Its corresponding universal ReleaseFast GhosttyKit archive is published at
 https://github.com/manaflow-ai/ghostty/releases/tag/xcframework-b211341be1ba902e772f57fc67c3e65d35205676-crashsubdir-cmux-crash-v1
 and pinned in `scripts/ghosttykit-checksums.txt`.
+
+### Linux embedding export boundary
+
+- Commit: `772b5c15d` (fix: restore Linux embedding export boundary)
+- Files:
+  - `src/build/GhosttyLib.zig`
+  - `src/build/ghostty-internal-linux.map`
+- Summary:
+  - Restores the Linux ELF version script that was dropped while merging the
+    Zig 0.16 and Linux embedding branches.
+  - Exposes exactly the 98 symbols required by cmux plus seven optional Ghostty
+    C API symbols, while hiding vendored and internal helper symbols.
+  - Conflict note: future `GhosttyLib` merges must preserve the Linux-only
+    `setVersionScript` call and update the tracked allowlist whenever the cmux
+    embedding ABI intentionally adds or removes a symbol.
+
+### Zig 0.16 Linux PTY translation
+
+- Commit: `3f13636a9` (fix: avoid fortified ptsname translation on Linux)
+- File: `src/pty.c`
+- Summary:
+  - Declares the Linux `ptsname_r` libc function directly instead of exposing
+    glibc's fortified `stdlib.h` inline wrapper to Zig translate-c.
+  - Preserves the exact libc signature and runtime symbol while allowing the
+    pinned fork to build with Zig 0.16 on newer glibc systems.
+  - Conflict note: future PTY header refactors must keep `ptsname_r` available
+    without reintroducing translation of the fortified glibc wrapper until
+    translate-c supports that expression.
 
 ### Indented hard-newline link continuations
 
@@ -446,16 +481,14 @@ and pinned in `scripts/ghosttykit-checksums.txt`.
   - Conflict note: this sits in the render-grid JSON encoder's row/cell loop,
     near the span coalescing logic and `appendRenderGridCellText`.
 
-### Linux port staging (unpublished local checkout)
+### Linux embedding port
 
-- Status: local cmux Linux-port work in `/home/akily/Project/sandbox/cmux-port/ghostty`;
-  not yet published as a pinned fork head or prebuilt archive. The cmux
-  `Build Linux Desktop App` workflow accepts the eventual published commit as
-  its required immutable `ghostty_ref`, records that resolved SHA inside and
-  alongside the archive, and is called by stable/nightly desktop workflows.
-  Configure the published 40-character commit in the cmux repository variable
-  `CMUX_LINUX_GHOSTTY_REF`; manual workflow dispatches can override it with
-  `linux_ghostty_ref`.
+- Status: consolidated into the `ghostty/` submodule and published on
+  `siure/ghostty` `main`. The cmux `Build Linux Desktop App` workflow
+  initializes the commit pinned by the parent tree, verifies that exact SHA,
+  records it inside and alongside the archive, and is called by stable/nightly
+  desktop workflows. Local builds and installers use `./ghostty` by default;
+  `CMUX_GHOSTTY_CHECKOUT` remains available for explicit test overrides.
 - Local release validation on July 16, 2026:
   - `zig build -Dapp-runtime=none test` passes the full Ghostty unit suite.
   - The installed-header C/EGL smoke passes against both the checkout's
@@ -468,9 +501,8 @@ and pinned in `scripts/ghosttykit-checksums.txt`.
   - Rebuilding the archive with the same inputs and `SOURCE_DATE_EPOCH`
     produces a byte-identical archive. The relocated and installed launchers
     both start the GTK/Ghostty app, accept socket control, and exit cleanly.
-  - Publication is still required: these changes are not contained in the
-    recorded Ghostty `HEAD`, and the current latest cmux GitHub release does
-    not yet carry the Linux archive consumed by `cmux update`.
+  - The current latest cmux GitHub release does not yet carry the Linux archive
+    consumed by `cmux update`.
 - Files:
   - `build.zig`
   - `include/ghostty.h`

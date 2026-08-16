@@ -1,3 +1,4 @@
+use crate::terminal::RenderActivity;
 use anyhow::{anyhow, Context, Result};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -374,10 +375,16 @@ struct EventQueue {
     events: VecDeque<RuntimeEvent>,
     estimated_bytes: usize,
     overflowed: bool,
+    render_activity: RenderActivity,
+    connection_key: String,
 }
 
 impl EventQueue {
     fn push(&mut self, event: RuntimeEvent) {
+        let targeted_pane_id = match &event {
+            RuntimeEvent::Message(ControlMessage::Output { pane_id, .. }) => Some(*pane_id),
+            _ => None,
+        };
         let bytes = match &event {
             RuntimeEvent::Message(message) => message.estimated_bytes(),
             RuntimeEvent::Stderr(stderr) => stderr.len(),
@@ -389,11 +396,18 @@ impl EventQueue {
                 self.estimated_bytes = 0;
                 self.events.push_back(RuntimeEvent::QueueOverflow);
                 self.overflowed = true;
+                self.render_activity.record_model_mutation();
             }
             return;
         }
         self.estimated_bytes += bytes;
         self.events.push_back(event);
+        if let Some(pane_id) = targeted_pane_id {
+            self.render_activity
+                .record_remote_tmux_output(&self.connection_key, pane_id);
+        } else {
+            self.render_activity.record_model_mutation();
+        }
     }
 
     fn drain(&mut self) -> Vec<RuntimeEvent> {
@@ -410,7 +424,11 @@ pub(crate) struct RemoteTmuxRuntime {
 }
 
 impl RemoteTmuxRuntime {
-    pub(crate) fn spawn(mut command: Command) -> Result<Self> {
+    pub(crate) fn spawn(
+        mut command: Command,
+        render_activity: RenderActivity,
+        connection_key: String,
+    ) -> Result<Self> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -433,6 +451,8 @@ impl RemoteTmuxRuntime {
             events: VecDeque::new(),
             estimated_bytes: 0,
             overflowed: false,
+            render_activity,
+            connection_key,
         }));
         spawn_stdout_reader(stdout, Arc::clone(&events));
         spawn_stderr_reader(stderr, Arc::clone(&events));
@@ -720,6 +740,7 @@ fn consume_layout(bytes: &[u8], index: &mut usize, expected: u8) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -847,12 +868,16 @@ mod tests {
 
     #[test]
     fn runtime_streams_messages_and_writes_commands() {
+        let render_activity = crate::terminal::RenderActivity::default();
+        let connection_key = "remote.example|work";
         let mut command = Command::new("/bin/sh");
         command.args([
             "-c",
             "printf '\\033P1000p%%begin 1 1 0\\n%%end 1 1 0\\n%%output %%3 hello\\\\015\\\\012\\n'; IFS= read -r line; printf 'seen:%s\\n' \"$line\" >&2",
         ]);
-        let runtime = RemoteTmuxRuntime::spawn(command).expect("runtime");
+        let runtime =
+            RemoteTmuxRuntime::spawn(command, render_activity.clone(), connection_key.to_string())
+                .expect("runtime");
         runtime.send_keys(3, b"A\n").expect("send keys");
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -875,5 +900,47 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(event, RuntimeEvent::Stderr(text) if text.contains("seen:send-keys -t %3 -H 41 0a"))
         }));
+        assert!(render_activity.model_mutation_generation() > 0);
+        assert_eq!(
+            render_activity.take_remote_tmux_output_targets(),
+            HashSet::from([(connection_key.to_string(), 3)]),
+            "remote tmux reader events must coalesce a targeted pane wake"
+        );
+    }
+
+    #[test]
+    fn event_queue_scopes_output_but_globally_wakes_topology() {
+        let render_activity = crate::terminal::RenderActivity::default();
+        let connection_key = "remote.example|work".to_string();
+        let mut queue = EventQueue {
+            events: VecDeque::new(),
+            estimated_bytes: 0,
+            overflowed: false,
+            render_activity: render_activity.clone(),
+            connection_key: connection_key.clone(),
+        };
+
+        let initial_model_generation = render_activity.model_mutation_generation();
+        queue.push(RuntimeEvent::Message(ControlMessage::Output {
+            pane_id: 3,
+            data: b"hello".to_vec(),
+        }));
+        assert_eq!(
+            render_activity.model_mutation_generation(),
+            initial_model_generation,
+            "continuous pane output must not request a global GTK model refresh"
+        );
+        assert_eq!(
+            render_activity.take_remote_tmux_output_targets(),
+            HashSet::from([(connection_key, 3)])
+        );
+
+        queue.push(RuntimeEvent::Message(ControlMessage::WindowAdd {
+            window_id: 4,
+        }));
+        assert!(
+            render_activity.model_mutation_generation() > initial_model_generation,
+            "remote tmux topology must keep the global model wake"
+        );
     }
 }

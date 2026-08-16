@@ -41,6 +41,7 @@ pub(super) fn build_snapshot_view(
         left_slot.set_hexpand(false);
     }
     left_slot.append(&workspace_sidebar(snapshot, app_state, ui_mode));
+    left_slot.set_visible(left_sidebar_visible(snapshot));
 
     let main_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     main_slot.add_css_class("cmux-main-slot");
@@ -266,6 +267,10 @@ pub(super) fn set_right_sidebar_visible(view: &GtkSnapshotView, visible: bool) {
     if let Some(drawer) = view.right_drawer.as_ref() {
         drawer.set_visible(view.compact.get() && visible);
     }
+}
+
+pub(super) fn set_left_sidebar_visible(view: &GtkSnapshotView, visible: bool) {
+    view.left_slot.set_visible(visible);
 }
 
 pub(super) fn refresh_overlay(

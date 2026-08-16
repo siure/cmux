@@ -2,7 +2,9 @@ use crate::{
     app::{current_unix_millis, shifted_shortcut_base_key, AppState, GlobalWindowCommand},
     browser_omnibar, config, diff_viewer,
     global_shortcuts::GlobalShortcutManager,
-    renderer, ui,
+    renderer,
+    terminal::terminal_control_byte,
+    ui,
 };
 use anyhow::{anyhow, Result};
 use gtk::gdk;
@@ -37,6 +39,8 @@ const GTK_CELL_WIDTH: i32 = 10;
 const GTK_CELL_HEIGHT: i32 = 20;
 const GTK_SPLIT_INITIAL_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 const GTK_SPLIT_STABLE_INTERVAL: Duration = Duration::from_millis(50);
+const GTK_RENDER_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+const GTK_MODEL_SAFETY_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 const BROWSER_FOCUS_ESCAPE_INTERVAL: Duration = Duration::from_millis(1600);
 const BROWSER_FOCUS_RETRY_ATTEMPTS: u8 = 8;
 const BROWSER_RECORDING_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -99,6 +103,7 @@ fn run_gtk_app_with_renderer(
         .flags(gtk_application_flags(single_instance))
         .build();
     let window_hosts = Rc::new(RefCell::new(HashMap::new()));
+    install_browser_runtime_wakeup(&window_hosts);
     let desktop_notifications = Rc::new(RefCell::new(None));
     let presented_model_window = Rc::new(RefCell::new(None));
     let sync_started = Rc::new(Cell::new(false));
@@ -146,6 +151,9 @@ fn run_gtk_app_with_renderer(
             &activate_presented_model_window,
             &activate_global_visibility,
         );
+        if !activate_sync_started.get() {
+            let _ = local_refresh.install_render_activity_refresh();
+        }
         if !sync_gtk_window_hosts(
             application,
             &app_state,
@@ -163,14 +171,6 @@ fn run_gtk_app_with_renderer(
             present_current_gtk_window(&app_state, &activate_window_hosts);
             return;
         }
-
-        let runtime_window_hosts = Rc::clone(&activate_window_hosts);
-        glib::timeout_add_local(Duration::from_millis(10), move || {
-            process_browser_evaluation_requests(&runtime_window_hosts);
-            process_browser_screenshot_requests(&runtime_window_hosts);
-            process_browser_pdf_requests(&runtime_window_hosts);
-            glib::ControlFlow::Continue
-        });
 
         let recording_app_state = Arc::clone(&app_state);
         let recording_window_hosts = Rc::clone(&activate_window_hosts);
@@ -191,13 +191,35 @@ fn run_gtk_app_with_renderer(
         let sync_presented_model_window = Rc::clone(&activate_presented_model_window);
         let sync_global_visibility = Rc::clone(&activate_global_visibility);
         let sync_local_refresh = local_refresh.clone();
-        glib::timeout_add_local(Duration::from_millis(500), move || {
-            if !process_global_window_commands(
+        let command_application = sync_application.clone();
+        let command_app_state = Arc::clone(&sync_app_state);
+        let command_window_hosts = Rc::clone(&sync_window_hosts);
+        let command_global_visibility = Rc::clone(&sync_global_visibility);
+        let command_local_refresh = sync_local_refresh.clone();
+        glib::timeout_add_local(Duration::from_millis(250), move || {
+            let (keep_running, changed) = process_global_window_commands(
+                &command_application,
+                &command_app_state,
+                &command_window_hosts,
+                &command_global_visibility,
+            );
+            if changed {
+                command_local_refresh.schedule();
+            }
+            if keep_running {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+        glib::timeout_add_local(GTK_MODEL_SAFETY_SYNC_INTERVAL, move || {
+            let (keep_running, _) = process_global_window_commands(
                 &sync_application,
                 &sync_app_state,
                 &sync_window_hosts,
                 &sync_global_visibility,
-            ) {
+            );
+            if !keep_running {
                 return glib::ControlFlow::Break;
             }
             if !sync_gtk_window_hosts(
@@ -243,7 +265,9 @@ struct GtkLocalRefresh {
     desktop_notifications: Rc<RefCell<Option<DesktopNotificationTracker>>>,
     presented_model_window: Rc<RefCell<Option<String>>>,
     global_visibility: Rc<RefCell<GtkGlobalVisibilityState>>,
-    pending: Rc<Cell<bool>>,
+    idle_pending: Rc<Cell<bool>>,
+    pending_full_sync: Rc<Cell<bool>>,
+    pending_terminal_window_ids: Rc<RefCell<HashSet<String>>>,
 }
 
 impl GtkLocalRefresh {
@@ -267,33 +291,179 @@ impl GtkLocalRefresh {
             desktop_notifications: Rc::clone(desktop_notifications),
             presented_model_window: Rc::clone(presented_model_window),
             global_visibility: Rc::clone(global_visibility),
-            pending: Rc::new(Cell::new(false)),
+            idle_pending: Rc::new(Cell::new(false)),
+            pending_full_sync: Rc::new(Cell::new(false)),
+            pending_terminal_window_ids: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
+    fn install_render_activity_refresh(&self) -> Option<glib::SourceId> {
+        let Some(render_activity) = self.app_state.lock().ok().map(|app| app.render_activity())
+        else {
+            return None;
+        };
+        // Model mutations can originate outside GTK and affect either renderer. PTY bytes only
+        // need this fallback wake in Gtk mode; Ghostty owns its output-driven rendering path.
+        let mut observed_model_generation = render_activity.model_mutation_generation();
+        let mut observed_terminal_generation = render_activity.terminal_output_generation();
+        let observes_terminal_output = self.renderer_mode == GtkRendererMode::Gtk;
+        let refresh = self.clone();
+        Some(glib::timeout_add_local(
+            GTK_RENDER_ACTIVITY_REFRESH_INTERVAL,
+            move || {
+                if refresh.hosts.upgrade().is_none() {
+                    return glib::ControlFlow::Break;
+                }
+                let current_model_generation = render_activity.model_mutation_generation();
+                let current_terminal_generation = render_activity.terminal_output_generation();
+                let model_changed = current_model_generation != observed_model_generation;
+                let terminal_changed = observes_terminal_output
+                    && current_terminal_generation != observed_terminal_generation;
+                if model_changed {
+                    observed_model_generation = current_model_generation;
+                    refresh.schedule();
+                }
+                if terminal_changed {
+                    observed_terminal_generation = current_terminal_generation;
+                    let generations = refresh
+                        .app_state
+                        .lock()
+                        .ok()
+                        .map(|app| app.fallback_terminal_output_generations())
+                        .unwrap_or_default();
+                    let window_ids = refresh
+                        .hosts
+                        .upgrade()
+                        .map(|hosts| {
+                            affected_fallback_terminal_window_ids(&hosts.borrow(), &generations)
+                        })
+                        .unwrap_or_default();
+                    refresh.schedule_terminal_windows(window_ids);
+                }
+                let remote_tmux_output_targets = render_activity.take_remote_tmux_output_targets();
+                if !remote_tmux_output_targets.is_empty() {
+                    let window_ids = refresh
+                        .app_state
+                        .lock()
+                        .ok()
+                        .map(|mut app| {
+                            app.remote_tmux_output_window_ids(&remote_tmux_output_targets)
+                        })
+                        .unwrap_or_default();
+                    refresh.schedule_terminal_windows(window_ids);
+                }
+                glib::ControlFlow::Continue
+            },
+        ))
+    }
+
     fn schedule(&self) {
-        if self.pending.replace(true) {
+        self.pending_full_sync.set(true);
+        self.schedule_idle();
+    }
+
+    fn schedule_terminal_window(&self, window_id: String) {
+        self.pending_terminal_window_ids
+            .borrow_mut()
+            .insert(window_id);
+        self.schedule_idle();
+    }
+
+    fn schedule_terminal_windows(&self, window_ids: HashSet<String>) {
+        if window_ids.is_empty() {
+            return;
+        }
+        self.pending_terminal_window_ids
+            .borrow_mut()
+            .extend(window_ids);
+        self.schedule_idle();
+    }
+
+    fn schedule_idle(&self) {
+        if self.idle_pending.replace(true) {
             return;
         }
         let refresh = self.clone();
         glib::idle_add_local_once(move || {
-            refresh.pending.set(false);
+            refresh.idle_pending.set(false);
             let Some(hosts) = refresh.hosts.upgrade() else {
                 return;
             };
-            sync_gtk_window_hosts(
-                &refresh.application,
-                &refresh.app_state,
-                refresh.renderer_mode,
-                refresh.ui_mode,
-                &hosts,
-                &refresh.desktop_notifications,
-                &refresh.presented_model_window,
-                &refresh.global_visibility,
-                &refresh,
-            );
+            let full_sync = refresh.pending_full_sync.replace(false);
+            let terminal_window_ids =
+                std::mem::take(&mut *refresh.pending_terminal_window_ids.borrow_mut());
+            if full_sync {
+                sync_gtk_window_hosts(
+                    &refresh.application,
+                    &refresh.app_state,
+                    refresh.renderer_mode,
+                    refresh.ui_mode,
+                    &hosts,
+                    &refresh.desktop_notifications,
+                    &refresh.presented_model_window,
+                    &refresh.global_visibility,
+                    &refresh,
+                );
+            } else {
+                refresh_gtk_window_host_ids(
+                    &refresh.app_state,
+                    refresh.renderer_mode,
+                    refresh.ui_mode,
+                    &hosts,
+                    &terminal_window_ids,
+                    &refresh,
+                );
+            }
         });
     }
+}
+
+fn fallback_terminal_output_generations(
+    snapshot: &Value,
+    renderer_mode: GtkRendererMode,
+) -> HashMap<String, u64> {
+    if renderer_mode != GtkRendererMode::Gtk {
+        return HashMap::new();
+    }
+    snapshot
+        .get("surface_views")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|view| value_bool_or(view, "visible", true))
+        .filter(|view| {
+            view.get("kind")
+                .or_else(|| view.get("type"))
+                .and_then(Value::as_str)
+                == Some("terminal")
+        })
+        .filter_map(|view| {
+            Some((
+                surface_id_or_ref(view)?,
+                view.get("terminal_output_generation")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            ))
+        })
+        .collect()
+}
+
+fn affected_fallback_terminal_window_ids(
+    hosts: &HashMap<String, GtkWindowHost>,
+    generations: &HashMap<String, u64>,
+) -> HashSet<String> {
+    hosts
+        .iter()
+        .filter(|(_, host)| host.window.is_visible())
+        .filter(|(_, host)| {
+            host.last_fallback_terminal_output_generations
+                .iter()
+                .any(|(surface_id, generation)| {
+                    generations.get(surface_id).copied().unwrap_or(0) != *generation
+                })
+        })
+        .map(|(window_id, _)| window_id.clone())
+        .collect()
 }
 
 struct GtkWindowHost {
@@ -320,9 +490,46 @@ struct GtkWindowHost {
     last_header_rebuild_key: Value,
     last_overlay_rebuild_key: Value,
     last_right_sidebar_focus_generation: u64,
+    last_fallback_terminal_output_generations: HashMap<String, u64>,
 }
 
 type GtkWindowHosts = Rc<RefCell<HashMap<String, GtkWindowHost>>>;
+
+thread_local! {
+    static BROWSER_RUNTIME_HOSTS: RefCell<Weak<RefCell<HashMap<String, GtkWindowHost>>>> = RefCell::new(Weak::new());
+    static BROWSER_RUNTIME_RETRY_SCHEDULED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn install_browser_runtime_wakeup(hosts: &GtkWindowHosts) {
+    BROWSER_RUNTIME_HOSTS.with(|registered| {
+        *registered.borrow_mut() = Rc::downgrade(hosts);
+    });
+    crate::browser_runtime::set_browser_runtime_wakeup(Some(Arc::new(|| {
+        glib::MainContext::default().invoke(process_pending_browser_runtime_requests);
+    })));
+}
+
+fn process_pending_browser_runtime_requests() {
+    let hosts = BROWSER_RUNTIME_HOSTS.with(|registered| registered.borrow().upgrade());
+    let Some(hosts) = hosts else {
+        return;
+    };
+    process_browser_evaluation_requests(&hosts);
+    process_browser_screenshot_requests(&hosts);
+    process_browser_pdf_requests(&hosts);
+    if !crate::browser_runtime::has_pending_browser_requests() {
+        return;
+    }
+    BROWSER_RUNTIME_RETRY_SCHEDULED.with(|scheduled| {
+        if scheduled.replace(true) {
+            return;
+        }
+        glib::timeout_add_local_once(Duration::from_millis(50), || {
+            BROWSER_RUNTIME_RETRY_SCHEDULED.with(|scheduled| scheduled.set(false));
+            process_pending_browser_runtime_requests();
+        });
+    });
+}
 type PendingBrowserShortcutActions = Rc<RefCell<Vec<Value>>>;
 
 fn sync_ghostty_scrollback_widgets(ghostty_widgets: &GhosttySurfaceWidgets) {
@@ -634,6 +841,47 @@ fn sync_gtk_window_hosts(
     true
 }
 
+fn refresh_gtk_window_host_ids(
+    app_state: &Arc<Mutex<AppState>>,
+    renderer_mode: GtkRendererMode,
+    ui_mode: GtkUiMode,
+    hosts: &GtkWindowHosts,
+    window_ids: &HashSet<String>,
+    local_refresh: &GtkLocalRefresh,
+) {
+    if window_ids.is_empty() {
+        return;
+    }
+    let rows = model_window_rows(app_state)
+        .into_iter()
+        .filter_map(|row| Some((model_window_id(&row)?.to_string(), row)))
+        .collect::<HashMap<_, _>>();
+    for window_id in window_ids {
+        let Some(row) = rows.get(window_id) else {
+            continue;
+        };
+        if !hosts
+            .borrow()
+            .get(window_id)
+            .is_some_and(|host| host.window.is_visible())
+        {
+            continue;
+        }
+        let snapshot = snapshot_or_error(app_state, renderer_mode, window_id);
+        if let Some(host) = hosts.borrow_mut().get_mut(window_id) {
+            refresh_gtk_window_host(
+                host,
+                app_state,
+                renderer_mode,
+                ui_mode,
+                row,
+                &snapshot,
+                local_refresh,
+            );
+        }
+    }
+}
+
 fn create_gtk_window_host(
     application: &gtk::Application,
     app_state: &Arc<Mutex<AppState>>,
@@ -660,6 +908,11 @@ fn create_gtk_window_host(
         .default_height(GTK_APP_DEFAULT_HEIGHT)
         .fullscreened(model_window_fullscreen(row))
         .build();
+    let focus_refresh = local_refresh.clone();
+    let focus_window_id = window_id.to_string();
+    window.connect_notify_local(Some("focus-widget"), move |_, _| {
+        focus_refresh.schedule_terminal_window(focus_window_id.clone());
+    });
     connect_terminal_keys(
         &window,
         app_state,
@@ -797,6 +1050,10 @@ fn create_gtk_window_host(
         last_header_rebuild_key: shell::header_rebuild_key(snapshot),
         last_overlay_rebuild_key: shell::overlay_rebuild_key(snapshot),
         last_right_sidebar_focus_generation: 0,
+        last_fallback_terminal_output_generations: fallback_terminal_output_generations(
+            snapshot,
+            renderer_mode,
+        ),
     };
     sync_resume_command_prompts(&mut host, snapshot, app_state);
     sync_close_confirmation_prompts(&mut host, snapshot, app_state);
@@ -849,6 +1106,9 @@ fn refresh_gtk_window_host(
         widget_or_ancestor_has_css_class(focused.as_ref(), "cmux-right-sidebar-input")
             && !focus_right_sidebar
             && !right_structure_changed;
+    let fallback_output_generations = fallback_terminal_output_generations(snapshot, renderer_mode);
+    let fallback_terminal_output_changed =
+        fallback_output_generations != host.last_fallback_terminal_output_generations;
 
     if host.last_left_rebuild_key != rebuild_keys.left && !left_rebuild_suppressed {
         replace_snapshot_slot_child(
@@ -864,6 +1124,7 @@ fn refresh_gtk_window_host(
         }
         host.last_left_rebuild_key = rebuild_keys.left;
     }
+    shell::set_left_sidebar_visible(&host.snapshot_view, left_sidebar_visible(snapshot));
 
     let pane_chrome_rebuild_keys = snapshot_pane_chrome_rebuild_keys(snapshot);
     if host.last_pane_chrome_rebuild_keys != pane_chrome_rebuild_keys {
@@ -875,11 +1136,14 @@ fn refresh_gtk_window_host(
         host.last_pane_chrome_rebuild_keys = pane_chrome_rebuild_keys;
     }
 
-    let main_changed = host.last_main_rebuild_key != rebuild_keys.main;
+    let main_changed =
+        host.last_main_rebuild_key != rebuild_keys.main || fallback_terminal_output_changed;
     if main_changed {
         let main_structure_rebuild_key = snapshot_main_structure_rebuild_key(snapshot);
         let pane_rebuild_keys = snapshot_pane_rebuild_keys(snapshot);
-        if host.last_main_non_tab_rebuild_key == rebuild_keys.main_without_tabs {
+        if !fallback_terminal_output_changed
+            && host.last_main_non_tab_rebuild_key == rebuild_keys.main_without_tabs
+        {
             sync_pane_tab_strips(
                 &host.window,
                 snapshot,
@@ -945,6 +1209,9 @@ fn refresh_gtk_window_host(
             host.last_main_non_tab_rebuild_key = rebuild_keys.main_without_tabs;
             host.last_main_structure_rebuild_key = main_structure_rebuild_key;
             host.last_pane_rebuild_keys = pane_rebuild_keys;
+        }
+        if !main_rebuild_suppressed {
+            host.last_fallback_terminal_output_generations = fallback_output_generations;
         }
     }
     if host.last_right_rebuild_key != rebuild_keys.right && !right_rebuild_suppressed {
@@ -1247,11 +1514,12 @@ fn process_global_window_commands(
     app_state: &Arc<Mutex<AppState>>,
     hosts: &GtkWindowHosts,
     visibility: &Rc<RefCell<GtkGlobalVisibilityState>>,
-) -> bool {
+) -> (bool, bool) {
     let commands = app_state
         .lock()
         .map(|mut app| app.drain_global_window_commands())
         .unwrap_or_default();
+    let changed = !commands.is_empty();
     for command in commands {
         match command {
             GlobalWindowCommand::ShowCurrent => {
@@ -1311,11 +1579,11 @@ fn process_global_window_commands(
                 sync_all_ghostty_scrollback(hosts);
                 persist_ghostty_session_snapshot(app_state);
                 application.quit();
-                return false;
+                return (false, true);
             }
         }
     }
-    true
+    (true, changed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2185,39 +2453,14 @@ fn snapshot_with_previews(
     let mut app = app_state
         .lock()
         .map_err(|_| anyhow!("app state lock poisoned"))?;
-    let mut snapshot = renderer::snapshot_value(
+    renderer::snapshot_value(
         &mut app,
         &json!({
             "backend": gtk_snapshot_backend(renderer_mode),
             "window_id": window_id
         }),
     )
-    .map_err(|err| anyhow!("{err}"))?;
-
-    if renderer_mode == GtkRendererMode::Ghostty {
-        return Ok(snapshot);
-    }
-
-    if let Some(views) = snapshot
-        .get_mut("surface_views")
-        .and_then(Value::as_array_mut)
-    {
-        for view in views {
-            let Some(surface_id) = view.get("surface_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let preview = app
-                .handle("surface.read_text", &json!({"surface_id": surface_id}))
-                .ok()
-                .and_then(|value| value.get("text").and_then(Value::as_str).map(trim_preview))
-                .unwrap_or_default();
-            if let Some(object) = view.as_object_mut() {
-                object.insert("preview".to_string(), json!(preview));
-            }
-        }
-    }
-
-    Ok(snapshot)
+    .map_err(|err| anyhow!("{err}"))
 }
 
 fn gtk_snapshot_backend(renderer_mode: GtkRendererMode) -> &'static str {
@@ -8710,6 +8953,14 @@ fn right_sidebar_visible(snapshot: &Value) -> bool {
         .unwrap_or(true)
 }
 
+fn left_sidebar_visible(snapshot: &Value) -> bool {
+    snapshot
+        .get("left_sidebar")
+        .and_then(|sidebar| sidebar.get("visible"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 fn right_sidebar_mode(snapshot: &Value) -> String {
     match snapshot
         .get("right_sidebar")
@@ -9903,6 +10154,11 @@ fn replace_pane_surface_card(old: &gtk::Box, new: &gtk::Box) -> bool {
     false
 }
 
+#[cfg(test)]
+thread_local! {
+    static GTK_TEST_PANE_SURFACE_SYNC_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sync_pane_surface_cards(
     window: &gtk::ApplicationWindow,
@@ -9920,6 +10176,8 @@ fn sync_pane_surface_cards(
     ui_mode: GtkUiMode,
     local_refresh: &GtkLocalRefresh,
 ) -> bool {
+    #[cfg(test)]
+    GTK_TEST_PANE_SURFACE_SYNC_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     let Some(root) = window.child() else {
         return false;
     };
@@ -10668,24 +10926,33 @@ fn agent_session_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) ->
     let refresh_transcript = {
         let app_state = Arc::clone(app_state);
         let surface_id = surface_id.clone();
+        let cursor = Rc::new(Cell::new(0_u64));
+        let revision = Rc::new(RefCell::new(None::<String>));
         move |buffer: &gtk::TextBuffer| {
-            let Some(value) = call_app_value(
-                &app_state,
-                "agent_session.output",
-                json!({"surface_id": surface_id}),
-            ) else {
+            let mut params = json!({"surface_id": surface_id, "cursor": cursor.get()});
+            if let Some(value) = revision.borrow().as_deref() {
+                params["revision"] = json!(value);
+            }
+            let Some(value) = call_app_value(&app_state, "agent_session.output_delta", params)
+            else {
                 return;
             };
             let output = value
                 .get("output")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let current = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), true)
-                .to_string();
-            if current != output {
+            if value.get("reset").and_then(Value::as_bool) == Some(true) {
                 buffer.set_text(output);
+            } else if !output.is_empty() {
+                buffer.insert(&mut buffer.end_iter(), output);
             }
+            if let Some(next_cursor) = value.get("cursor").and_then(Value::as_u64) {
+                cursor.set(next_cursor);
+            }
+            *revision.borrow_mut() = value
+                .get("revision")
+                .and_then(Value::as_str)
+                .map(str::to_string);
         }
     };
     refresh_transcript(&transcript_buffer);
@@ -14313,15 +14580,19 @@ fn surface_card(
             }
             if is_terminal {
                 if let Some(pane_id) = pane_id_or_ref(view) {
-                    connect_pane_allocation_probe(
+                    let preview = fallback_terminal_preview_container(
                         &preview_label,
                         pane_id,
                         Arc::clone(app_state),
                         Rc::clone(pane_allocations),
                     );
+                    card.append(&preview);
+                } else {
+                    card.append(&preview_label);
                 }
+            } else {
+                card.append(&preview_label);
             }
-            card.append(&preview_label);
         }
     }
 
@@ -14639,23 +14910,45 @@ fn attach_surface_context_menu_for(
     card.add_controller(gesture);
 }
 
+fn fallback_terminal_preview_container(
+    label: &gtk::Label,
+    pane_id: String,
+    app_state: Arc<Mutex<AppState>>,
+    pane_allocations: PaneAllocations,
+) -> gtk::Overlay {
+    let container = gtk::Overlay::new();
+    container.set_hexpand(true);
+    container.set_vexpand(true);
+    container.set_child(Some(label));
+
+    let probe = gtk::DrawingArea::new();
+    probe.set_can_target(false);
+    probe.set_hexpand(true);
+    probe.set_vexpand(true);
+    probe.set_halign(gtk::Align::Fill);
+    probe.set_valign(gtk::Align::Fill);
+    container.add_overlay(&probe);
+    container.set_measure_overlay(&probe, false);
+
+    connect_pane_allocation_probe(&probe, pane_id, app_state, pane_allocations);
+    container
+}
+
 fn connect_pane_allocation_probe(
-    widget: &gtk::Label,
+    probe: &gtk::DrawingArea,
     pane_id: String,
     app_state: Arc<Mutex<AppState>>,
     pane_allocations: PaneAllocations,
 ) {
-    widget.add_tick_callback(move |widget, _| {
-        let Some(allocation) =
-            pane_allocation_from_pixels(widget.allocated_width(), widget.allocated_height())
-        else {
-            return glib::ControlFlow::Continue;
+    let update = Rc::new(move |width: i32, height: i32| {
+        let Some(allocation) = pane_allocation_from_pixels(width, height) else {
+            return;
         };
 
         {
             let mut allocations = pane_allocations.borrow_mut();
             if allocations.get(&pane_id) == Some(&allocation) {
-                return glib::ControlFlow::Continue;
+                return;
             }
             allocations.insert(pane_id.clone(), allocation);
         }
@@ -14672,8 +14965,10 @@ fn connect_pane_allocation_probe(
                 "pixel_height": allocation.height
             }),
         );
-        glib::ControlFlow::Continue
     });
+    let resize_update = Rc::clone(&update);
+    probe.connect_resize(move |_, width, height| resize_update(width, height));
+    probe.connect_map(move |probe| update(probe.allocated_width(), probe.allocated_height()));
 }
 
 fn pane_allocation_from_pixels(width: i32, height: i32) -> Option<GtkPaneAllocation> {
@@ -14811,6 +15106,8 @@ fn connect_terminal_keys(
         let browser_location_focused = focused_widget
             .as_ref()
             .is_some_and(|widget| widget.has_css_class("cmux-browser-location"));
+        let terminal_search_focused =
+            widget_or_ancestor_has_css_class(focused_widget.as_ref(), "cmux-terminal-search");
         let browser_location_navigation_key = browser_location_focused
             && !modifiers.intersects(
                 gdk::ModifierType::CONTROL_MASK
@@ -14841,7 +15138,24 @@ fn connect_terminal_keys(
         } else if diff_focused && !editable_focused {
             diff_shortcut_combo_for_key(keyval, modifiers)
         } else if editable_focused && !browser_location_focused && !text_view_focused {
-            None
+            let combo = app_shortcut_combo_for_key(keyval, modifiers);
+            let terminal_find_shortcut = terminal_search_focused
+                && combo.as_deref().is_some_and(|combo| {
+                    app_state
+                        .lock()
+                        .ok()
+                        .is_some_and(|app| app.terminal_find_shortcut_matches(combo))
+                });
+            if editable_focus_blocks_application_shortcuts(
+                editable_focused,
+                browser_location_focused,
+                text_view_focused,
+                terminal_find_shortcut,
+            ) {
+                None
+            } else {
+                combo
+            }
         } else {
             app_shortcut_combo_for_key(keyval, modifiers)
         };
@@ -14899,6 +15213,9 @@ fn connect_terminal_keys(
                 );
                 return glib::Propagation::Stop;
             }
+        }
+        if copy_fallback_terminal_selection(focused_widget.as_ref(), keyval, modifiers) {
+            return glib::Propagation::Stop;
         }
         if let Some(widget) = focused_ghostty_widget
             .as_ref()
@@ -15025,6 +15342,37 @@ fn apply_clipboard_shortcut_result(result: &Value) -> bool {
         return false;
     };
     display.clipboard().set_text(text);
+    true
+}
+
+fn terminal_copy_shortcut(keyval: gdk::Key, modifiers: gdk::ModifierType) -> bool {
+    modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+        && modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+        && !modifiers.intersects(
+            gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::META_MASK,
+        )
+        && keyval
+            .to_unicode()
+            .is_some_and(|ch| ch.eq_ignore_ascii_case(&'c'))
+}
+
+fn copy_fallback_terminal_selection(
+    focused_widget: Option<&gtk::Widget>,
+    keyval: gdk::Key,
+    modifiers: gdk::ModifierType,
+) -> bool {
+    if !terminal_copy_shortcut(keyval, modifiers) {
+        return false;
+    }
+    let Some(label) = focused_widget
+        .and_then(|widget| widget.downcast_ref::<gtk::Label>())
+        .filter(|label| label.has_css_class("cmux-terminal-preview"))
+    else {
+        return false;
+    };
+    label.emit_copy_clipboard();
     true
 }
 
@@ -15399,7 +15747,21 @@ fn shortcut_focus_context(focused: Option<&gtk::Widget>) -> Value {
         && (widget_or_ancestor_has_css_class(focused, "cmux-surface-browser")
             || widget_or_ancestor_has_css_class(focused, "cmux-surface-diff"));
     let markdown = !sidebar && widget_or_ancestor_has_css_class(focused, "cmux-surface-markdown");
-    shortcut_focus_context_from_flags(sidebar, browser, markdown)
+    let terminal_search = widget_or_ancestor_has_css_class(focused, "cmux-terminal-search");
+    let mut context = shortcut_focus_context_from_flags(sidebar, browser, markdown);
+    if terminal_search {
+        context["terminalFocus"] = json!(false);
+    }
+    context
+}
+
+fn editable_focus_blocks_application_shortcuts(
+    editable: bool,
+    browser_location: bool,
+    text_view: bool,
+    allowed_application_shortcut: bool,
+) -> bool {
+    editable && !browser_location && !text_view && !allowed_application_shortcut
 }
 
 fn shortcut_focus_context_from_flags(sidebar: bool, browser: bool, markdown: bool) -> Value {
@@ -15564,6 +15926,9 @@ fn terminal_input_for_key(keyval: gdk::Key, modifiers: gdk::ModifierType) -> Opt
     if modifiers.intersects(gdk::ModifierType::SUPER_MASK | gdk::ModifierType::META_MASK) {
         return None;
     }
+    if terminal_copy_shortcut(keyval, modifiers) {
+        return None;
+    }
 
     let key = if matches!(keyval, gdk::Key::Return | gdk::Key::KP_Enter) {
         Some("enter")
@@ -15606,11 +15971,13 @@ fn terminal_input_for_key(keyval: gdk::Key, modifiers: gdk::ModifierType) -> Opt
         return None;
     }
     if modifiers.contains(gdk::ModifierType::CONTROL_MASK) {
-        if ch.is_ascii_alphabetic() {
-            return Some(terminal_key_input_with_modifiers(
-                &ch.to_ascii_lowercase().to_string(),
-                modifiers,
-            ));
+        let key = if ch == ' ' {
+            "space".to_string()
+        } else {
+            ch.to_ascii_lowercase().to_string()
+        };
+        if terminal_control_byte(&key).is_some() {
+            return Some(terminal_key_input_with_modifiers(&key, modifiers));
         }
         return None;
     }
@@ -16460,8 +16827,8 @@ fn cell_markup(cell: &Value, text: &str) -> String {
 
 fn terminal_style_attrs(style: &Value) -> Vec<String> {
     let mut attrs = Vec::new();
-    let mut fg = style_rgb_hex(style, "fg");
-    let mut bg = style_rgb_hex(style, "bg");
+    let mut fg = style_color_hex(style, "foreground", "fg");
+    let mut bg = style_color_hex(style, "background", "bg");
     if style_bool(style, "inverse") {
         std::mem::swap(&mut fg, &mut bg);
         fg.get_or_insert_with(|| "#070809".to_string());
@@ -16497,6 +16864,22 @@ fn terminal_style_attrs(style: &Value) -> Vec<String> {
         attrs.push("strikethrough=\"true\"".to_string());
     }
     attrs
+}
+
+fn style_color_hex(style: &Value, render_grid_key: &str, native_key: &str) -> Option<String> {
+    style
+        .get(render_grid_key)
+        .and_then(Value::as_str)
+        .and_then(normalize_style_hex)
+        .or_else(|| style_rgb_hex(style, native_key))
+}
+
+fn normalize_style_hex(color: &str) -> Option<String> {
+    let hex = color.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("#{}", hex.to_ascii_lowercase()))
 }
 
 fn style_rgb_hex(style: &Value, key: &str) -> Option<String> {
@@ -17220,20 +17603,10 @@ fn attach_notification_context_menu(
     button.add_controller(gesture);
 }
 
-fn trim_preview(text: &str) -> String {
-    let mut lines = text
-        .lines()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-        .take(12)
-        .collect::<Vec<_>>();
-    lines.reverse();
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::TerminalStartupMode;
 
     #[test]
     fn gtk_custom_sidebar_helpers_map_style_and_icons() {
@@ -18185,6 +18558,14 @@ mod tests {
     }
 
     #[test]
+    fn gtk_left_sidebar_state_maps_visibility() {
+        assert!(left_sidebar_visible(&json!({})));
+        assert!(!left_sidebar_visible(&json!({
+            "left_sidebar": {"visible": false}
+        })));
+    }
+
+    #[test]
     fn gtk_browser_shortcut_results_require_action_and_surface() {
         assert!(browser_shortcut_result(&json!({
             "browser_shortcut_action": "reload",
@@ -18926,6 +19307,19 @@ mod tests {
         assert_eq!(
             terminal_input_for_key(a, gdk::ModifierType::CONTROL_MASK),
             Some(TerminalInput::Key("ctrl-a".to_string()))
+        );
+        let six = gdk::Key::from_name("6").expect("6 key");
+        assert_eq!(
+            terminal_input_for_key(six, gdk::ModifierType::CONTROL_MASK),
+            Some(TerminalInput::Key("ctrl-6".to_string()))
+        );
+        let c = gdk::Key::from_name("C").expect("shifted c key");
+        assert_eq!(
+            terminal_input_for_key(
+                c,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            None
         );
         let v = gdk::Key::from_name("V").expect("shifted v key");
         assert_eq!(
@@ -20470,8 +20864,8 @@ mod tests {
                     {"id": 0},
                     {
                         "id": 7,
-                        "fg": {"r": 8, "g": 9, "b": 10},
-                        "bg": {"r": 11, "g": 12, "b": 13},
+                        "foreground": "#08090A",
+                        "background": "#0B0C0D",
                         "bold": true,
                         "italic": true,
                         "underline": true,
@@ -20750,10 +21144,594 @@ mod tests {
     }
 
     #[test]
+    fn gtk_fallback_pty_output_refreshes_before_safety_sync() {
+        if gtk::init().is_err() {
+            return;
+        }
+        const OUTPUT_MARKER: &str = "CMUX_GTK_PTY_REFRESH";
+
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.fallback-pty-refresh")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let mut app = AppState::with_paths(None, None).expect("fallback PTY app state");
+        let surface_id = app
+            .handle("system.identify", &json!({}))
+            .expect("current surface")["surface_id"]
+            .as_str()
+            .expect("current surface id")
+            .to_string();
+        app.handle(
+            "surface.respawn",
+            &json!({
+                "surface_id": surface_id,
+                "command": format!("read cmux_ready; printf '\\n{OUTPUT_MARKER}\\n'; exit")
+            }),
+        )
+        .expect("spawn blocked fallback PTY command");
+
+        let app_state = Arc::new(Mutex::new(app));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        let output_refresh_source = local_refresh
+            .install_render_activity_refresh()
+            .expect("fallback PTY output refresh source");
+        assert!(sync_gtk_window_hosts(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+            &local_refresh,
+        ));
+        let initial_preview = hosts
+            .borrow()
+            .values()
+            .next()
+            .and_then(|host| {
+                widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+            })
+            .expect("initial fallback terminal preview")
+            .downcast::<gtk::Label>()
+            .expect("initial fallback terminal label");
+        assert!(!initial_preview.text().contains(OUTPUT_MARKER));
+        let window = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("fallback GTK host")
+            .window
+            .clone();
+        window.present();
+        let terminal_search = gtk::SearchEntry::new();
+        terminal_search.add_css_class("cmux-terminal-search");
+        hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("fallback GTK host")
+            .snapshot_view
+            .main_slot
+            .append(&terminal_search);
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(terminal_search.grab_focus());
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-terminal-search"
+        ));
+
+        app_state
+            .lock()
+            .expect("fallback PTY app lock")
+            .handle(
+                "surface.send_text",
+                &json!({"surface_id": surface_id, "text": "ready\n"}),
+            )
+            .expect("release blocked fallback PTY command");
+        gtk_run_main_loop_for(Duration::from_millis(150));
+        let focused_preview = hosts
+            .borrow()
+            .values()
+            .next()
+            .and_then(|host| {
+                widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+            })
+            .expect("focused fallback terminal preview")
+            .downcast::<gtk::Label>()
+            .expect("focused fallback terminal label");
+        assert!(
+            !focused_preview.text().contains(OUTPUT_MARKER),
+            "focused terminal search must retain its mounted terminal card"
+        );
+        gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+        gtk_run_main_loop_for(Duration::from_millis(750));
+
+        let refreshed_preview = hosts
+            .borrow()
+            .values()
+            .next()
+            .and_then(|host| {
+                widget_descendant_with_css_class(&host.snapshot_view.root, "cmux-terminal-preview")
+            })
+            .expect("refreshed fallback terminal preview")
+            .downcast::<gtk::Label>()
+            .expect("refreshed fallback terminal label");
+        assert!(
+            refreshed_preview.text().contains(OUTPUT_MARKER),
+            "fallback PTY output must refresh before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync; preview was {:?}",
+            refreshed_preview.text()
+        );
+        output_refresh_source.remove();
+        for host in hosts.borrow_mut().values_mut() {
+            host.window.destroy();
+        }
+    }
+
+    #[test]
+    fn gtk_fallback_output_does_not_reconcile_an_unchanged_window() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.scoped-fallback-output")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let row = json!({
+            "window_id": "window-a",
+            "title": "Scoped output",
+            "selected": true,
+            "fullscreen": false
+        });
+        let snapshot = gtk_tab_test_snapshot("surface-a", "unchanged content");
+        let local_refresh = gtk_test_local_refresh(&application, &app_state);
+        let mut host = create_gtk_window_host(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            "window-a",
+            &row,
+            &snapshot,
+            &local_refresh,
+        );
+
+        GTK_TEST_PANE_SURFACE_SYNC_COUNT.with(|count| count.set(0));
+        refresh_gtk_window_host(
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &snapshot,
+            &local_refresh,
+        );
+        GTK_TEST_PANE_SURFACE_SYNC_COUNT.with(|count| {
+            assert_eq!(
+                count.get(),
+                0,
+                "output from another window must not reconcile unchanged pane cards"
+            );
+        });
+        host.window.destroy();
+    }
+
+    #[test]
+    fn gtk_fallback_output_generations_include_only_visible_terminals() {
+        let snapshot = json!({
+            "surface_views": [{
+                "surface_id": "visible-terminal",
+                "kind": "terminal",
+                "visible": true,
+                "terminal_output_generation": 7
+            }, {
+                "surface_id": "hidden-terminal",
+                "kind": "terminal",
+                "visible": false,
+                "terminal_output_generation": 9
+            }, {
+                "surface_id": "agent-transport",
+                "kind": "agent-session",
+                "visible": true,
+                "terminal_output_generation": 11
+            }, {
+                "surface_id": "browser",
+                "kind": "browser",
+                "visible": true,
+                "terminal_output_generation": 13
+            }]
+        });
+
+        assert_eq!(
+            fallback_terminal_output_generations(&snapshot, GtkRendererMode::Gtk),
+            HashMap::from([("visible-terminal".to_string(), 7)])
+        );
+        assert!(
+            fallback_terminal_output_generations(&snapshot, GtkRendererMode::Ghostty).is_empty()
+        );
+    }
+
+    fn assert_gtk_external_model_mutations_refresh_before_safety_sync(
+        renderer_mode: GtkRendererMode,
+    ) {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let renderer_name = match renderer_mode {
+            GtkRendererMode::Gtk => "fallback",
+            GtkRendererMode::Ghostty => "ghostty",
+        };
+        let application = gtk::Application::builder()
+            .application_id(format!(
+                "ai.manaflow.cmux.tests.external-model-refresh-{renderer_name}"
+            ))
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("renderer-owned app state");
+        app.handle(
+            "debug.shortcut.set",
+            &json!({"name": "new_terminal", "combo": "ctrl+alt+t"}),
+        )
+        .expect("deterministic new terminal shortcut");
+        let app_state = Arc::new(Mutex::new(app));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            renderer_mode,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        let activity_refresh_source = local_refresh
+            .install_render_activity_refresh()
+            .expect("fallback activity refresh source");
+        assert!(sync_gtk_window_hosts(
+            &application,
+            &app_state,
+            renderer_mode,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+            &local_refresh,
+        ));
+        let root = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .window
+            .child()
+            .expect("GTK window content");
+        assert_eq!(gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"), 1);
+
+        let shortcut_result = app_state
+            .lock()
+            .expect("app lock")
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+alt+t"}))
+            .expect("keyboard shortcut surface creation");
+        assert!(
+            shortcut_result["surface_id"].is_string(),
+            "{shortcut_result}"
+        );
+        gtk_run_main_loop_for(Duration::from_millis(750));
+
+        assert_eq!(
+            gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"),
+            2,
+            "keyboard model mutations must refresh the {renderer_name} renderer before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync"
+        );
+
+        app_state
+            .lock()
+            .expect("app lock")
+            .handle("surface.create", &json!({"type": "terminal"}))
+            .expect("socket-style surface creation");
+        gtk_run_main_loop_for(Duration::from_millis(750));
+
+        assert_eq!(
+            gtk_count_widgets_with_css_class(&root, "cmux-pane-tab"),
+            3,
+            "socket/CLI model mutations must refresh the {renderer_name} renderer before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync"
+        );
+        activity_refresh_source.remove();
+        for host in hosts.borrow_mut().values_mut() {
+            host.window.destroy();
+        }
+    }
+
+    #[test]
+    fn gtk_fallback_external_model_mutations_refresh_before_safety_sync() {
+        assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Gtk);
+    }
+
+    #[test]
+    fn gtk_ghostty_external_model_mutations_refresh_before_safety_sync() {
+        assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Ghostty);
+    }
+
+    #[test]
+    fn gtk_model_mutation_suppressed_by_browser_focus_retries_when_focus_clears() {
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.browser-focus-model-retry")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("renderer-owned app state");
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "direction": "right",
+                    "focus": true
+                }),
+            )
+            .expect("create focused split");
+        let split_id = split["surface_id"]
+            .as_str()
+            .expect("split surface id")
+            .to_string();
+        let app_state = Arc::new(Mutex::new(app));
+        let hosts = Rc::new(RefCell::new(HashMap::new()));
+        let desktop_notifications = Rc::new(RefCell::new(None));
+        let presented_model_window = Rc::new(RefCell::new(None));
+        let global_visibility = Rc::new(RefCell::new(GtkGlobalVisibilityState::default()));
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Ghostty,
+            GtkUiMode::Next,
+            &hosts,
+            &desktop_notifications,
+            &presented_model_window,
+            &global_visibility,
+        );
+        let activity_refresh_source = local_refresh
+            .install_render_activity_refresh()
+            .expect("model activity refresh source");
+        let row = model_window_rows(&app_state)
+            .into_iter()
+            .next()
+            .expect("model window row");
+        let window_id = model_window_id(&row).expect("window id").to_string();
+        let mut initial_snapshot =
+            snapshot_or_error(&app_state, GtkRendererMode::Ghostty, &window_id);
+        initial_snapshot["surface_views"] = json!([]);
+        initial_snapshot["window_surfaces"] = json!([]);
+        initial_snapshot["canvas"]["panes"] = json!([]);
+        let host = create_gtk_window_host(
+            &application,
+            &app_state,
+            GtkRendererMode::Ghostty,
+            GtkUiMode::Next,
+            &window_id,
+            &row,
+            &initial_snapshot,
+            &local_refresh,
+        );
+        hosts.borrow_mut().insert(window_id, host);
+        let window = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .window
+            .clone();
+        let mounted_main = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .first_child()
+            .expect("mounted main tree");
+        let location = gtk::Entry::new();
+        location.add_css_class("cmux-browser-location");
+        hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .append(&location);
+        window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        gtk::prelude::GtkWindowExt::set_focus(&window, Some(&location));
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-browser-location"
+        ));
+
+        app_state
+            .lock()
+            .expect("app lock")
+            .handle("surface.close", &json!({"surface_id": split_id}))
+            .expect("close focused split through socket path");
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-browser-location"
+        ));
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-browser-location"
+        ));
+        let focused_main = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .first_child()
+            .expect("focused main tree");
+        assert_eq!(
+            focused_main, mounted_main,
+            "focused browser chrome must suppress destructive main-tree replacement"
+        );
+        // The activity watcher has already acknowledged the model generation. Clearing the
+        // guard must retry that pending model snapshot without another mutation or safety sync.
+        gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+        gtk_run_main_loop_for(Duration::from_millis(750));
+        let retried_main = hosts
+            .borrow()
+            .values()
+            .next()
+            .expect("GTK window host")
+            .snapshot_view
+            .main_slot
+            .first_child()
+            .expect("retried main tree");
+        assert_ne!(
+            retried_main, mounted_main,
+            "the acknowledged model mutation must retry before the {GTK_MODEL_SAFETY_SYNC_INTERVAL:?} safety sync"
+        );
+
+        activity_refresh_source.remove();
+        for host in hosts.borrow_mut().values_mut() {
+            host.window.destroy();
+        }
+    }
+
+    #[test]
+    fn gtk_fallback_terminal_allocation_follows_live_resize() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let allocation_app = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("allocation app state"),
+        ));
+        let pane_id = allocation_app
+            .lock()
+            .expect("allocation app lock")
+            .handle("system.identify", &json!({}))
+            .expect("current pane")["pane_id"]
+            .as_str()
+            .expect("current pane id")
+            .to_string();
+        let pane_allocations = Rc::new(RefCell::new(HashMap::new()));
+        let allocation_label = gtk::Label::new(Some("fallback terminal"));
+        allocation_label.set_hexpand(true);
+        allocation_label.set_vexpand(true);
+        let allocation_container = fallback_terminal_preview_container(
+            &allocation_label,
+            pane_id.clone(),
+            Arc::clone(&allocation_app),
+            Rc::clone(&pane_allocations),
+        );
+        let allocation_window = gtk::Window::builder()
+            .default_width(320)
+            .default_height(180)
+            .child(&allocation_container)
+            .build();
+        allocation_window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let initial_allocation = pane_allocations
+            .borrow()
+            .get(&pane_id)
+            .copied()
+            .expect("initial fallback pane allocation");
+        allocation_window.set_default_size(640, 360);
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let resized_allocation = pane_allocations
+            .borrow()
+            .get(&pane_id)
+            .copied()
+            .expect("resized fallback pane allocation");
+        assert_ne!(
+            resized_allocation, initial_allocation,
+            "fallback terminal allocation must follow live GTK resizes"
+        );
+        allocation_window.close();
+    }
+
+    #[test]
     fn gtk_runtime_widget_regressions() {
         if gtk::init().is_err() {
             return;
         }
+        let terminal_label = gtk::Label::new(Some("selected terminal text"));
+        terminal_label.add_css_class("cmux-terminal-preview");
+        terminal_label.set_selectable(true);
+        terminal_label.select_region(0, 8);
+        let copied = Rc::new(Cell::new(false));
+        let copied_for_signal = Rc::clone(&copied);
+        terminal_label.connect_copy_clipboard(move |_| copied_for_signal.set(true));
+        let terminal_widget = terminal_label.upcast::<gtk::Widget>();
+        let c = gdk::Key::from_name("C").expect("shifted c key");
+        assert!(copy_fallback_terminal_selection(
+            Some(&terminal_widget),
+            c,
+            gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+        ));
+        assert!(copied.get());
+
+        let terminal_search = gtk::SearchEntry::new();
+        terminal_search.add_css_class("cmux-terminal-search");
+        let terminal_search_widget = terminal_search.upcast::<gtk::Widget>();
+        assert_eq!(
+            shortcut_focus_context(Some(&terminal_search_widget))["terminalFocus"],
+            false
+        );
+        assert!(
+            !editable_focus_blocks_application_shortcuts(true, false, false, true),
+            "terminal search must keep application shortcuts such as Ctrl+G routable"
+        );
+
         assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position();
         assert_gtk_tab_create_focus_and_close_refresh_before_fallback_poll();
         assert_gtk_local_refresh_does_not_retain_window_hosts();
@@ -20822,6 +21800,17 @@ mod tests {
         adjustment.set_value(bottom);
         assert!((adjustment.value() - bottom).abs() < f64::EPSILON);
         window.close();
+    }
+
+    #[test]
+    fn terminal_search_focus_routes_application_shortcuts() {
+        assert!(editable_focus_blocks_application_shortcuts(
+            true, false, false, false
+        ));
+        assert!(
+            !editable_focus_blocks_application_shortcuts(true, false, false, true),
+            "terminal search must keep application shortcuts such as Ctrl+G routable"
+        );
     }
 
     #[test]

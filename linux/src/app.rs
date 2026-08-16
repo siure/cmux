@@ -13,7 +13,7 @@ use crate::{
     shortcut_when::{ShortcutContext, ShortcutWhenClause},
     terminal::{
         spawn_terminal, spawn_terminal_process, terminal_key_bytes,
-        terminal_title_events_from_text, TerminalHandle, TerminalSize,
+        terminal_title_events_from_text, RenderActivity, TerminalHandle, TerminalSize,
     },
 };
 use anyhow::Result;
@@ -785,6 +785,8 @@ struct SessionWindowSnapshot {
     fullscreen: bool,
     selected_workspace_index: usize,
     sidebar_visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    right_sidebar_visible: Option<bool>,
     sidebar_mode: String,
     workspaces: Vec<SessionWorkspaceSnapshot>,
     workspace_groups: Vec<SessionWorkspaceGroupSnapshot>,
@@ -3010,7 +3012,8 @@ pub struct AppState {
     last_workspace_by_window: HashMap<String, String>,
     focus_history_by_window: HashMap<String, FocusHistoryState>,
     focus_history_recording_suppression_depth: usize,
-    sidebar_visible_by_window: HashMap<String, bool>,
+    left_sidebar_visible_by_window: HashMap<String, bool>,
+    right_sidebar_visible_by_window: HashMap<String, bool>,
     sidebar_mode_by_window: HashMap<String, String>,
     custom_sidebar_selection_path: PathBuf,
     custom_sidebar_state_path: PathBuf,
@@ -3056,6 +3059,7 @@ pub struct AppState {
     pending_close_confirmations: VecDeque<CloseConfirmationRequest>,
     terminal_scrollback_snapshot_dirty_at_ms: Option<u64>,
     terminal_startup_mode: TerminalStartupMode,
+    render_activity: RenderActivity,
     agent_hibernation_settings_path: PathBuf,
     agent_hibernation_settings_use_cmux_config: bool,
     agent_hibernation_settings: agent_hibernation_settings::Settings,
@@ -3085,6 +3089,8 @@ pub struct AppState {
     events_boot_id: String,
     events: Vec<Value>,
     next_event_sequence: i64,
+    #[cfg(test)]
+    session_snapshot_persist_attempt_count: usize,
 }
 
 #[derive(Clone)]
@@ -3318,7 +3324,8 @@ impl AppState {
             last_workspace_by_window: HashMap::new(),
             focus_history_by_window: HashMap::new(),
             focus_history_recording_suppression_depth: 0,
-            sidebar_visible_by_window: HashMap::new(),
+            left_sidebar_visible_by_window: HashMap::new(),
+            right_sidebar_visible_by_window: HashMap::new(),
             sidebar_mode_by_window: HashMap::new(),
             custom_sidebar_selection_path,
             custom_sidebar_state_path,
@@ -3372,6 +3379,7 @@ impl AppState {
             pending_close_confirmations: VecDeque::new(),
             terminal_scrollback_snapshot_dirty_at_ms: None,
             terminal_startup_mode,
+            render_activity: RenderActivity::default(),
             agent_hibernation_settings_path,
             agent_hibernation_settings_use_cmux_config,
             agent_hibernation_settings,
@@ -3401,6 +3409,8 @@ impl AppState {
             events_boot_id: new_id(),
             events: Vec::new(),
             next_event_sequence: 1,
+            #[cfg(test)]
+            session_snapshot_persist_attempt_count: 0,
         };
         match app.restore_persisted_session_snapshot() {
             Ok(true) => {
@@ -3481,7 +3491,8 @@ impl AppState {
             self.last_workspace_by_window.clear();
             self.focus_history_by_window.clear();
             self.focus_history_recording_suppression_depth = 0;
-            self.sidebar_visible_by_window.clear();
+            self.left_sidebar_visible_by_window.clear();
+            self.right_sidebar_visible_by_window.clear();
             self.sidebar_mode_by_window.clear();
             self.right_sidebar_focus_generation_by_window.clear();
             self.shortcut_help_visible_by_window.clear();
@@ -3511,8 +3522,17 @@ impl AppState {
                 window.display_name = window_snapshot.display_name.clone();
                 window.fullscreen = window_snapshot.fullscreen;
             }
-            self.sidebar_visible_by_window
-                .insert(window_id.clone(), window_snapshot.sidebar_visible);
+            let (left_sidebar_visible, right_sidebar_visible) =
+                match window_snapshot.right_sidebar_visible {
+                    Some(right_sidebar_visible) => {
+                        (window_snapshot.sidebar_visible, right_sidebar_visible)
+                    }
+                    None => (true, window_snapshot.sidebar_visible),
+                };
+            self.left_sidebar_visible_by_window
+                .insert(window_id.clone(), left_sidebar_visible);
+            self.right_sidebar_visible_by_window
+                .insert(window_id.clone(), right_sidebar_visible);
             self.sidebar_mode_by_window
                 .insert(window_id.clone(), window_snapshot.sidebar_mode.clone());
 
@@ -4033,10 +4053,16 @@ impl AppState {
                 window.selected_workspace.as_deref(),
             ),
             sidebar_visible: self
-                .sidebar_visible_by_window
+                .left_sidebar_visible_by_window
                 .get(&window.id)
                 .copied()
                 .unwrap_or(true),
+            right_sidebar_visible: Some(
+                self.right_sidebar_visible_by_window
+                    .get(&window.id)
+                    .copied()
+                    .unwrap_or(true),
+            ),
             sidebar_mode: self.right_sidebar_mode(&window.id),
             workspaces: window
                 .workspaces
@@ -4250,6 +4276,12 @@ impl AppState {
     }
 
     fn persist_session_snapshot_after_method(&mut self, method: &str) {
+        #[cfg(test)]
+        if method_persists_session_snapshot(method) {
+            self.session_snapshot_persist_attempt_count = self
+                .session_snapshot_persist_attempt_count
+                .saturating_add(1);
+        }
         if !method_persists_session_snapshot(method) || !session_snapshot_save_enabled() {
             return;
         }
@@ -4262,6 +4294,11 @@ impl AppState {
                 ));
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_snapshot_persist_attempt_count_for_test(&self) -> usize {
+        self.session_snapshot_persist_attempt_count
     }
 
     pub(crate) fn event_stream_snapshot(
@@ -7436,10 +7473,57 @@ impl AppState {
     }
 
     pub fn handle(&mut self, method: &str, params: &Value) -> AppResult<Value> {
+        self.prepare_for_request()?;
+        self.handle_prepared(method, params, true)
+    }
+
+    fn prepare_for_request(&mut self) -> AppResult<()> {
         self.drain_remote_tmux_events();
         self.flush_terminal_title_events()?;
-        self.refresh_agent_session_processes();
+        if self.refresh_agent_session_processes() {
+            self.render_activity.record_model_mutation();
+        }
         self.maybe_evaluate_agent_hibernation();
+        Ok(())
+    }
+
+    pub(crate) fn prepare_renderer_snapshot(&mut self) -> AppResult<()> {
+        self.prepare_for_request()
+    }
+
+    pub(crate) fn render_activity(&self) -> RenderActivity {
+        self.render_activity.clone()
+    }
+
+    pub(crate) fn fallback_terminal_output_generations(&self) -> HashMap<String, u64> {
+        self.surfaces
+            .iter()
+            .filter(|(_, surface)| surface.kind == SurfaceKind::Terminal)
+            .filter_map(|(surface_id, surface)| {
+                Some((
+                    surface_id.clone(),
+                    surface.terminal.as_ref()?.output_generation(),
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn handle_renderer_read(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> AppResult<Value> {
+        self.handle_prepared(method, params, false)
+    }
+
+    fn handle_prepared(
+        &mut self,
+        method: &str,
+        params: &Value,
+        persist_snapshot: bool,
+    ) -> AppResult<Value> {
+        let command_palette_was_visible = self.palette_visible_for_current_window();
+        let mut debug_shortcut_was_terminal_input = false;
         let result = match method {
             "system.ping" => Ok(json!({"pong": true})),
             "system.capabilities" => Ok(json!({
@@ -7495,6 +7579,7 @@ impl AppState {
             "agent_session.interrupt" => self.agent_session_interrupt(params),
             "agent_session.stop" => self.agent_session_stop(params),
             "agent_session.output" => self.agent_session_output(params),
+            "agent_session.output_delta" => self.agent_session_output_delta(params),
             "session.restore_previous" => self.session_restore_previous(),
             "settings.open" => self.settings_open(params),
             "settings.set_target" => self.settings_set_target(params),
@@ -8006,6 +8091,7 @@ impl AppState {
             "sidebar.log.clear" => self.sidebar_log_clear(params),
             "sidebar.log.list" => self.sidebar_log_list(params),
             "sidebar.right" => self.right_sidebar_control(params),
+            "sidebar.left" => self.left_sidebar_control(params),
             "sidebar.state" => self.sidebar_state(params),
             "agent.hibernation.set" => self.set_agent_hibernation_settings(params),
             "agent.hibernation.status" => Ok(self.agent_hibernation_status()),
@@ -8207,17 +8293,13 @@ impl AppState {
                 }
             }
             "debug.sidebar.visible" => {
-                let window_id = self
-                    .resolve_window_optional(
-                        params.get("window_id").or_else(|| params.get("window")),
-                    )?
-                    .unwrap_or_else(|| self.current_window.clone());
-                Ok(json!({
-                    "window_id": window_id,
-                    "window_ref": self.window_ref(&window_id),
-                    "visible": self.sidebar_visible_by_window.get(&window_id).copied().unwrap_or(true),
-                    "mode": self.right_sidebar_mode(&window_id)
-                }))
+                if let Some(visible) = bool_param(params, "visible") {
+                    let mut control = params.clone();
+                    control["action"] = json!(if visible { "show" } else { "hide" });
+                    self.left_sidebar_control(&control)
+                } else {
+                    self.left_sidebar_control(params)
+                }
             }
             "debug.right_sidebar.focus" => self.debug_right_sidebar_focus(params),
             "debug.textbox.inline_fixture" => self.debug_textbox_inline_fixture(params),
@@ -8262,14 +8344,6 @@ impl AppState {
                             "reason": "result_index_unavailable"
                         }))
                     }
-                } else if self.shortcut_matches("command_palette", &normalized)
-                    && self.shortcut_action_allowed("command_palette", &shortcut_context)
-                {
-                    self.command_palette_toggle_current(CommandPaletteMode::Switcher)
-                } else if self.shortcut_matches("command_palette_commands", &normalized)
-                    && self.shortcut_action_allowed("command_palette_commands", &shortcut_context)
-                {
-                    self.command_palette_toggle_current(CommandPaletteMode::Commands)
                 } else if self.palette_visible_for_current_window() && normalized == "ctrl+a" {
                     self.command_palette_select_all()
                 } else if self.palette_visible_for_current_window() && normalized == "backspace" {
@@ -8291,16 +8365,20 @@ impl AppState {
                 {
                     self.execute_matched_shortcut(shortcut)
                 } else if normalized == "ctrl+d" {
-                    self.surface_send_key(&json!({"key": "ctrl-d"}))
+                    let result = self.surface_send_key(&json!({"key": "ctrl-d"}))?;
+                    debug_shortcut_was_terminal_input = result_is_terminal_input(&result);
+                    Ok(result)
                 } else if let Some(result) = self.arm_shortcut_chord(&normalized, &shortcut_context)
                 {
                     Ok(result)
                 } else if matches!(normalized.as_str(), "enter" | "return") {
+                    debug_shortcut_was_terminal_input = true;
                     self.surface_send_key(&json!({"key": "enter"}))
                 } else if self.palette_visible_for_current_window() && trimmed.chars().count() == 1
                 {
                     self.command_palette_type_text(trimmed)
                 } else if trimmed.chars().count() == 1 {
+                    debug_shortcut_was_terminal_input = true;
                     self.surface_send_text(&json!({"text": trimmed}))
                 } else {
                     Ok(json!({"handled": false}))
@@ -8315,7 +8393,18 @@ impl AppState {
             "debug.terminal.simulate_file_drop" => self.simulate_terminal_file_drop(params),
             _ => Err(AppError::method_not_found(method)),
         };
-        if result.is_ok() {
+        if persist_snapshot && result.is_ok() {
+            if result.as_ref().is_ok_and(|value| {
+                method_changes_presented_model(
+                    method,
+                    params,
+                    value,
+                    command_palette_was_visible,
+                    debug_shortcut_was_terminal_input,
+                )
+            }) {
+                self.render_activity.record_model_mutation();
+            }
             self.persist_session_snapshot_after_method(method);
         }
         result
@@ -8324,7 +8413,7 @@ impl AppState {
     pub fn handle_legacy_v1(&mut self, command: &str) -> AppResult<String> {
         let args = shell_words(command);
         let name = args.first().map(String::as_str).unwrap_or_default();
-        match name {
+        let result = match name {
             "new_surface" => {
                 let spec = legacy_surface_spec(&args);
                 let pane_id = legacy_option(&args, "--pane")
@@ -8587,7 +8676,11 @@ impl AppState {
                     .to_string())
             }
             _ => Err(AppError::method_not_found(name)),
+        };
+        if result.is_ok() && legacy_method_changes_presented_model(name) {
+            self.render_activity.record_model_mutation();
         }
+        result
     }
 
     fn legacy_resolve_pane_arg(&self, raw: &str) -> AppResult<String> {
@@ -11894,12 +11987,13 @@ impl AppState {
             "tmux -CC attach-session -t {}",
             shell_word(session)
         ));
-        let runtime = RemoteTmuxRuntime::spawn(command).map_err(|error| {
-            AppError::unavailable(format!(
-                "failed to attach remote tmux session {session} on {}: {error:#}",
-                host.destination
-            ))
-        })?;
+        let runtime = RemoteTmuxRuntime::spawn(command, self.render_activity.clone(), key.clone())
+            .map_err(|error| {
+                AppError::unavailable(format!(
+                    "failed to attach remote tmux session {session} on {}: {error:#}",
+                    host.destination
+                ))
+            })?;
 
         let mut connection =
             self.remote_tmux_record_connection(host, session, "starting", None, None);
@@ -11970,6 +12064,34 @@ impl AppState {
         for key in reconnect {
             self.remote_tmux_schedule_reconnect(&key);
         }
+    }
+
+    pub(crate) fn remote_tmux_output_window_ids(
+        &mut self,
+        output_targets: &HashSet<(String, u64)>,
+    ) -> HashSet<String> {
+        self.drain_remote_tmux_events();
+        output_targets
+            .iter()
+            .filter_map(|(key, pane_id)| {
+                let connection = self.remote_tmux_connections.get(key)?;
+                let workspace_id = connection.mirrored_workspace_id.as_ref()?;
+                let workspace = self.workspaces.get(workspace_id)?;
+                let window = self.windows.iter().find(|window| {
+                    window.id == workspace.window_id
+                        && window.selected_workspace.as_ref() == Some(workspace_id)
+                })?;
+                let surface_id = connection.surface_id_by_pane.get(pane_id)?;
+                let pane_id = self.surfaces.get(surface_id)?.pane_id.as_str();
+                let pane = self.panes.get(pane_id)?;
+                (pane.selected_surface.as_ref() == Some(surface_id)
+                    && workspace
+                        .zoomed_pane
+                        .as_ref()
+                        .is_none_or(|zoomed_pane| zoomed_pane == pane_id))
+                .then(|| window.id.clone())
+            })
+            .collect()
     }
 
     fn apply_remote_tmux_runtime_event(&mut self, key: &str, event: RuntimeEvent) {
@@ -12733,6 +12855,7 @@ impl AppState {
                 surface
                     .embedded_terminal_input
                     .push_back(EmbeddedTerminalInput::ProcessOutput(data.to_vec()));
+                request_renderer_owned_terminal_service(surface_id);
             }
             surface.present_count += 1;
         }
@@ -13822,7 +13945,8 @@ impl AppState {
             .position(|w| w.id == id)
             .ok_or_else(|| AppError::not_found("window not found"))?;
         let window = self.windows.remove(index);
-        self.sidebar_visible_by_window.remove(&id);
+        self.left_sidebar_visible_by_window.remove(&id);
+        self.right_sidebar_visible_by_window.remove(&id);
         self.sidebar_mode_by_window.remove(&id);
         self.right_sidebar_focus_generation_by_window.remove(&id);
         self.shortcut_help_visible_by_window.remove(&id);
@@ -16041,6 +16165,7 @@ impl AppState {
                 command.clone(),
                 Arc::clone(&buffer),
                 size,
+                self.render_activity.clone(),
             )
             .map_err(|err| AppError::internal(err.to_string()))?;
             (Some(terminal), buffer)
@@ -16240,7 +16365,56 @@ impl AppState {
         }))
     }
 
-    fn refresh_agent_session_processes(&mut self) {
+    fn agent_session_output_delta(&self, params: &Value) -> AppResult<Value> {
+        let surface_id = self.resolve_agent_session_surface(params)?;
+        let cursor = params.get("cursor").and_then(Value::as_u64).unwrap_or(0);
+        if let Some(runtime) = self.agent_session_runtimes.get(&surface_id) {
+            let delta = runtime.transcript_delta(cursor);
+            return Ok(json!({
+                "surface_id": surface_id,
+                "cursor": delta.cursor,
+                "reset": delta.reset,
+                "output": delta.text
+            }));
+        }
+        let output = self
+            .surfaces
+            .get(&surface_id)
+            .and_then(|surface| surface.buffer.lock().ok().map(|buffer| buffer.clone()))
+            .map(|output| clean_terminal_text(&output))
+            .unwrap_or_default();
+        let revision = fallback_agent_transcript_revision(&output);
+        let offset = usize::try_from(cursor).ok();
+        let prior_revision = params.get("revision").and_then(Value::as_str);
+        let valid_cursor = offset.is_some_and(|offset| {
+            offset <= output.len()
+                && output.is_char_boundary(offset)
+                && if offset == 0 {
+                    true
+                } else if offset == output.len() {
+                    prior_revision == Some(revision.as_str())
+                } else {
+                    let prefix_revision = fallback_agent_transcript_revision(&output[..offset]);
+                    prior_revision == Some(prefix_revision.as_str())
+                }
+        });
+        let reset = !valid_cursor;
+        let text = if reset {
+            output.clone()
+        } else {
+            output[offset.unwrap_or_default()..].to_string()
+        };
+        Ok(json!({
+            "surface_id": surface_id,
+            "cursor": output.len() as u64,
+            "revision": revision,
+            "reset": reset,
+            "output": text
+        }))
+    }
+
+    fn refresh_agent_session_processes(&mut self) -> bool {
+        let mut changed = false;
         let structured_snapshots = self
             .agent_session_runtimes
             .iter()
@@ -16256,6 +16430,14 @@ impl AppState {
         for (surface_id, snapshot, exit_code) in structured_snapshots {
             if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                 if let Some(state) = surface.agent_session.as_mut() {
+                    let before = (
+                        state.status.clone(),
+                        state.session_id.clone(),
+                        state.last_error.clone(),
+                        state.ready,
+                        state.turn_in_flight,
+                        state.was_running_at_snapshot,
+                    );
                     apply_agent_session_runtime_snapshot(state, &snapshot);
                     if let Some(exit_code) = exit_code {
                         state.status = if exit_code == 0 {
@@ -16274,6 +16456,18 @@ impl AppState {
                             ));
                         }
                         finished_structured.push(surface_id.clone());
+                    }
+                    let after = (
+                        state.status.clone(),
+                        state.session_id.clone(),
+                        state.last_error.clone(),
+                        state.ready,
+                        state.turn_in_flight,
+                        state.was_running_at_snapshot,
+                    );
+                    if before != after {
+                        surface.present_count += 1;
+                        changed = true;
                     }
                 }
             }
@@ -16313,8 +16507,10 @@ impl AppState {
                         .then(|| format!("agent provider exited with status {exit_code}"));
                 }
                 surface.present_count += 1;
+                changed = true;
             }
         }
+        changed
     }
 
     fn surface_current(&self, params: &Value) -> AppResult<Value> {
@@ -16410,6 +16606,7 @@ impl AppState {
             initial_input.as_deref(),
             Arc::clone(&buffer),
             terminal_size,
+            self.render_activity.clone(),
         )
         .map_err(|_| AppError::internal("Failed to respawn surface"))?;
 
@@ -18877,7 +19074,7 @@ impl AppState {
             })
             .ok_or_else(|| AppError::not_found("no selected surface"))?;
         let text = string_param(params, "text").unwrap_or_default();
-        self.resume_agent_hibernated_surface(&surface_id)?;
+        let resumed = self.resume_agent_hibernated_surface(&surface_id)?;
         self.record_agent_hibernation_activity(&surface_id, true, false);
         if let Some(surface) = self.surfaces.get_mut(&surface_id) {
             append_surface_input_history(surface, &text);
@@ -18887,7 +19084,8 @@ impl AppState {
             self.mark_remote_surface_exited(&surface_id)?;
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         if let Some(output) = self.detachable_pty_probe_output(&surface_id, &text) {
@@ -18899,7 +19097,8 @@ impl AppState {
             }
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         let handled_remote_command = self.handle_remote_surface_text(&surface_id, &text)?;
@@ -18910,7 +19109,8 @@ impl AppState {
             }
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         if let Some(surface) = self.surfaces.get_mut(&surface_id) {
@@ -18919,13 +19119,15 @@ impl AppState {
         if handled_remote_command {
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         if self.enqueue_renderer_owned_terminal_text(&surface_id, text.clone()) {
             return Ok(json!({
                 "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id)
+                "surface_ref": self.surface_ref(&surface_id),
+                "resumed": resumed
             }));
         }
         self.ensure_surface_terminal_started(&surface_id)?;
@@ -18944,7 +19146,8 @@ impl AppState {
         }
         Ok(json!({
             "surface_id": surface_id,
-            "surface_ref": self.surface_ref(&surface_id)
+            "surface_ref": self.surface_ref(&surface_id),
+            "resumed": resumed
         }))
     }
 
@@ -18995,6 +19198,7 @@ impl AppState {
             None,
             Arc::clone(&buffer),
             terminal_size,
+            self.render_activity.clone(),
         )?;
 
         if let Some(surface) = self.surfaces.get_mut(surface_id) {
@@ -19484,7 +19688,27 @@ impl AppState {
             .unwrap_or_else(|| requested_terminal_size(params));
         let snapshot = ghostty_vt::render_snapshot(&input, size.cols, size.rows)
             .map_err(|err| AppError::not_supported(err.to_string()))?;
-        serde_json::to_value(snapshot).map_err(|err| AppError::internal(err.to_string()))
+        let mut value =
+            serde_json::to_value(snapshot).map_err(|err| AppError::internal(err.to_string()))?;
+        if let Some(terminal) = surface_id
+            .as_deref()
+            .and_then(|surface_id| self.surfaces.get(surface_id))
+            .and_then(|surface| surface.terminal.as_ref())
+        {
+            value["active_screen"] = json!(terminal.active_screen());
+            value["modes"] = Value::Array(
+                terminal
+                    .mode_settings()
+                    .into_iter()
+                    .map(|mode| json!({"code": mode.code, "ansi": mode.ansi, "on": mode.on}))
+                    .collect(),
+            );
+            if let Some(cursor) = terminal.cursor_presentation() {
+                value["cursor_presentation"] =
+                    json!({"style": cursor.style, "blinking": cursor.blinking});
+            }
+        }
+        Ok(value)
     }
 
     fn ghostty_vt_input_bytes(&mut self, params: &Value) -> AppResult<(Vec<u8>, Option<String>)> {
@@ -22423,6 +22647,7 @@ impl AppState {
         surface
             .embedded_terminal_input
             .push_back(EmbeddedTerminalInput::Text(text));
+        request_renderer_owned_terminal_service(surface_id);
         true
     }
 
@@ -22448,6 +22673,7 @@ impl AppState {
         surface
             .embedded_terminal_input
             .push_back(EmbeddedTerminalInput::Key(trimmed.to_string()));
+        request_renderer_owned_terminal_service(surface_id);
         Ok(true)
     }
 
@@ -22465,6 +22691,7 @@ impl AppState {
         surface
             .embedded_terminal_input
             .push_back(EmbeddedTerminalInput::BindingAction(action.to_string()));
+        request_renderer_owned_terminal_service(surface_id);
         true
     }
 
@@ -22951,23 +23178,23 @@ impl AppState {
         match action.as_str() {
             "toggle" => {
                 let next = !self
-                    .sidebar_visible_by_window
+                    .right_sidebar_visible_by_window
                     .get(&window_id)
                     .copied()
                     .unwrap_or(true);
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), next);
             }
             "show" => {
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), true);
             }
             "hide" => {
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), false);
             }
             "focus" => {
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), true);
                 focused = true;
             }
@@ -22992,7 +23219,7 @@ impl AppState {
                     )));
                 }
                 self.sidebar_mode_by_window.insert(window_id.clone(), mode);
-                self.sidebar_visible_by_window
+                self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), true);
                 focused = !bool_param(params, "no_focus").unwrap_or(false);
             }
@@ -23053,12 +23280,52 @@ impl AppState {
         json!({
             "window_id": window_id,
             "window_ref": self.window_ref(window_id),
-            "visible": self.sidebar_visible_by_window.get(window_id).copied().unwrap_or(true),
+            "visible": self.right_sidebar_visible_by_window.get(window_id).copied().unwrap_or(true),
             "mode": self.right_sidebar_mode(window_id),
             "available_modes": self.available_right_sidebar_modes(),
             "focus_generation": self.right_sidebar_focus_generation_by_window.get(window_id).copied().unwrap_or(0),
             "action": action,
             "focused": focused
+        })
+    }
+
+    fn left_sidebar_control(&mut self, params: &Value) -> AppResult<Value> {
+        let window_id = self
+            .resolve_window_optional(params.get("window_id").or_else(|| params.get("window")))?
+            .unwrap_or_else(|| self.current_window.clone());
+        let action = string_param(params, "action")
+            .unwrap_or_else(|| "mode".to_string())
+            .trim()
+            .to_ascii_lowercase();
+        match action.as_str() {
+            "toggle" => {
+                let next = !self
+                    .left_sidebar_visible_by_window
+                    .get(&window_id)
+                    .copied()
+                    .unwrap_or(true);
+                Ok(self.set_left_sidebar_visible(&window_id, next))
+            }
+            "show" => Ok(self.set_left_sidebar_visible(&window_id, true)),
+            "hide" => Ok(self.set_left_sidebar_visible(&window_id, false)),
+            "mode" => Ok(self.left_sidebar_state_value(&window_id)),
+            other => Err(AppError::invalid_params(format!(
+                "unknown left-sidebar action: {other}"
+            ))),
+        }
+    }
+
+    fn set_left_sidebar_visible(&mut self, window_id: &str, visible: bool) -> Value {
+        self.left_sidebar_visible_by_window
+            .insert(window_id.to_string(), visible);
+        self.left_sidebar_state_value(window_id)
+    }
+
+    fn left_sidebar_state_value(&self, window_id: &str) -> Value {
+        json!({
+            "window_id": window_id,
+            "window_ref": self.window_ref(window_id),
+            "visible": self.left_sidebar_visible_by_window.get(window_id).copied().unwrap_or(true)
         })
     }
 
@@ -23724,7 +23991,6 @@ impl AppState {
 
     pub(crate) fn custom_sidebar_snapshot(&mut self) -> Value {
         let selected_provider_id = self.custom_sidebar_selected_provider_id.clone();
-        let context = self.custom_sidebar_data_context();
         let custom_enabled = self.beta_feature_settings.custom_sidebars;
         let extensions_enabled = self.beta_feature_settings.extensions;
         let extension_selected =
@@ -23739,7 +24005,7 @@ impl AppState {
                 custom_sidebar::DEFAULT_PROVIDER_ID,
                 self.custom_sidebar_reload_generation,
                 None,
-                &context,
+                &json!({}),
                 &mut custom_sidebar::SidebarState::new(),
             );
             snapshot["enabled"] = json!(custom_enabled || extensions_enabled);
@@ -23755,6 +24021,7 @@ impl AppState {
         if extension_available {
             return self.sidebar_extension_snapshot();
         }
+        let context = self.custom_sidebar_data_context();
         let last_good = custom_sidebar::provider_name(&selected_provider_id)
             .and_then(|name| self.custom_sidebar_last_good.get(name))
             .cloned();
@@ -24195,8 +24462,8 @@ impl AppState {
     ) -> Value {
         let current_directory = workspace.cwd.clone().unwrap_or_default();
         let root_path = non_empty_trimmed(current_directory.clone());
-        let project_root_path = git_project_root_for_cwd(workspace.cwd.as_deref());
-        let git_branch = git_branch_state_for_cwd(workspace.cwd.as_deref());
+        let project_root_path = git_project_root_for_extension(workspace.cwd.as_deref());
+        let git_branch = git_branch_state_for_extension(workspace.cwd.as_deref());
         let branch_summary = git_branch.as_ref().map(|(branch, _)| branch.clone());
         let git_branches = git_branch
             .into_iter()
@@ -24327,7 +24594,16 @@ impl AppState {
         let focus = bool_param(params, "focus").unwrap_or(true);
         let mut opened = Vec::new();
         for target in targets {
-            opened.push(self.open_target(target, params, focus)?);
+            match self.open_target(target, params, focus) {
+                Ok(value) => opened.push(value),
+                Err(error) => {
+                    if !opened.is_empty() {
+                        self.render_activity.record_model_mutation();
+                        self.persist_session_snapshot_after_method("open.targets");
+                    }
+                    return Err(error);
+                }
+            }
         }
         Ok(json!({
             "count": opened.len(),
@@ -26114,7 +26390,7 @@ impl AppState {
             return Err(AppError::not_found("Window not found"));
         }
         let focus_first_item = bool_param(params, "focus_first_item").unwrap_or(true);
-        self.sidebar_visible_by_window
+        self.right_sidebar_visible_by_window
             .insert(window_id.clone(), true);
         self.sidebar_mode_by_window
             .insert(window_id.clone(), mode.clone());
@@ -31455,7 +31731,7 @@ impl AppState {
                 "palette.toggleSidebar",
                 "Toggle Sidebar",
                 "toggle_sidebar",
-                "debug.sidebar.visible",
+                "sidebar.left",
             ),
             self.command_row(
                 "palette.clearNotifications",
@@ -32357,7 +32633,7 @@ impl AppState {
         let has_prefix = shortcut_dispatch_names().iter().any(|name| {
             self.shortcut_strokes(name)
                 .is_some_and(|strokes| strokes.len() == 2 && strokes[0] == normalized_combo)
-                && self.shortcut_action_allowed(name, context)
+                && self.shortcut_event_allowed(name, normalized_combo, context)
         });
         if !has_prefix {
             return None;
@@ -32491,7 +32767,7 @@ impl AppState {
         normalized_combo: &str,
         context: &ShortcutContext,
     ) -> Option<MatchedShortcut> {
-        if !self.shortcut_action_allowed(name, context) {
+        if !self.shortcut_event_allowed(name, normalized_combo, context) {
             return None;
         }
         if is_numbered_shortcut_name(name) {
@@ -32570,6 +32846,29 @@ impl AppState {
         }
     }
 
+    fn shortcut_event_allowed(
+        &self,
+        name: &str,
+        normalized_combo: &str,
+        context: &ShortcutContext,
+    ) -> bool {
+        let active_overlay_owns_shortcut = (context.bool("commandPaletteVisible")
+            && matches!(name, "command_palette_next" | "command_palette_previous"))
+            || (context.bool("terminalFindVisible")
+                && matches!(name, "find_next" | "find_previous" | "hide_find"));
+        let terminal_surface_focused = context.bool("terminalFocus")
+            && self
+                .current_surface_id()
+                .ok()
+                .and_then(|surface_id| self.surfaces.get(&surface_id))
+                .is_some_and(|surface| surface.kind == SurfaceKind::Terminal);
+        self.shortcut_action_allowed(name, context)
+            && !(terminal_surface_focused
+                && !active_overlay_owns_shortcut
+                && self.shortcut_uses_default(name)
+                && terminal_control_sequence_combo(normalized_combo))
+    }
+
     fn shortcut_context(&self, params: &Value) -> ShortcutContext {
         let current_surface = self
             .current_surface_id()
@@ -32606,7 +32905,13 @@ impl AppState {
             provided
                 .and_then(|values| values.get("terminalFocus"))
                 .and_then(Value::as_bool)
-                .unwrap_or(!browser_focus && !markdown_focus && !sidebar_focus),
+                .unwrap_or(
+                    current_surface.is_some_and(|surface| surface.kind == SurfaceKind::Terminal)
+                        && !browser_focus
+                        && !markdown_focus
+                        && !sidebar_focus
+                        && !self.palette_visible_for_current_window(),
+                ),
         );
         context.set_bool(
             "commandPaletteVisible",
@@ -33520,6 +33825,12 @@ impl AppState {
         self.effective_shortcut_combo(name).as_deref() == Some(normalized_combo)
     }
 
+    pub(crate) fn terminal_find_shortcut_matches(&self, normalized_combo: &str) -> bool {
+        ["find_next", "find_previous", "hide_find"]
+            .into_iter()
+            .any(|name| self.shortcut_matches(name, normalized_combo))
+    }
+
     fn shortcut_uses_default(&self, name: &str) -> bool {
         !self.shortcut_overrides.contains_key(name)
     }
@@ -34151,15 +34462,7 @@ impl AppState {
     }
 
     fn toggle_sidebar_current_window(&mut self) -> AppResult<Value> {
-        let window_id = self.current_window.clone();
-        let next = !self
-            .sidebar_visible_by_window
-            .get(&window_id)
-            .copied()
-            .unwrap_or(true);
-        self.sidebar_visible_by_window
-            .insert(window_id.clone(), next);
-        Ok(json!({"window_id": window_id, "visible": next}))
+        self.left_sidebar_control(&json!({"action": "toggle"}))
     }
 
     fn open_claude_code_integration_installer(&mut self) -> AppResult<Value> {
@@ -35998,6 +36301,7 @@ impl AppState {
             initial_input.as_deref(),
             buffer,
             terminal_size,
+            self.render_activity.clone(),
         )?;
         if let Some(surface) = self.surfaces.get_mut(surface_id) {
             if surface.terminal.is_none() {
@@ -36007,13 +36311,6 @@ impl AppState {
             }
         }
         Ok(false)
-    }
-
-    fn ensure_workspace_terminals_started(&mut self, workspace_id: &str) -> AppResult<()> {
-        for surface_id in self.workspace_surface_ids(workspace_id) {
-            self.ensure_surface_terminal_started(&surface_id)?;
-        }
-        Ok(())
     }
 
     fn set_pane_debug_pixel_size(
@@ -36342,6 +36639,7 @@ impl AppState {
                     terminal_initial_input.as_deref(),
                     Arc::clone(&buffer),
                     terminal_size,
+                    self.render_activity.clone(),
                 )?)
             } else {
                 None
@@ -37031,11 +37329,15 @@ impl AppState {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // Starting every terminal in a workspace here makes workspace selection
+        // block on one PTY spawn per hidden tab. Only the selected surface in
+        // each pane is visible and needs a live PTY for this selection; inactive
+        // tabs remain lazy until they are selected.
         for surface_id in visible_surface_ids {
             self.resume_agent_hibernated_surface(&surface_id)?;
-        }
-        if self.terminal_startup_mode == TerminalStartupMode::CorePty {
-            self.ensure_workspace_terminals_started(workspace_id)?;
+            if self.terminal_startup_mode == TerminalStartupMode::CorePty {
+                self.ensure_surface_terminal_started(&surface_id)?;
+            }
         }
         if self.is_app_active() {
             self.mark_notifications_read_for_workspace(workspace_id);
@@ -38816,6 +39118,11 @@ impl AppState {
                         "terminal_command": surface.terminal_command,
                         "terminal_foreground_pid": surface.embedded_terminal_foreground_pid,
                         "terminal_env": terminal_env_value(&surface.terminal_env),
+                        "terminal_output_generation": surface
+                            .terminal
+                            .as_ref()
+                            .map(TerminalHandle::output_generation)
+                            .unwrap_or(0),
                         "remote_tmux_manual_io": surface.terminal_env.contains_key(REMOTE_TMUX_CONNECTION_ENV),
                         "terminal_progress": embedded_terminal_progress_value(surface.embedded_terminal_progress.as_ref()),
                         "terminal_search": embedded_terminal_search_value(surface.embedded_terminal_search.as_ref()),
@@ -39435,8 +39742,9 @@ fn spawn_terminal_with_initial_input(
     initial_input: Option<&str>,
     buffer: Arc<Mutex<String>>,
     terminal_size: TerminalSize,
+    render_activity: RenderActivity,
 ) -> AppResult<TerminalHandle> {
-    let terminal = spawn_terminal(cwd, env, command, buffer, terminal_size)
+    let terminal = spawn_terminal(cwd, env, command, buffer, terminal_size, render_activity)
         .map_err(|err| AppError::internal(err.to_string()))?;
     if let Some(initial_input) = initial_input.filter(|input| !input.is_empty()) {
         if let Err(err) = terminal.send_text(initial_input) {
@@ -46946,7 +47254,9 @@ fn default_shortcut_combo(name: &str) -> Option<&'static str> {
         "hide_find" => Some("ctrl+alt+shift+f"),
         "use_selection_for_find" => Some("ctrl+e"),
         "save_file_preview" => Some("ctrl+s"),
-        "claude_code" => Some("ctrl+shift+c"),
+        // Ghostty owns Ctrl+Shift+C for the standard Linux terminal Copy action.
+        // Claude Code remains available from the command palette.
+        "claude_code" => None,
         "open_settings" => Some("ctrl+,"),
         "reload_configuration" => Some("ctrl+shift+,"),
         "show_notifications" => Some("ctrl+i"),
@@ -47541,6 +47851,31 @@ fn numbered_shortcut_target<T>(values: &[T], digit: u8) -> Option<&T> {
     }
 }
 
+fn terminal_control_sequence_combo(combo: &str) -> bool {
+    let Some(key) = combo.strip_prefix("ctrl+") else {
+        return false;
+    };
+    !key.contains('+')
+        && (key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic()
+            || matches!(
+                key,
+                "2" | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "space"
+                    | "@"
+                    | "["
+                    | "\\"
+                    | "]"
+                    | "^"
+                    | "_"
+                    | "?"
+            ))
+}
+
 pub(crate) fn shifted_shortcut_base_key(key: &str) -> Option<&'static str> {
     match key {
         "+" => Some("="),
@@ -47662,8 +47997,8 @@ mod shortcut_combo_tests {
         normalize_numbered_shortcut_binding, normalize_shortcut_combo, normalize_shortcut_strokes,
         normalize_shortcut_strokes_for, numbered_shortcut_digit, numbered_shortcut_target,
         shortcut_config_id, shortcut_default_when, shortcut_dispatch_names,
-        shortcut_hint_from_combo, shortcut_name_for_config_id, valid_normalized_shortcut_combo,
-        ShortcutContext, ShortcutWhenClause,
+        shortcut_hint_from_combo, shortcut_name_for_config_id, terminal_control_sequence_combo,
+        valid_normalized_shortcut_combo, AppState, ShortcutContext, ShortcutWhenClause,
     };
     use crate::config::ShortcutBinding;
     use std::collections::HashMap;
@@ -47825,6 +48160,31 @@ mod shortcut_combo_tests {
         );
         assert_eq!(normalize_shortcut_strokes("b c"), None);
         assert_eq!(normalize_shortcut_strokes("ctrl+b c d"), None);
+    }
+
+    #[test]
+    fn terminal_control_sequence_combo_includes_numeric_aliases() {
+        for digit in 2..=8 {
+            assert!(terminal_control_sequence_combo(&format!("ctrl+{digit}")));
+        }
+        assert!(!terminal_control_sequence_combo("ctrl+1"));
+        assert!(!terminal_control_sequence_combo("ctrl+9"));
+    }
+
+    #[test]
+    fn palette_and_terminal_find_shortcuts_override_terminal_control_deferral() {
+        let app = AppState::with_paths(None, None).expect("app state");
+        let mut context = ShortcutContext::default();
+        context.set_bool("terminalFocus", true);
+        context.set_bool("commandPaletteVisible", true);
+        assert!(app.shortcut_event_allowed("command_palette_next", "ctrl+n", &context));
+        assert!(app.shortcut_event_allowed("command_palette_previous", "ctrl+p", &context));
+
+        context.set_bool("commandPaletteVisible", false);
+        context.set_bool("terminalFindVisible", true);
+        assert!(app.shortcut_event_allowed("find_next", "ctrl+g", &context));
+        assert!(app.terminal_find_shortcut_matches("ctrl+g"));
+        assert!(!app.terminal_find_shortcut_matches("ctrl+n"));
     }
 
     #[test]
@@ -53845,6 +54205,7 @@ fn method_persists_session_snapshot(method: &str) -> bool {
     matches!(
         method,
         "session.restore_previous"
+            | "open.targets"
             | "settings.open"
             | "settings.set_target"
             | "settings.shortcuts"
@@ -53867,6 +54228,1149 @@ fn method_persists_session_snapshot(method: &str) -> bool {
         || method.starts_with("sidebar.")
 }
 
+fn method_changes_presented_model(
+    method: &str,
+    params: &Value,
+    result: &Value,
+    command_palette_was_visible: bool,
+    debug_shortcut_was_terminal_input: bool,
+) -> bool {
+    if method == "debug.type" {
+        return command_palette_was_visible
+            || result.get("resumed").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "debug.shortcut.simulate" {
+        if debug_shortcut_was_terminal_input {
+            return result.get("resumed").and_then(Value::as_bool) == Some(true);
+        }
+    }
+    if matches!(method, "debug.shortcut.simulate" | "debug.type")
+        && result.get("handled").and_then(Value::as_bool) == Some(false)
+    {
+        return false;
+    }
+    if method == "surface.send_text" {
+        return result.get("resumed").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "agent.hibernation.resume" {
+        return result.get("resumed").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "auth.team.select" {
+        return result
+            .get("team_selection_updated")
+            .and_then(Value::as_bool)
+            == Some(true);
+    }
+    if method == "auth.sign_out" {
+        return result.get("already_signed_out").and_then(Value::as_bool) != Some(true);
+    }
+    if method == "history.reopen_closed" {
+        return result.get("handled").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "app.close_confirmation.reply" {
+        return result.get("reason").and_then(Value::as_str) != Some("request_not_found");
+    }
+    if method == "app.quit.request" {
+        return result.get("blocked").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "settings.terminal.resume.update" {
+        return true;
+    }
+    if method == "settings.terminal.resume.delete" {
+        return result.get("deleted").and_then(Value::as_bool) == Some(true);
+    }
+    if method == "settings.terminal.resume.clear" {
+        return result.get("cleared").and_then(Value::as_u64).unwrap_or(0) > 0;
+    }
+    if matches!(
+        method,
+        "settings.workspace_colors.color.remove" | "settings.workspace_colors.palette.reset"
+    ) {
+        return true;
+    }
+    if method == "debug.window.close_request" {
+        return true;
+    }
+    if matches!(
+        method,
+        "mobile.terminal.input"
+            | "mobile.terminal.mouse"
+            | "mobile.terminal.paste"
+            | "mobile.terminal.paste_image"
+            | "mobile.terminal.scroll"
+            | "mobile.terminal.viewport"
+            | "terminal.input"
+            | "terminal.mouse"
+            | "terminal.paste"
+            | "terminal.paste_image"
+            | "terminal.scroll"
+            | "terminal.viewport"
+    ) {
+        return false;
+    }
+    if method == "surface.send_key" {
+        return result_changes_presented_topology(result);
+    }
+    if matches!(method, "sidebar.left" | "sidebar.right") {
+        return string_param(params, "action")
+            .map(|action| !action.trim().eq_ignore_ascii_case("mode"))
+            .unwrap_or(false);
+    }
+    if method == "debug.sidebar.visible" {
+        return params.get("visible").and_then(Value::as_bool).is_some()
+            || string_param(params, "action")
+                .is_some_and(|action| !action.trim().eq_ignore_ascii_case("mode"));
+    }
+    if matches!(
+        method,
+        "window.current"
+            | "window.list"
+            | "window.displays"
+            | "workspace.current"
+            | "workspace.list"
+            | "workspace.env"
+            | "workspace.sidebar_selection"
+            | "workspace.group.list"
+            | "pane.list"
+            | "pane.surfaces"
+            | "surface.current"
+            | "surface.list"
+            | "surface.health"
+            | "surface.read_text"
+            | "surface.resume.get"
+            | "terminal.textbox.state"
+            | "agent_session.get_state"
+            | "agent_session.output"
+            | "agent_session.output_delta"
+            | "canvas.info"
+            | "document.get_state"
+            | "project.get_state"
+            | "browser.import.sources"
+            | "browser.omnibar.resolve"
+            | "browser.omnibar.suggestions"
+            | "browser.profiles.list"
+            | "browser.status"
+            | "debug.command_palette.visible"
+            | "debug.command_palette.results"
+            | "debug.command_palette.selection"
+            | "debug.command_palette.rename_input.selection"
+            | "sidebar.state"
+            | "sidebar.status.list"
+            | "sidebar.meta.list"
+            | "sidebar.metadata.list"
+            | "sidebar.meta_block.list"
+            | "sidebar.metadata_block.list"
+            | "sidebar.log.list"
+            | "settings.shortcuts"
+    ) {
+        return false;
+    }
+    method_persists_session_snapshot(method)
+        || socket_event_mapping(method).is_some()
+        || matches!(
+            method,
+            "agent.hibernation.set"
+                | "config.reload"
+                | "debug.command_palette.toggle"
+                | "debug.command_palette.delete_backward"
+                | "debug.command_palette.rename_tab.open"
+                | "debug.command_palette.rename_input.select_all"
+                | "debug.command_palette.rename_input.interact"
+                | "debug.command_palette.rename_input.delete_backward"
+                | "debug.notification.focus"
+                | "debug.right_sidebar.focus"
+                | "debug.shortcut.simulate"
+                | "debug.type"
+                | "feedback.open"
+                | "help.shortcuts.toggle"
+                | "notification.mark_unread"
+                | "notification.reconcile"
+                | "settings.global_hotkey.set_enabled"
+        )
+        || (method.starts_with("settings.") && method.contains(".set"))
+        || (method.starts_with("feed.") && method != "feed.list")
+}
+
+fn result_changes_presented_topology(result: &Value) -> bool {
+    result.get("closed").is_some()
+        || result.get("blocked").is_some()
+        || result.get("confirmation_required").is_some()
+        || result.get("last_surface").is_some()
+        || result.get("workspace_closed").is_some()
+        || result.get("replacement_created").is_some()
+}
+
+fn result_is_terminal_input(result: &Value) -> bool {
+    result.as_object().is_some_and(|object| {
+        object.is_empty()
+            || (object.contains_key("surface_id")
+                && object
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "surface_id" | "surface_ref" | "resumed")))
+    })
+}
+
+fn legacy_method_changes_presented_model(method: &str) -> bool {
+    matches!(
+        method,
+        "new_surface"
+            | "open_browser"
+            | "navigate"
+            | "browser_back"
+            | "browser_forward"
+            | "browser_reload"
+            | "focus_webview"
+            | "agent_hibernation"
+            | "new_pane"
+            | "focus_pane"
+            | "focus_surface_by_panel"
+            | "drag_surface_to_split"
+            | "close_surface"
+            | "reload_config"
+            | "report_pwd"
+    )
+}
+
+#[cfg(test)]
+mod render_activity_tests {
+    use super::{method_changes_presented_model, AppState, TerminalStartupMode};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn model_mutation_activity_excludes_terminal_input() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let initial_generation = activity.model_mutation_generation();
+
+        app.handle(
+            "surface.send_text",
+            &json!({"surface_id": surface_id, "text": ""}),
+        )
+        .expect("empty terminal input");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            initial_generation,
+            "terminal input must not request a Ghostty model snapshot"
+        );
+        app.handle("debug.type", &json!({"text": ""}))
+            .expect("GTK terminal typing path");
+        app.handle("debug.shortcut.simulate", &json!({"combo": "enter"}))
+            .expect("GTK terminal enter path");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            initial_generation,
+            "GTK terminal input adapters must not request a Ghostty model snapshot"
+        );
+        app.handle("settings.shortcuts", &json!({}))
+            .expect("shortcut settings read");
+        app.handle("browser.status", &json!({}))
+            .expect("browser status read");
+        app.handle("debug.sidebar.visible", &json!({}))
+            .expect("left sidebar read");
+        app.handle("sidebar.right", &json!({"action": "mode"}))
+            .expect("right sidebar read");
+        assert!(!method_changes_presented_model(
+            "agent_session.output",
+            &json!({}),
+            &json!({}),
+            false,
+            false,
+        ));
+        assert_eq!(
+            activity.model_mutation_generation(),
+            initial_generation,
+            "GTK model reads must not schedule another model refresh"
+        );
+
+        app.handle("surface.create", &json!({"type": "terminal"}))
+            .expect("surface creation");
+        let after_surface_create = activity.model_mutation_generation();
+        assert!(after_surface_create > initial_generation);
+
+        app.handle(
+            "debug.shortcut.set",
+            &json!({"name": "new_terminal", "combo": "ctrl+alt+t"}),
+        )
+        .expect("shortcut override");
+        app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+alt+t"}))
+            .expect("shortcut mutation");
+        let after_shortcut_mutation = activity.model_mutation_generation();
+        assert!(after_shortcut_mutation > after_surface_create);
+
+        app.shortcut_overrides.insert(
+            "new_terminal".to_string(),
+            crate::config::ShortcutBinding::Single("n".to_string()),
+        );
+        let before_single_character_shortcut = activity.model_mutation_generation();
+        app.handle("debug.shortcut.simulate", &json!({"combo": "n"}))
+            .expect("single-character shortcut mutation");
+        assert!(activity.model_mutation_generation() > before_single_character_shortcut);
+
+        app.handle("debug.command_palette.toggle", &json!({}))
+            .expect("show command palette");
+        let after_palette_toggle = activity.model_mutation_generation();
+        assert!(after_palette_toggle > after_shortcut_mutation);
+        app.handle("debug.type", &json!({"text": "w"}))
+            .expect("type into command palette");
+        let after_palette_type = activity.model_mutation_generation();
+        assert!(after_palette_type > after_palette_toggle);
+        app.handle("debug.command_palette.toggle", &json!({}))
+            .expect("hide command palette");
+
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({"direction": "right", "type": "terminal"}),
+            )
+            .expect("split terminal pane");
+        let split_surface = split["surface_id"].as_str().expect("split surface");
+        let split_pane = app.surfaces[split_surface].pane_id.clone();
+        let split_workspace = app.panes[&split_pane].workspace_id.clone();
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 2);
+        let before_direct_close = activity.model_mutation_generation();
+        let closed = app
+            .handle(
+                "surface.send_key",
+                &json!({"surface_id": split_surface, "key": "ctrl+d"}),
+            )
+            .expect("close split with direct key input");
+        assert_eq!(closed["surface_id"], split["surface_id"]);
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 1);
+        assert!(activity.model_mutation_generation() > before_direct_close);
+
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({"direction": "right", "type": "terminal"}),
+            )
+            .expect("split terminal pane for shortcut");
+        let before_shortcut_close = activity.model_mutation_generation();
+        let closed = app
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+d"}))
+            .expect("close split with GTK shortcut path");
+        assert_eq!(closed["surface_id"], split["surface_id"]);
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 1);
+        assert!(activity.model_mutation_generation() > before_shortcut_close);
+
+        let before_legacy_read = activity.model_mutation_generation();
+        app.handle_legacy_v1("list_panes").expect("legacy read");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_legacy_read,
+            "legacy reads must not schedule model refreshes"
+        );
+        app.handle_legacy_v1("new_surface")
+            .expect("legacy surface mutation");
+        assert!(activity.model_mutation_generation() > before_legacy_read);
+    }
+
+    #[test]
+    fn close_confirmation_transitions_record_presented_model_mutations() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let second_window = app
+            .handle("window.create", &json!({"title": "Second"}))
+            .expect("create second window")["window_id"]
+            .as_str()
+            .expect("second window id")
+            .to_string();
+
+        let before_confirmation = activity.model_mutation_generation();
+        let blocked = app
+            .handle(
+                "debug.window.close_request",
+                &json!({"window_id": second_window, "source": "shortcut"}),
+            )
+            .expect("enqueue close confirmation");
+        assert_eq!(blocked["confirmation_required"], true);
+        assert!(
+            activity.model_mutation_generation() > before_confirmation,
+            "presenting a close confirmation must wake the GTK model watcher"
+        );
+
+        let confirmation_id = blocked["confirmation"]["id"]
+            .as_str()
+            .expect("confirmation id")
+            .to_string();
+        let before_accept = activity.model_mutation_generation();
+        let accepted = app
+            .handle(
+                "app.close_confirmation.reply",
+                &json!({"id": confirmation_id, "confirmed": true}),
+            )
+            .expect("accept close confirmation");
+        assert_eq!(accepted["closed"], true);
+        assert!(!app.windows.iter().any(|window| window.id == second_window));
+        assert!(
+            activity.model_mutation_generation() > before_accept,
+            "accepted close topology must wake the GTK model watcher"
+        );
+    }
+
+    #[test]
+    fn app_quit_only_records_blocked_confirmation_model_changes() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        assert!(app
+            .update_embedded_terminal_close_confirmation(&surface_id, true)
+            .expect("mark terminal dirty"));
+
+        let before_blocked = activity.model_mutation_generation();
+        let blocked = app
+            .handle(
+                "app.quit.request",
+                &json!({"source": "ghostty", "surface_id": surface_id}),
+            )
+            .expect("request interactive quit");
+        assert_eq!(blocked["blocked"], true);
+        assert_eq!(blocked["confirmation_required"], true);
+        assert!(
+            activity.model_mutation_generation() > before_blocked,
+            "blocked Ghostty quit must wake the model watcher for its confirmation"
+        );
+
+        let before_unblocked = activity.model_mutation_generation();
+        let unblocked = app
+            .handle("app.quit.request", &json!({"source": "api"}))
+            .expect("request non-interactive quit");
+        assert_eq!(unblocked["blocked"], false);
+        assert_eq!(unblocked["quit"], true);
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_unblocked,
+            "an unblocked quit command must not schedule a redundant model rebuild"
+        );
+    }
+
+    #[test]
+    fn reopen_closed_browser_records_presented_model_mutation_for_every_entrypoint() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        app.browser_enabled = true;
+        let activity = app.render_activity();
+        let workspace_id = app.current_workspace_id().expect("current workspace");
+        let browser = app
+            .handle(
+                "surface.create",
+                &json!({
+                    "workspace_id": workspace_id,
+                    "type": "browser",
+                    "url": "https://example.test/reopen",
+                    "focus": true
+                }),
+            )
+            .expect("create browser");
+        let browser_id = browser["surface_id"].as_str().expect("browser id");
+        app.handle("surface.close", &json!({"surface_id": browser_id}))
+            .expect("close browser");
+        let closed_surface_count = app.surfaces.len();
+
+        let before_direct = activity.model_mutation_generation();
+        let direct = app
+            .handle("history.reopen_closed", &json!({}))
+            .expect("direct reopen");
+        assert_eq!(direct["handled"], true);
+        assert_eq!(app.surfaces.len(), closed_surface_count + 1);
+        assert!(
+            activity.model_mutation_generation() > before_direct,
+            "direct reopen must wake the GTK model watcher"
+        );
+
+        let direct_id = direct["surface_id"].as_str().expect("direct surface id");
+        app.handle("surface.close", &json!({"surface_id": direct_id}))
+            .expect("close reopened browser");
+        let before_shortcut = activity.model_mutation_generation();
+        let shortcut = app
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+t"}))
+            .expect("shortcut reopen");
+        assert_eq!(shortcut["handled"], true);
+        assert_eq!(app.surfaces.len(), closed_surface_count + 1);
+        assert!(
+            activity.model_mutation_generation() > before_shortcut,
+            "shortcut reopen must keep using the shared mutation path"
+        );
+    }
+
+    #[test]
+    fn resume_approval_mutations_record_presented_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_home = temp.path().join("config");
+        let secret_path = temp.path().join("resume-secret");
+        let snapshot_path = temp.path().join("session.json");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "app::render_activity_tests::resume_approval_mutation_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("XDG_CONFIG_HOME", config_home)
+            .env("CMUX_SURFACE_RESUME_APPROVAL_SECRET_PATH", secret_path)
+            .env("CMUX_SESSION_SNAPSHOT_PATH", snapshot_path)
+            .output()
+            .expect("run isolated resume approval probe");
+
+        assert!(
+            output.status.success(),
+            "resume approval probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn workspace_palette_removals_record_presented_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_home = temp.path().join("config");
+        let snapshot_path = temp.path().join("session.json");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "app::render_activity_tests::workspace_palette_mutation_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("XDG_CONFIG_HOME", config_home)
+            .env("CMUX_SESSION_SNAPSHOT_PATH", snapshot_path)
+            .output()
+            .expect("run isolated workspace palette probe");
+
+        assert!(
+            output.status.success(),
+            "workspace palette probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn direct_account_mutations_record_presented_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_state_path = temp.path().join("auth.json");
+        let credentials_path = temp.path().join("auth-credentials.json");
+        let snapshot_path = temp.path().join("session.json");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "app::render_activity_tests::direct_account_mutation_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CMUX_AUTH_STATE_PATH", auth_state_path)
+            .env("CMUX_AUTH_CREDENTIALS_PATH", credentials_path)
+            .env("CMUX_AUTH_CREDENTIAL_STORE", "file")
+            .env("CMUX_SESSION_SNAPSHOT_PATH", snapshot_path)
+            .output()
+            .expect("run isolated account mutation probe");
+
+        assert!(
+            output.status.success(),
+            "account mutation probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn direct_account_mutation_probe_child() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        app.auth_state.signed_in = true;
+        app.auth_state.teams = vec![super::AuthTeam {
+            id: "team-direct".to_string(),
+            display_name: "Direct Team".to_string(),
+            slug: Some("direct".to_string()),
+        }];
+
+        let before_team = activity.model_mutation_generation();
+        let selected = app
+            .handle("auth.team.select", &json!({"team_id": "team-direct"}))
+            .expect("select account team");
+        assert_eq!(selected["selected_team_id"], "team-direct");
+        assert!(
+            activity.model_mutation_generation() > before_team,
+            "direct team selection must wake the GTK model watcher"
+        );
+
+        let before_sign_out = activity.model_mutation_generation();
+        let signed_out = app
+            .handle("auth.sign_out", &json!({}))
+            .expect("sign out account");
+        assert_eq!(signed_out["signed_in"], false);
+        assert!(
+            activity.model_mutation_generation() > before_sign_out,
+            "direct sign out must wake the GTK model watcher"
+        );
+
+        let before_noop = activity.model_mutation_generation();
+        let already_signed_out = app
+            .handle("auth.sign_out", &json!({}))
+            .expect("repeat sign out");
+        assert_eq!(already_signed_out["already_signed_out"], true);
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_noop,
+            "an already-signed-out account must not schedule a redundant rebuild"
+        );
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn workspace_palette_mutation_probe_child() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        app.handle(
+            "settings.workspace_colors.color.set",
+            &json!({"name": "Model Wake", "color": "#123456"}),
+        )
+        .expect("create custom workspace color");
+
+        let before_remove = activity.model_mutation_generation();
+        let removed = app
+            .handle(
+                "settings.workspace_colors.color.remove",
+                &json!({"name": "Model Wake"}),
+            )
+            .expect("remove custom workspace color");
+        assert!(!removed["colors"]
+            .as_array()
+            .expect("workspace colors")
+            .iter()
+            .any(|entry| entry["name"] == "Model Wake"));
+        assert!(
+            activity.model_mutation_generation() > before_remove,
+            "removing a workspace color must wake the GTK model watcher"
+        );
+
+        app.handle(
+            "settings.workspace_colors.color.set",
+            &json!({"name": "Model Wake", "color": "#123456"}),
+        )
+        .expect("recreate custom workspace color");
+        let before_reset = activity.model_mutation_generation();
+        let reset = app
+            .handle("settings.workspace_colors.palette.reset", &json!({}))
+            .expect("reset workspace palette");
+        assert_eq!(
+            reset["colors"].as_array().expect("workspace colors").len(),
+            16
+        );
+        assert!(!reset["colors"]
+            .as_array()
+            .expect("workspace colors")
+            .iter()
+            .any(|entry| entry["name"] == "Model Wake"));
+        assert!(
+            activity.model_mutation_generation() > before_reset,
+            "resetting the workspace palette must wake the GTK model watcher"
+        );
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn resume_approval_mutation_probe_child() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let approval = app
+            .handle(
+                "surface.resume.set",
+                &json!({
+                    "surface_id": surface_id,
+                    "name": "Model wake approval",
+                    "command": "printf model-wake",
+                    "source": "cli"
+                }),
+            )
+            .expect("create resume approval");
+        let record_id = approval["resume_binding"]["approval_record_id"]
+            .as_str()
+            .expect("approval record id")
+            .to_string();
+
+        let before_update = activity.model_mutation_generation();
+        let updated = app
+            .handle(
+                "settings.terminal.resume.update",
+                &json!({"id": record_id, "policy": "prompt"}),
+            )
+            .expect("update resume approval");
+        assert_eq!(updated["records"][0]["policy"], "prompt");
+        assert!(
+            activity.model_mutation_generation() > before_update,
+            "updating a resume approval must wake the GTK model watcher"
+        );
+
+        let before_delete = activity.model_mutation_generation();
+        let deleted = app
+            .handle("settings.terminal.resume.delete", &json!({"id": record_id}))
+            .expect("delete resume approval");
+        assert_eq!(deleted["deleted"], true);
+        assert!(deleted["records"].as_array().is_some_and(Vec::is_empty));
+        assert!(
+            activity.model_mutation_generation() > before_delete,
+            "deleting a resume approval must wake the GTK model watcher"
+        );
+
+        app.handle(
+            "surface.resume.set",
+            &json!({
+                "surface_id": surface_id,
+                "command": "printf model-wake",
+                "source": "cli"
+            }),
+        )
+        .expect("recreate resume approval");
+        let before_clear = activity.model_mutation_generation();
+        let cleared = app
+            .handle("settings.terminal.resume.clear", &json!({}))
+            .expect("clear resume approvals");
+        assert_eq!(cleared["cleared"], 1);
+        assert!(cleared["status"]["records"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert!(
+            activity.model_mutation_generation() > before_clear,
+            "clearing resume approvals must wake the GTK model watcher"
+        );
+    }
+
+    #[test]
+    fn surface_send_text_only_records_a_model_mutation_when_it_resumes_hibernation() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let surface = app.surfaces.get_mut(&surface_id).expect("surface");
+        surface.resume_binding = Some(super::ResumeBinding {
+            name: Some("Codex".to_string()),
+            kind: Some("codex".to_string()),
+            command: "printf resumed".to_string(),
+            cwd: None,
+            checkpoint_id: Some("checkpoint-input-resume".to_string()),
+            source: Some("agent-hook".to_string()),
+            environment: HashMap::new(),
+            auto_resume: true,
+            approval_policy: Some("auto".to_string()),
+            approval_record_id: None,
+            updated_at: 1.0,
+        });
+        surface.agent_hibernation = Some(super::AgentHibernationSurfaceState {
+            hibernated_at_ms: 1,
+            last_activity_ms: 1,
+        });
+        surface.resume_restore_state = Some("hibernated".to_string());
+
+        let before_resume = activity.model_mutation_generation();
+        let resumed = app
+            .handle(
+                "surface.send_text",
+                &json!({"surface_id": surface_id, "text": "continue"}),
+            )
+            .expect("resume through terminal input");
+        assert_eq!(resumed["resumed"], true);
+        assert!(app.surfaces[&surface_id].agent_hibernation.is_none());
+        assert!(
+            activity.model_mutation_generation() > before_resume,
+            "hibernation resume hidden inside terminal input must wake the GTK model watcher"
+        );
+
+        let before_pure_input = activity.model_mutation_generation();
+        let pure_input = app
+            .handle(
+                "surface.send_text",
+                &json!({"surface_id": surface_id, "text": "again"}),
+            )
+            .expect("pure terminal input");
+        assert_eq!(pure_input["resumed"], false);
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_pure_input,
+            "ordinary terminal input must stay off the presented-model hot path"
+        );
+    }
+
+    #[test]
+    fn explicit_agent_resume_only_records_a_successful_model_mutation() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let surface = app.surfaces.get_mut(&surface_id).expect("surface");
+        surface.resume_binding = Some(super::ResumeBinding {
+            name: Some("Codex".to_string()),
+            kind: Some("codex".to_string()),
+            command: "printf resumed".to_string(),
+            cwd: None,
+            checkpoint_id: Some("checkpoint-explicit-resume".to_string()),
+            source: Some("agent-hook".to_string()),
+            environment: HashMap::new(),
+            auto_resume: true,
+            approval_policy: Some("auto".to_string()),
+            approval_record_id: None,
+            updated_at: 1.0,
+        });
+        surface.agent_hibernation = Some(super::AgentHibernationSurfaceState {
+            hibernated_at_ms: 1,
+            last_activity_ms: 1,
+        });
+        surface.resume_restore_state = Some("hibernated".to_string());
+
+        let before_resume = activity.model_mutation_generation();
+        let resumed = app
+            .handle(
+                "agent.hibernation.resume",
+                &json!({"surface_id": surface_id, "focus": true}),
+            )
+            .expect("explicitly resume hibernated agent");
+        assert_eq!(resumed["resumed"], true);
+        assert!(app.surfaces[&surface_id].agent_hibernation.is_none());
+        assert!(
+            activity.model_mutation_generation() > before_resume,
+            "the GTK Resume entrypoint must wake the model watcher"
+        );
+
+        let before_noop = activity.model_mutation_generation();
+        let noop = app
+            .handle(
+                "agent.hibernation.resume",
+                &json!({"surface_id": surface_id, "focus": true}),
+            )
+            .expect("repeat explicit resume");
+        assert_eq!(noop["resumed"], false);
+        assert_eq!(
+            activity.model_mutation_generation(),
+            before_noop,
+            "a no-op explicit resume must not schedule a model rebuild"
+        );
+    }
+
+    #[test]
+    fn disabling_agent_hibernation_directly_records_resumed_model_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        app.agent_hibernation_settings_use_cmux_config = false;
+        app.agent_hibernation_settings_path = temp.path().join("agent-hibernation.json");
+        app.agent_hibernation_settings.enabled = true;
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let surface = app.surfaces.get_mut(&surface_id).expect("surface");
+        surface.resume_binding = Some(super::ResumeBinding {
+            name: Some("Codex".to_string()),
+            kind: Some("codex".to_string()),
+            command: "printf resumed".to_string(),
+            cwd: None,
+            checkpoint_id: Some("checkpoint-disable-hibernation".to_string()),
+            source: Some("agent-hook".to_string()),
+            environment: HashMap::new(),
+            auto_resume: true,
+            approval_policy: Some("auto".to_string()),
+            approval_record_id: None,
+            updated_at: 1.0,
+        });
+        surface.agent_hibernation = Some(super::AgentHibernationSurfaceState {
+            hibernated_at_ms: 1,
+            last_activity_ms: 1,
+        });
+        surface.resume_restore_state = Some("hibernated".to_string());
+
+        let before = activity.model_mutation_generation();
+        let result = app
+            .handle("agent.hibernation.set", &json!({"enabled": false}))
+            .expect("disable hibernation");
+
+        assert_eq!(result["enabled"], false);
+        assert!(app.surfaces[&surface_id].agent_hibernation.is_none());
+        assert!(
+            activity.model_mutation_generation() > before,
+            "direct hibernation settings must wake the GTK model watcher after resuming a surface"
+        );
+    }
+
+    #[test]
+    fn notification_focus_records_presented_model_changes() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let surface_id = app.current_surface_id().expect("current surface");
+        let notification_id = app
+            .handle(
+                "notification.create",
+                &json!({
+                    "surface_id": surface_id,
+                    "title": "Needs attention"
+                }),
+            )
+            .expect("create notification")["notification_id"]
+            .as_str()
+            .expect("notification id")
+            .to_string();
+        assert!(app
+            .notifications
+            .iter()
+            .any(|notification| notification.id == notification_id && !notification.read));
+
+        let before = activity.model_mutation_generation();
+        app.handle(
+            "debug.notification.focus",
+            &json!({"surface_id": surface_id}),
+        )
+        .expect("focus notification");
+
+        assert!(app
+            .notifications
+            .iter()
+            .any(|notification| notification.id == notification_id && notification.read));
+        assert!(
+            activity.model_mutation_generation() > before,
+            "focusing a GTK notification row must wake the model watcher"
+        );
+    }
+
+    #[test]
+    fn open_targets_records_presented_model_mutation() {
+        let directory = tempfile::tempdir().expect("open target directory");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let before_generation = activity.model_mutation_generation();
+        let before_workspaces = app.workspaces.len();
+        let before_persist = app.session_snapshot_persist_attempt_count_for_test();
+
+        let opened = app
+            .handle(
+                "open.targets",
+                &json!({
+                    "targets": [{
+                        "kind": "directory",
+                        "path": directory.path()
+                    }]
+                }),
+            )
+            .expect("open directory target");
+
+        assert_eq!(opened["count"], 1);
+        assert_eq!(app.workspaces.len(), before_workspaces + 1);
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > before_persist);
+        assert!(
+            activity.model_mutation_generation() > before_generation,
+            "open.targets must wake the GTK model watcher after changing presented topology"
+        );
+    }
+
+    #[test]
+    fn open_targets_partial_failure_records_presented_model_mutation() {
+        let directory = tempfile::tempdir().expect("open target directory");
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let before_generation = activity.model_mutation_generation();
+        let before_workspaces = app.workspaces.len();
+        let before_persist = app.session_snapshot_persist_attempt_count_for_test();
+
+        let error = app
+            .handle(
+                "open.targets",
+                &json!({
+                    "targets": [
+                        {"kind": "directory", "path": directory.path()},
+                        {"kind": "unsupported", "target": "invalid"}
+                    ]
+                }),
+            )
+            .expect_err("later invalid target must fail the batch");
+
+        assert_eq!(error.code, "invalid_params");
+        assert_eq!(app.workspaces.len(), before_workspaces + 1);
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > before_persist);
+        assert!(
+            activity.model_mutation_generation() > before_generation,
+            "partial open.targets mutations must wake the GTK model watcher"
+        );
+    }
+
+    #[test]
+    fn agent_output_poll_records_prepared_runtime_state_changes() {
+        let directory = tempfile::tempdir().expect("agent runtime tempdir");
+        let provider = directory.path().join("fake-claude-stream");
+        fs::write(
+            &provider,
+            r#"#!/usr/bin/python3
+import json
+import sys
+import time
+
+for raw in sys.stdin:
+    json.loads(raw)
+    print(json.dumps({"type":"message_start","message":{"id":"message-1","role":"assistant"}}), flush=True)
+    print(json.dumps({"type":"assistant","message":{"id":"message-1","role":"assistant","content":[{"type":"text","text":"done"}]}}), flush=True)
+    time.sleep(0.5)
+    print(json.dumps({"type":"result","result":"done"}), flush=True)
+"#,
+        )
+        .expect("write fake Claude stream");
+        let mut permissions = fs::metadata(&provider)
+            .expect("fake provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&provider, permissions).expect("make fake provider executable");
+
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("app state");
+        let activity = app.render_activity();
+        let created = app
+            .handle(
+                "surface.create",
+                &json!({
+                    "type": "agent-session",
+                    "provider": "claude",
+                    "executable": provider,
+                    "working_directory": directory.path(),
+                    "auto_start": false,
+                    "focus": true
+                }),
+            )
+            .expect("create agent session");
+        let surface_id = created["surface_id"].as_str().expect("surface id");
+        app.handle("agent_session.start", &json!({"surface_id": surface_id}))
+            .expect("start agent session");
+        app.handle(
+            "agent_session.send",
+            &json!({"surface_id": surface_id, "text": "reply"}),
+        )
+        .expect("send agent prompt");
+        app.handle(
+            "agent_session.output_delta",
+            &json!({"surface_id": surface_id, "cursor": 0}),
+        )
+        .expect("poll active agent output");
+        assert_eq!(
+            app.surfaces[surface_id]
+                .agent_session
+                .as_ref()
+                .expect("agent state")
+                .turn_in_flight,
+            true
+        );
+        let after_active_poll = activity.model_mutation_generation();
+        app.handle(
+            "agent_session.output_delta",
+            &json!({"surface_id": surface_id, "cursor": 0}),
+        )
+        .expect("poll unchanged active agent output");
+        assert_eq!(
+            activity.model_mutation_generation(),
+            after_active_poll,
+            "an unchanged output poll must not request another GTK model refresh"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = app
+                .agent_session_runtimes
+                .get(surface_id)
+                .expect("agent runtime")
+                .snapshot();
+            if !snapshot.turn_in_flight && snapshot.transcript.contains("done") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "agent turn did not complete");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let before_poll = activity.model_mutation_generation();
+        app.handle(
+            "agent_session.output_delta",
+            &json!({"surface_id": surface_id, "cursor": 0}),
+        )
+        .expect("poll agent output");
+        assert_eq!(
+            app.surfaces[surface_id]
+                .agent_session
+                .as_ref()
+                .expect("agent state")
+                .turn_in_flight,
+            false
+        );
+        assert!(
+            activity.model_mutation_generation() > before_poll,
+            "preparation changed the presented agent state but did not wake the GTK model watcher"
+        );
+    }
+}
+
 fn env_truthy(key: &str) -> bool {
     normalized_env(key).is_some_and(|value| {
         matches!(
@@ -53874,6 +55378,11 @@ fn env_truthy(key: &str) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+fn request_renderer_owned_terminal_service(surface_id: &str) {
+    #[cfg(feature = "gtk")]
+    crate::gtk_ghostty::request_ghostty_service(surface_id);
 }
 
 fn diff_comments_dir() -> PathBuf {
@@ -56800,6 +58309,10 @@ fn clean_terminal_text(text: &str) -> String {
     terminal_text_screen(text).text()
 }
 
+fn fallback_agent_transcript_revision(output: &str) -> String {
+    format!("{:x}", Sha256::digest(output.as_bytes()))
+}
+
 fn append_terminal_output_aligned(buffer: &mut String, output: &str) {
     if output.is_empty() {
         return;
@@ -57346,9 +58859,9 @@ mod embedded_terminal_action_tests {
         browser_import_bookmarks_from_value, browser_import_settings_from_value,
         browser_surface_preview_value, custom_sidebar_nested_cmux_method_allowed,
         debug_container_frame, default_browser_profiles, file_url_for_path,
-        global_search_query_tokens, global_search_result_digit, global_search_text_matches,
-        load_browser_profiles, merge_browser_history_entries, session_terminal_env,
-        workspace_placement_insertion_index, AppState, BrowserHistoryEntry,
+        git_branch_state_for_cwd, global_search_query_tokens, global_search_result_digit,
+        global_search_text_matches, load_browser_profiles, merge_browser_history_entries,
+        session_terminal_env, workspace_placement_insertion_index, AppState, BrowserHistoryEntry,
         BrowserImportHistoryEntry, EmbeddedTerminalActionRecord, EmbeddedTerminalColorChange,
         EmbeddedTerminalCommandFinished, EmbeddedTerminalInput, EmbeddedTerminalKeySequence,
         EmbeddedTerminalPixelSize, EmbeddedTerminalProgress, EmbeddedTerminalScrollbar,
@@ -57362,6 +58875,8 @@ mod embedded_terminal_action_tests {
     use base64::Engine;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::process::Command;
     use std::thread;
     use std::time::Duration;
     use uuid::Uuid;
@@ -57372,6 +58887,128 @@ mod embedded_terminal_action_tests {
         let surface_ref = app.surface_ref(&surface_id);
         let workspace_id = app.surface_workspace_id(&surface_id).expect("workspace");
         (app, surface_id, surface_ref, workspace_id)
+    }
+
+    #[test]
+    fn fallback_agent_transcript_resets_after_same_length_rewrite() {
+        let (mut app, surface_id, _, _) = app_with_current_surface();
+        app.surfaces.get_mut(&surface_id).expect("surface").kind = SurfaceKind::AgentSession;
+        app.configure_agent_session_surface(
+            &surface_id,
+            &json!({
+                "provider": "codex",
+                "renderer": "solid",
+                "transport": "pty-interactive"
+            }),
+        )
+        .expect("configure fallback agent session");
+        {
+            let surface = app.surfaces.get(&surface_id).expect("surface");
+            *surface.buffer.lock().expect("buffer") = "status 1".to_string();
+        }
+
+        let first = app
+            .agent_session_output_delta(&json!({"surface_id": surface_id, "cursor": 0}))
+            .expect("first delta");
+        assert_eq!(first["output"], "status 1");
+        let revision = first["revision"]
+            .as_str()
+            .expect("fallback delta revision")
+            .to_string();
+        {
+            let surface = app.surfaces.get(&surface_id).expect("surface");
+            *surface.buffer.lock().expect("buffer") = "status 2".to_string();
+        }
+
+        let rewritten = app
+            .agent_session_output_delta(&json!({
+                "surface_id": surface_id,
+                "cursor": first["cursor"],
+                "revision": revision
+            }))
+            .expect("rewritten delta");
+        assert_eq!(rewritten["reset"], true);
+        assert_eq!(rewritten["output"], "status 2");
+    }
+
+    #[test]
+    fn first_git_branch_lookup_returns_authoritative_state() {
+        let directory = tempfile::tempdir().expect("git tempdir");
+        let cwd = directory.path();
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init", "-b", "review-initial"]);
+        run_git(&[
+            "-c",
+            "user.name=cmux test",
+            "-c",
+            "user.email=cmux@example.test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ]);
+        fs::write(cwd.join("dirty.txt"), "dirty\n").expect("write dirty file");
+
+        assert_eq!(
+            git_branch_state_for_cwd(cwd.to_str()),
+            Some(("review-initial".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn session_snapshot_restores_left_and_right_sidebar_visibility_independently() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+        app.handle("debug.sidebar.visible", &json!({"visible": false}))
+            .expect("hide left sidebar");
+        app.handle("sidebar.right", &json!({"action": "hide"}))
+            .expect("hide right sidebar");
+
+        let snapshot = app.session_snapshot(false);
+        assert!(!snapshot.windows[0].sidebar_visible);
+        assert_eq!(snapshot.windows[0].right_sidebar_visible, Some(false));
+
+        let mut restored = AppState::with_paths(None, None).expect("restored app");
+        restored
+            .restore_session_snapshot(snapshot.clone())
+            .expect("restore snapshot");
+        assert_eq!(
+            restored
+                .handle("debug.sidebar.visible", &json!({}))
+                .expect("left sidebar state")["visible"],
+            false
+        );
+        assert_eq!(
+            restored
+                .handle("sidebar.right", &json!({"action": "mode"}))
+                .expect("right sidebar state")["visible"],
+            false
+        );
+
+        let mut legacy_snapshot = snapshot;
+        legacy_snapshot.windows[0].right_sidebar_visible = None;
+        let mut legacy_restored = AppState::with_paths(None, None).expect("legacy restored app");
+        legacy_restored
+            .restore_session_snapshot(legacy_snapshot)
+            .expect("restore legacy snapshot");
+        assert_eq!(
+            legacy_restored
+                .handle("debug.sidebar.visible", &json!({}))
+                .expect("legacy left sidebar state")["visible"],
+            true
+        );
+        assert_eq!(
+            legacy_restored
+                .handle("sidebar.right", &json!({"action": "mode"}))
+                .expect("legacy right sidebar state")["visible"],
+            false
+        );
     }
 
     #[test]
@@ -57648,6 +59285,72 @@ mod embedded_terminal_action_tests {
         if let Some(terminal) = app.surfaces[&background_surface].terminal.as_ref() {
             let _ = terminal.kill();
         }
+    }
+
+    #[test]
+    fn remote_tmux_event_wake_targets_only_the_mirrored_window() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+        let host = RemoteTmuxHostSpec {
+            destination: "remote.example".to_string(),
+            port: None,
+            identity_file: None,
+        };
+        app.ensure_remote_tmux_session(&host, "work");
+        let affected_window_id = app.current_window.clone();
+        let mirrored = app
+            .remote_tmux_mirror_session_in_window(&host, "work", &affected_window_id, false, None)
+            .expect("mirror");
+        let mirrored_workspace_id = mirrored["workspace_id"]
+            .as_str()
+            .expect("mirrored workspace id")
+            .to_string();
+        let key = AppState::remote_tmux_connection_key(&host, "work");
+        let layout = parse_remote_tmux_layout("80x24,0,0,7").expect("layout");
+        let connection = app
+            .remote_tmux_connections
+            .get_mut(&key)
+            .expect("connection");
+        connection.window_ids = vec![3];
+        connection.active_window_id = Some(3);
+        connection.windows.insert(
+            3,
+            RemoteTmuxWindowState {
+                id: 3,
+                index: 0,
+                name: "main".to_string(),
+                active: true,
+                layout: Some(layout),
+                active_pane_id: Some(7),
+            },
+        );
+        app.reconcile_remote_tmux_surfaces(&key);
+        let background_workspace_id = app
+            .workspace_create(&json!({"title": "Background", "focus": true}))
+            .expect("background workspace")["workspace_id"]
+            .as_str()
+            .expect("background workspace id")
+            .to_string();
+        let unrelated_window_id = app.create_window_internal("Unrelated".to_string());
+
+        let hidden_window_ids = app.remote_tmux_output_window_ids(&HashSet::from([
+            (key.clone(), 7),
+            ("unknown-connection".to_string(), 99),
+        ]));
+        assert!(
+            hidden_window_ids.is_empty(),
+            "output in an unselected remote workspace must not refresh its visible window"
+        );
+
+        app.select_workspace_by_id(&mirrored_workspace_id)
+            .expect("select mirrored workspace");
+        let window_ids = app.remote_tmux_output_window_ids(&HashSet::from([(
+            AppState::remote_tmux_connection_key(&host, "work"),
+            7,
+        )]));
+
+        assert_eq!(window_ids, HashSet::from([affected_window_id]));
+        assert!(!window_ids.contains(&unrelated_window_id));
+        assert_ne!(mirrored_workspace_id, background_workspace_id);
     }
 
     #[test]
@@ -62416,12 +64119,30 @@ mod embedded_terminal_action_tests {
             TerminalStartupMode::RendererOwned,
         )
         .expect("app state");
-        let surface_id = app.current_surface_id().expect("current surface");
+        let original_surface_id = app.current_surface_id().expect("current surface");
+        let surface_id = format!("ghostty-service-test-{}", std::process::id());
+        let mut surface = app
+            .surfaces
+            .remove(&original_surface_id)
+            .expect("original surface");
+        surface.id = surface_id.clone();
+        let pane = app.panes.get_mut(&surface.pane_id).expect("surface pane");
+        for pane_surface_id in &mut pane.surfaces {
+            if *pane_surface_id == original_surface_id {
+                *pane_surface_id = surface_id.clone();
+            }
+        }
+        if pane.selected_surface.as_deref() == Some(original_surface_id.as_str()) {
+            pane.selected_surface = Some(surface_id.clone());
+        }
+        app.surfaces.insert(surface_id.clone(), surface);
         let surface_ref = app.surface_ref(&surface_id);
         assert_eq!(
             app.current_terminal_input_route(),
             Some((surface_id.clone(), true))
         );
+        #[cfg(feature = "gtk")]
+        crate::gtk_ghostty::take_ghostty_service_dispatched_surface_ids_for_test();
 
         app.handle(
             "surface.send_text",
@@ -62433,6 +64154,30 @@ mod embedded_terminal_action_tests {
             &json!({"surface_id": surface_id, "key": "enter"}),
         )
         .expect("send key");
+        #[cfg(feature = "gtk")]
+        {
+            let context = gtk4::glib::MainContext::default();
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let dispatched = loop {
+                if let Ok(_guard) = context.acquire() {
+                    while context.pending() {
+                        context.iteration(false);
+                    }
+                }
+                let dispatched =
+                    crate::gtk_ghostty::take_ghostty_service_dispatched_surface_ids_for_test();
+                if dispatched.iter().any(|candidate| candidate == &surface_id)
+                    || std::time::Instant::now() >= deadline
+                {
+                    break dispatched;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            assert!(
+                dispatched.iter().any(|candidate| candidate == &surface_id),
+                "the coalesced idle service must promptly include the queued surface"
+            );
+        }
 
         assert!(app.surfaces[&surface_id].terminal.is_none());
         app.surfaces
@@ -63441,9 +65186,12 @@ mod terminal_text_tests {
             .iter()
             .find(|style| style["id"].as_u64() == Some(style_id))
             .expect("style");
-        assert_eq!(style["fg"], json!({"r": 1, "g": 2, "b": 3}));
+        assert_eq!(style["foreground"], "#010203");
         assert_eq!(grid["cursor"]["style"], "bar");
-        assert_eq!(grid["modes"], json!(["bracketed_paste"]));
+        assert_eq!(
+            grid["modes"],
+            json!([{"code": 2004, "ansi": false, "on": true}])
+        );
     }
 
     #[test]
@@ -63641,38 +65389,109 @@ fn format_log_entry(entry: &SidebarLogEntry) -> String {
     }
 }
 
-fn git_project_root_for_cwd(cwd: Option<&str>) -> Option<String> {
-    git_output(cwd?, ["rev-parse", "--show-toplevel"])
+fn git_branch_state_for_cwd(cwd: Option<&str>) -> Option<(String, bool)> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<(String, bool)>>>> = OnceLock::new();
+    cached_git_value(cwd?, &CACHE, |cwd| {
+        git_output(&cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| {
+            let dirty = git_output(&cwd, ["status", "--porcelain"])
+                .map(|status| !status.trim().is_empty())
+                .unwrap_or(false);
+            (branch, dirty)
+        })
+    })
 }
 
-fn git_branch_state_for_cwd(cwd: Option<&str>) -> Option<(String, bool)> {
-    let cwd = cwd?;
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Option<(String, bool)>)>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+fn git_project_root_for_extension(cwd: Option<&str>) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<String>>>> = OnceLock::new();
+    cached_git_value(cwd?, &CACHE, |cwd| {
+        git_output(&cwd, ["rev-parse", "--show-toplevel"])
+    })
+}
+
+fn git_branch_state_for_extension(cwd: Option<&str>) -> Option<(String, bool)> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitCacheEntry<(String, bool)>>>> = OnceLock::new();
+    cached_git_value(cwd?, &CACHE, |cwd| {
+        git_output(&cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| {
+            let dirty = git_output(&cwd, ["status", "--porcelain"])
+                .map(|status| !status.trim().is_empty())
+                .unwrap_or(false);
+            (branch, dirty)
+        })
+    })
+}
+
+struct GitCacheEntry<T> {
+    updated_at: Instant,
+    value: Option<T>,
+    refresh_in_flight: bool,
+}
+
+fn cached_git_value<T, F>(
+    cwd: &str,
+    cache: &'static OnceLock<Mutex<HashMap<String, GitCacheEntry<T>>>>,
+    refresh: F,
+) -> Option<T>
+where
+    T: Clone + Send + 'static,
+    F: FnOnce(String) -> Option<T> + Send + 'static,
+{
+    let entries_cache = cache.get_or_init(|| Mutex::new(HashMap::new()));
     let now = Instant::now();
-    if let Ok(cache) = cache.lock() {
-        if let Some((updated_at, value)) = cache.get(cwd) {
-            if now.duration_since(*updated_at) < Duration::from_secs(3) {
-                return value.clone();
+    let cwd = cwd.to_string();
+    let (stale_value, initial_lookup) = {
+        let Ok(mut entries) = entries_cache.lock() else {
+            return None;
+        };
+        if let Some(entry) = entries.get_mut(&cwd) {
+            if now.duration_since(entry.updated_at) < Duration::from_secs(3)
+                || entry.refresh_in_flight
+            {
+                return entry.value.clone();
             }
+            entry.refresh_in_flight = true;
+            (entry.value.clone(), false)
+        } else {
+            if entries.len() >= 256 {
+                entries.retain(|_, entry| {
+                    entry.refresh_in_flight
+                        || now.duration_since(entry.updated_at) < Duration::from_secs(30)
+                });
+            }
+            (None, true)
         }
-    }
-    let value = git_output(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| {
-        let dirty = git_output(cwd, ["status", "--porcelain"])
-            .map(|status| !status.trim().is_empty())
-            .unwrap_or(false);
-        (branch, dirty)
-    });
-    if let Ok(mut cache) = cache.lock() {
-        if cache.len() >= 256 {
-            cache.retain(|_, (updated_at, _)| {
-                now.duration_since(*updated_at) < Duration::from_secs(30)
-            });
+    };
+    if initial_lookup {
+        let value = refresh(cwd.clone());
+        if let Ok(mut entries) = entries_cache.lock() {
+            entries.insert(
+                cwd,
+                GitCacheEntry {
+                    updated_at: Instant::now(),
+                    value: value.clone(),
+                    refresh_in_flight: false,
+                },
+            );
         }
-        cache.insert(cwd.to_string(), (now, value.clone()));
+        return value;
     }
-    value
+    let refresh_cwd = cwd.clone();
+    thread::Builder::new()
+        .name("cmux-git-status".to_string())
+        .spawn(move || {
+            let value = refresh(refresh_cwd);
+            if let Ok(mut entries) = entries_cache.lock() {
+                entries.insert(
+                    cwd,
+                    GitCacheEntry {
+                        updated_at: Instant::now(),
+                        value,
+                        refresh_in_flight: false,
+                    },
+                );
+            }
+        })
+        .ok();
+    stale_value
 }
 
 fn git_output<const N: usize>(cwd: &str, args: [&str; N]) -> Option<String> {
@@ -63850,6 +65669,7 @@ fn supported_methods() -> Vec<&'static str> {
         "agent_session.draft.set",
         "agent_session.interrupt",
         "agent_session.output",
+        "agent_session.output_delta",
         "agent_session.send",
         "agent_session.set_permission_mode",
         "agent_session.set_provider",
@@ -64218,6 +66038,7 @@ fn supported_methods() -> Vec<&'static str> {
         "sidebar.metadata_block.set",
         "sidebar.progress.clear",
         "sidebar.progress.set",
+        "sidebar.left",
         "sidebar.right",
         "sidebar.state",
         "sidebar.status.clear",

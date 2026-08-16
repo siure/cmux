@@ -1,13 +1,49 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant};
+
+pub(crate) const TERMINAL_MODE_SETTINGS: [(&str, u64, bool); 10] = [
+    ("application_cursor_keys", 1, false),
+    ("application_keypad", 66, false),
+    ("wraparound", 7, false),
+    ("bracketed_paste", 2004, false),
+    ("focus_events", 1004, false),
+    ("mouse_button_tracking", 1000, false),
+    ("mouse_drag_tracking", 1002, false),
+    ("mouse_any_tracking", 1003, false),
+    ("mouse_sgr", 1006, false),
+    ("mouse_urxvt", 1015, false),
+];
+const TERMINAL_MODE_ENABLED_SHIFT: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalModeSetting {
+    pub code: u64,
+    pub ansi: bool,
+    pub on: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalCursorPresentation {
+    pub style: &'static str,
+    pub blinking: bool,
+}
+
+const CURSOR_PRESENTATION_KNOWN: u64 = 1;
+const CURSOR_PRESENTATION_STYLE_SHIFT: usize = 1;
+const CURSOR_PRESENTATION_BLINKING: u64 = 1 << 3;
 
 #[derive(Clone)]
 pub struct TerminalHandle {
@@ -15,6 +51,50 @@ pub struct TerminalHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     title_events: Arc<Mutex<Vec<String>>>,
+    output_generation: Arc<AtomicU64>,
+    alternate_screen_active: Arc<AtomicBool>,
+    terminal_modes: Arc<AtomicU64>,
+    cursor_presentation: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Default)]
+pub struct RenderActivity {
+    terminal_output_generation: Arc<AtomicU64>,
+    model_mutation_generation: Arc<AtomicU64>,
+    remote_tmux_output_targets: Arc<Mutex<HashSet<(String, u64)>>>,
+}
+
+impl RenderActivity {
+    pub fn terminal_output_generation(&self) -> u64 {
+        self.terminal_output_generation.load(Ordering::Acquire)
+    }
+
+    pub fn model_mutation_generation(&self) -> u64 {
+        self.model_mutation_generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_terminal_output(&self) {
+        self.terminal_output_generation
+            .fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn record_model_mutation(&self) {
+        self.model_mutation_generation
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_remote_tmux_output(&self, connection_key: &str, pane_id: u64) {
+        if let Ok(mut targets) = self.remote_tmux_output_targets.lock() {
+            targets.insert((connection_key.to_string(), pane_id));
+        }
+    }
+
+    pub(crate) fn take_remote_tmux_output_targets(&self) -> HashSet<(String, u64)> {
+        self.remote_tmux_output_targets
+            .lock()
+            .map(|mut targets| std::mem::take(&mut *targets))
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +117,26 @@ impl Default for TerminalSize {
 }
 
 impl TerminalHandle {
+    pub fn output_generation(&self) -> u64 {
+        self.output_generation.load(Ordering::Acquire)
+    }
+
+    pub fn active_screen(&self) -> &'static str {
+        if self.alternate_screen_active.load(Ordering::Acquire) {
+            "alternate"
+        } else {
+            "primary"
+        }
+    }
+
+    pub(crate) fn mode_settings(&self) -> Vec<TerminalModeSetting> {
+        terminal_mode_settings(self.terminal_modes.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn cursor_presentation(&self) -> Option<TerminalCursorPresentation> {
+        terminal_cursor_presentation(self.cursor_presentation.load(Ordering::Acquire))
+    }
+
     pub fn send_text(&self, text: &str) -> Result<()> {
         let mut writer = self
             .writer
@@ -126,6 +226,252 @@ impl TerminalHandle {
     }
 }
 
+#[derive(Default)]
+struct ActiveScreenTracker {
+    state: ActiveScreenScanState,
+}
+
+#[derive(Default)]
+enum ActiveScreenScanState {
+    #[default]
+    Ground,
+    Escape,
+    Csi {
+        private: bool,
+        value: u16,
+        saw_digit: bool,
+        params: Vec<u16>,
+        soft_reset: bool,
+    },
+}
+
+impl ActiveScreenTracker {
+    fn update(
+        &mut self,
+        bytes: &[u8],
+        active: &AtomicBool,
+        modes: &AtomicU64,
+        cursor_presentation: &AtomicU64,
+    ) {
+        for &byte in bytes {
+            self.state = match std::mem::take(&mut self.state) {
+                ActiveScreenScanState::Ground if byte == 0x1b => ActiveScreenScanState::Escape,
+                ActiveScreenScanState::Ground if byte == 0x9b => ActiveScreenScanState::Csi {
+                    private: false,
+                    value: 0,
+                    saw_digit: false,
+                    params: Vec::new(),
+                    soft_reset: false,
+                },
+                ActiveScreenScanState::Ground => ActiveScreenScanState::Ground,
+                ActiveScreenScanState::Escape if byte == b'[' => ActiveScreenScanState::Csi {
+                    private: false,
+                    value: 0,
+                    saw_digit: false,
+                    params: Vec::new(),
+                    soft_reset: false,
+                },
+                ActiveScreenScanState::Escape if byte == b'c' => {
+                    active.store(false, Ordering::Release);
+                    modes.store(0, Ordering::Release);
+                    record_terminal_cursor_presentation(cursor_presentation, 0);
+                    ActiveScreenScanState::Ground
+                }
+                ActiveScreenScanState::Escape if matches!(byte, b'=' | b'>') => {
+                    record_terminal_mode(modes, 1, byte == b'=');
+                    ActiveScreenScanState::Ground
+                }
+                ActiveScreenScanState::Escape if byte == 0x1b => ActiveScreenScanState::Escape,
+                ActiveScreenScanState::Escape => ActiveScreenScanState::Ground,
+                ActiveScreenScanState::Csi {
+                    mut private,
+                    mut value,
+                    mut saw_digit,
+                    mut params,
+                    mut soft_reset,
+                } => {
+                    if byte == 0x1b {
+                        ActiveScreenScanState::Escape
+                    } else if byte == b'?' && !private && !saw_digit {
+                        private = true;
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            params,
+                            soft_reset,
+                        }
+                    } else if byte.is_ascii_digit() {
+                        value = value
+                            .saturating_mul(10)
+                            .saturating_add(u16::from(byte - b'0'));
+                        saw_digit = true;
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            params,
+                            soft_reset,
+                        }
+                    } else if byte == b'!' && !private && !saw_digit && params.is_empty() {
+                        soft_reset = true;
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            params,
+                            soft_reset,
+                        }
+                    } else if byte == b';' {
+                        if saw_digit {
+                            params.push(value);
+                        }
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value: 0,
+                            saw_digit: false,
+                            params,
+                            soft_reset,
+                        }
+                    } else if (0x40..=0x7e).contains(&byte) {
+                        if saw_digit {
+                            params.push(value);
+                        }
+                        if soft_reset && byte == b'p' {
+                            reset_terminal_modes(modes);
+                            record_terminal_cursor_presentation(cursor_presentation, 0);
+                        } else if private && matches!(byte, b'h' | b'l') {
+                            let enable = byte == b'h';
+                            for value in params {
+                                if matches!(value, 47 | 1047 | 1049) {
+                                    active.store(enable, Ordering::Release);
+                                }
+                                if value == 12 {
+                                    record_terminal_cursor_blink(cursor_presentation, enable);
+                                }
+                                if let Some(index) = tracked_private_mode_index(value) {
+                                    record_terminal_mode(modes, index, enable);
+                                }
+                            }
+                        } else if !private && byte == b'q' {
+                            record_terminal_cursor_presentation(
+                                cursor_presentation,
+                                params.first().copied().unwrap_or(0),
+                            );
+                        }
+                        ActiveScreenScanState::Ground
+                    } else {
+                        ActiveScreenScanState::Csi {
+                            private,
+                            value,
+                            saw_digit,
+                            params,
+                            soft_reset,
+                        }
+                    }
+                }
+            };
+        }
+    }
+}
+
+fn tracked_private_mode_index(code: u16) -> Option<usize> {
+    match code {
+        1 => Some(0),
+        7 => Some(2),
+        2004 => Some(3),
+        1004 => Some(4),
+        1000 => Some(5),
+        1002 => Some(6),
+        1003 => Some(7),
+        1006 => Some(8),
+        1015 => Some(9),
+        _ => None,
+    }
+}
+
+fn record_terminal_mode(modes: &AtomicU64, index: usize, on: bool) {
+    let known_bit = 1_u64 << index;
+    let enabled_bit = 1_u64 << (TERMINAL_MODE_ENABLED_SHIFT + index);
+    let _ = modes.fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+        let next = if on {
+            current | known_bit | enabled_bit
+        } else {
+            (current | known_bit) & !enabled_bit
+        };
+        Some(next)
+    });
+}
+
+fn reset_terminal_modes(modes: &AtomicU64) {
+    let known = (1_u64 << TERMINAL_MODE_SETTINGS.len()) - 1;
+    let wraparound_enabled = 1_u64 << (TERMINAL_MODE_ENABLED_SHIFT + 2);
+    modes.store(known | wraparound_enabled, Ordering::Release);
+}
+
+fn terminal_mode_settings(bits: u64) -> Vec<TerminalModeSetting> {
+    TERMINAL_MODE_SETTINGS
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, code, ansi))| {
+            let known_bit = 1_u64 << index;
+            (bits & known_bit != 0).then_some(TerminalModeSetting {
+                code: *code,
+                ansi: *ansi,
+                on: bits & (1_u64 << (TERMINAL_MODE_ENABLED_SHIFT + index)) != 0,
+            })
+        })
+        .collect()
+}
+
+fn record_terminal_cursor_presentation(presentation: &AtomicU64, code: u16) {
+    let (style, blinking) = match code {
+        0 | 1 => (0_u64, true),
+        2 => (0, false),
+        3 => (1, true),
+        4 => (1, false),
+        5 => (2, true),
+        6 => (2, false),
+        _ => return,
+    };
+    presentation.store(
+        CURSOR_PRESENTATION_KNOWN
+            | (style << CURSOR_PRESENTATION_STYLE_SHIFT)
+            | if blinking {
+                CURSOR_PRESENTATION_BLINKING
+            } else {
+                0
+            },
+        Ordering::Release,
+    );
+}
+
+fn record_terminal_cursor_blink(presentation: &AtomicU64, blinking: bool) {
+    let _ = presentation.fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+        let current = current | CURSOR_PRESENTATION_KNOWN;
+        Some(if blinking {
+            current | CURSOR_PRESENTATION_BLINKING
+        } else {
+            current & !CURSOR_PRESENTATION_BLINKING
+        })
+    });
+}
+
+fn terminal_cursor_presentation(bits: u64) -> Option<TerminalCursorPresentation> {
+    if bits & CURSOR_PRESENTATION_KNOWN == 0 {
+        return None;
+    }
+    let style = match (bits >> CURSOR_PRESENTATION_STYLE_SHIFT) & 0b11 {
+        1 => "underline",
+        2 => "bar",
+        _ => "block",
+    };
+    Some(TerminalCursorPresentation {
+        style,
+        blinking: bits & CURSOR_PRESENTATION_BLINKING != 0,
+    })
+}
+
 impl TerminalSize {
     fn to_pty_size(self) -> PtySize {
         PtySize {
@@ -213,7 +559,7 @@ impl ParsedKey {
 
     fn sequence(&self) -> Result<Vec<u8>> {
         if self.ctrl {
-            if let Some(byte) = ctrl_byte(&self.key) {
+            if let Some(byte) = terminal_control_byte(&self.key) {
                 return Ok(maybe_alt_prefixed(vec![byte], self.alt));
             }
         }
@@ -312,7 +658,7 @@ fn canonical_key_name(key: &str) -> String {
     .to_string()
 }
 
-fn ctrl_byte(key: &str) -> Option<u8> {
+pub(crate) fn terminal_control_byte(key: &str) -> Option<u8> {
     let mut chars = key.chars();
     let ch = chars.next()?;
     if chars.next().is_none() {
@@ -320,6 +666,13 @@ fn ctrl_byte(key: &str) -> Option<u8> {
             return Some(ch as u8 - b'a' + 1);
         }
         return match ch {
+            '2' => Some(0x00),
+            '3' => Some(0x1b),
+            '4' => Some(0x1c),
+            '5' => Some(0x1d),
+            '6' => Some(0x1e),
+            '7' => Some(0x1f),
+            '8' => Some(0x7f),
             '@' | ' ' => Some(0x00),
             '[' => Some(0x1b),
             '\\' => Some(0x1c),
@@ -448,8 +801,9 @@ pub fn spawn_terminal(
     command: Option<String>,
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
+    render_activity: RenderActivity,
 ) -> Result<TerminalHandle> {
-    spawn_terminal_inner(cwd, env, command, buffer, size, true)
+    spawn_terminal_inner(cwd, env, command, buffer, size, true, render_activity)
 }
 
 pub fn spawn_terminal_process(
@@ -458,8 +812,17 @@ pub fn spawn_terminal_process(
     command: String,
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
+    render_activity: RenderActivity,
 ) -> Result<TerminalHandle> {
-    spawn_terminal_inner(cwd, env, Some(command), buffer, size, false)
+    spawn_terminal_inner(
+        cwd,
+        env,
+        Some(command),
+        buffer,
+        size,
+        false,
+        render_activity,
+    )
 }
 
 fn spawn_terminal_inner(
@@ -469,23 +832,27 @@ fn spawn_terminal_inner(
     buffer: Arc<Mutex<String>>,
     size: TerminalSize,
     keep_shell_after_command: bool,
+    render_activity: RenderActivity,
 ) -> Result<TerminalHandle> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(size.to_pty_size())
         .context("failed to open PTY")?;
 
-    let shell = std::env::var("CMUX_SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut cmd = if let Some(command) = command {
         let mut builder = CommandBuilder::new("/bin/sh");
         builder.arg("-lc");
-        builder.arg(if keep_shell_after_command {
-            format!("{command}; exec \"{shell}\" -i")
+        if keep_shell_after_command {
+            let shell = terminal_shell();
+            builder.arg(format!("{command}; exec \"$1\" -i"));
+            builder.arg("cmux");
+            builder.arg(shell);
         } else {
-            command
-        });
+            builder.arg(command);
+        }
         builder
     } else {
+        let shell = terminal_shell();
         let mut builder = CommandBuilder::new(shell);
         builder.arg("-i");
         builder
@@ -522,13 +889,28 @@ fn spawn_terminal_inner(
         .context("failed to take PTY writer")?;
     let title_events = Arc::new(Mutex::new(Vec::new()));
     let reader_title_events = Arc::clone(&title_events);
+    let output_generation = Arc::new(AtomicU64::new(0));
+    let reader_output_generation = Arc::clone(&output_generation);
+    let alternate_screen_active = Arc::new(AtomicBool::new(false));
+    let reader_alternate_screen_active = Arc::clone(&alternate_screen_active);
+    let terminal_modes = Arc::new(AtomicU64::new(0));
+    let reader_terminal_modes = Arc::clone(&terminal_modes);
+    let cursor_presentation = Arc::new(AtomicU64::new(0));
+    let reader_cursor_presentation = Arc::clone(&cursor_presentation);
 
     thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
+        let mut active_screen_tracker = ActiveScreenTracker::default();
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    active_screen_tracker.update(
+                        &chunk[..n],
+                        reader_alternate_screen_active.as_ref(),
+                        reader_terminal_modes.as_ref(),
+                        reader_cursor_presentation.as_ref(),
+                    );
                     let text = String::from_utf8_lossy(&chunk[..n]);
                     let titles = terminal_title_events_from_text(&text);
                     if !titles.is_empty() {
@@ -542,6 +924,11 @@ fn spawn_terminal_inner(
                             let keep_from = out.len().saturating_sub(700_000);
                             out.replace_range(..keep_from, "");
                         }
+                        drop(out);
+                        // Publish the surface-local generation before the global wake counter so
+                        // the GTK watcher can safely discover which window needs refreshing.
+                        reader_output_generation.fetch_add(1, Ordering::Release);
+                        render_activity.record_terminal_output();
                     }
                 }
                 Err(_) => break,
@@ -554,7 +941,223 @@ fn spawn_terminal_inner(
         writer: Arc::new(Mutex::new(writer)),
         child: Arc::new(Mutex::new(child)),
         title_events,
+        output_generation,
+        alternate_screen_active,
+        terminal_modes,
+        cursor_presentation,
     })
+}
+
+fn terminal_shell() -> PathBuf {
+    terminal_shell_from_candidates(
+        std::env::var_os("CMUX_SHELL"),
+        std::env::var_os("SHELL"),
+        passwd_shell_for_current_user(),
+    )
+}
+
+fn terminal_shell_from_candidates(
+    cmux_shell: Option<OsString>,
+    environment_shell: Option<OsString>,
+    passwd_shell: Option<PathBuf>,
+) -> PathBuf {
+    cmux_shell
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(environment_shell.map(PathBuf::from))
+        .chain(passwd_shell)
+        .find(|path| shell_path_is_executable(path))
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+fn passwd_shell_for_current_user() -> Option<PathBuf> {
+    // SAFETY: getuid has no preconditions and does not dereference pointers.
+    passwd_shell_for_uid(unsafe { libc::getuid() })
+}
+
+fn passwd_shell_for_uid(uid: libc::uid_t) -> Option<PathBuf> {
+    const DEFAULT_PASSWD_BUFFER_SIZE: usize = 16 * 1024;
+    const MAX_PASSWD_BUFFER_SIZE: usize = 1024 * 1024;
+
+    // SAFETY: sysconf has no pointer arguments; failure is reported as -1.
+    let configured_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut buffer_size = usize::try_from(configured_size)
+        .ok()
+        .filter(|size| *size > 0)
+        .unwrap_or(DEFAULT_PASSWD_BUFFER_SIZE)
+        .clamp(1024, MAX_PASSWD_BUFFER_SIZE);
+
+    loop {
+        // SAFETY: passwd is a C data carrier that getpwuid_r initializes before
+        // any of its fields are read below.
+        let mut passwd = unsafe { std::mem::zeroed::<libc::passwd>() };
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0_u8; buffer_size];
+        // SAFETY: passwd, result, and the writable buffer remain alive for the
+        // call. getpwuid_r writes at most buffer.len() bytes.
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &mut passwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer_size < MAX_PASSWD_BUFFER_SIZE {
+            buffer_size = buffer_size.saturating_mul(2).min(MAX_PASSWD_BUFFER_SIZE);
+            continue;
+        }
+        if status != 0 || result.is_null() || passwd.pw_shell.is_null() {
+            return None;
+        }
+
+        // SAFETY: on success, pw_shell points to a NUL-terminated string whose
+        // storage is owned by buffer until this scope ends.
+        let shell = unsafe { CStr::from_ptr(passwd.pw_shell) }.to_bytes();
+        return (!shell.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(shell)));
+    }
+}
+
+fn shell_path_is_executable(path: &Path) -> bool {
+    const MAX_SHEBANG_DEPTH: usize = 4;
+
+    let executable_file = |candidate: &Path| {
+        if !candidate.is_absolute()
+            || !fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file())
+        {
+            return false;
+        }
+        let Ok(candidate) = CString::new(candidate.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: candidate is NUL-terminated and remains alive for the call. AT_EACCESS
+        // checks the effective credentials execve will use, including ACL/noexec
+        // policy that cannot be inferred from mode bits alone.
+        unsafe {
+            libc::faccessat(
+                libc::AT_FDCWD,
+                candidate.as_ptr(),
+                libc::X_OK,
+                libc::AT_EACCESS,
+            ) == 0
+        }
+    };
+    let resolve_path_command = |command: &OsStr| {
+        let command_path = Path::new(command);
+        if command.as_bytes().contains(&b'/') {
+            return executable_file(command_path).then(|| command_path.to_path_buf());
+        }
+
+        let search_path = std::env::var_os("PATH")?;
+        std::env::split_paths(&search_path)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(command_path))
+            .find(|candidate| executable_file(candidate))
+    };
+
+    let mut candidate = path.to_path_buf();
+    let mut visited = HashSet::new();
+    let mut shebang_depth = 0;
+
+    loop {
+        if !executable_file(&candidate) {
+            return false;
+        }
+        let identity = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if !visited.insert(identity) {
+            return false;
+        }
+
+        let mut header = [0_u8; 256];
+        let Ok(read) = fs::File::open(&candidate).and_then(|mut file| file.read(&mut header))
+        else {
+            // Execute-only binaries remain valid candidates even when cmux cannot inspect them.
+            return true;
+        };
+        if !header[..read].starts_with(b"#!") {
+            return true;
+        }
+        if shebang_depth >= MAX_SHEBANG_DEPTH {
+            return false;
+        }
+        shebang_depth += 1;
+
+        let line_end = header[2..read]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(read, |offset| offset + 2);
+        let directive = &header[2..line_end];
+        let Some(interpreter_start) = directive
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t'))
+        else {
+            return false;
+        };
+        let interpreter_tail = &directive[interpreter_start..];
+        let interpreter_end = interpreter_tail
+            .iter()
+            .position(|byte| matches!(byte, b' ' | b'\t'))
+            .unwrap_or(interpreter_tail.len());
+        let interpreter = PathBuf::from(OsStr::from_bytes(&interpreter_tail[..interpreter_end]));
+
+        if !matches!(
+            interpreter.as_os_str().as_bytes(),
+            b"/usr/bin/env" | b"/bin/env"
+        ) {
+            candidate = interpreter;
+            continue;
+        }
+        if !executable_file(&interpreter) {
+            return false;
+        }
+        let env_identity = fs::canonicalize(&interpreter).unwrap_or(interpreter);
+        if !visited.insert(env_identity) {
+            return false;
+        }
+
+        let optional = &interpreter_tail[interpreter_end..];
+        let optional_start = optional
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t'))
+            .unwrap_or(optional.len());
+        let optional_end = optional
+            .iter()
+            .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+            .map_or(optional_start, |index| index + 1);
+        let optional = &optional[optional_start..optional_end];
+
+        let env_command = if let Some(split_string) = optional.strip_prefix(b"-S") {
+            if !split_string
+                .first()
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                return false;
+            }
+            let Ok(split_string) = std::str::from_utf8(split_string) else {
+                return false;
+            };
+            let Ok(arguments) = shell_words::split(split_string) else {
+                return false;
+            };
+            let Some(command) = arguments.first() else {
+                return false;
+            };
+            if command.starts_with('-') || command.contains('=') {
+                return false;
+            }
+            OsString::from(command)
+        } else {
+            if optional.is_empty() || optional.iter().any(|byte| matches!(byte, b' ' | b'\t')) {
+                return false;
+            }
+            OsString::from(OsStr::from_bytes(optional))
+        };
+        let Some(resolved) = resolve_path_command(&env_command) else {
+            return false;
+        };
+        candidate = resolved;
+    }
 }
 
 fn terminal_spawn_env(mut env: HashMap<String, String>) -> HashMap<String, String> {
@@ -640,6 +1243,477 @@ fn clean_terminal_osc_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    const SHELL_PROBE_PREFIX: &str = "CMUX_SHELL_PROBE:";
+
+    fn write_shell_probe(path: &Path) {
+        fs::write(
+            path,
+            format!("#!/bin/sh\nprintf '%s%s\\n' '{SHELL_PROBE_PREFIX}' \"$0\"\n"),
+        )
+        .expect("write shell probe");
+        let mut permissions = fs::metadata(path)
+            .expect("shell probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make shell probe executable");
+    }
+
+    fn write_shell_with_missing_interpreter(path: &Path) {
+        fs::write(path, "#!/definitely/missing/cmux-shell-interpreter\n")
+            .expect("write shell with missing interpreter");
+        let mut permissions = fs::metadata(path)
+            .expect("unspawnable shell metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make unspawnable shell executable");
+    }
+
+    fn write_shell_with_shebang(path: &Path, shebang: &str) {
+        fs::write(path, format!("#!{shebang}\n")).expect("write shell shebang");
+        let mut permissions = fs::metadata(path)
+            .expect("shell shebang metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make shell shebang executable");
+    }
+
+    fn write_shell_probe_with_shebang(path: &Path, shebang: &str) {
+        write_shell_with_shebang(path, shebang);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .and_then(|mut file| writeln!(file, "printf '%s%s\\n' '{SHELL_PROBE_PREFIX}' \"$0\""))
+            .expect("write shebang shell probe");
+    }
+
+    fn current_passwd_shell() -> String {
+        let uid = fs::metadata("/proc/self")
+            .expect("current process metadata")
+            .uid();
+        fs::read_to_string("/etc/passwd")
+            .expect("read passwd database")
+            .lines()
+            .filter_map(|line| {
+                let fields = line.split(':').collect::<Vec<_>>();
+                (fields.len() >= 7 && fields[2].parse::<u32>().ok() == Some(uid))
+                    .then(|| fields[6].trim().to_string())
+            })
+            .find(|shell| {
+                !shell.is_empty()
+                    && fs::metadata(shell).is_ok_and(|metadata| {
+                        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                    })
+            })
+            .unwrap_or_else(|| "/bin/sh".to_string())
+    }
+
+    fn run_shell_selection_probe(
+        cmux_shell: Option<&str>,
+        shell: Option<&str>,
+        expected_shell: &str,
+    ) {
+        run_shell_selection_probe_with_command(cmux_shell, shell, expected_shell, None);
+    }
+
+    fn run_shell_selection_probe_with_command(
+        cmux_shell: Option<&str>,
+        shell: Option<&str>,
+        expected_shell: &str,
+        initial_command: Option<&str>,
+    ) {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "terminal::tests::terminal_shell_selection_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_remove("CMUX_SHELL")
+            .env_remove("SHELL")
+            .envs(cmux_shell.map(|value| ("CMUX_SHELL", value)))
+            .envs(shell.map(|value| ("SHELL", value)))
+            .env("CMUX_TEST_EXPECTED_SHELL", expected_shell);
+        if let Some(initial_command) = initial_command {
+            command.env("CMUX_TEST_INITIAL_COMMAND", initial_command);
+        }
+        let output = command.output().expect("run isolated shell probe");
+
+        assert!(
+            output.status.success(),
+            "shell probe failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn wait_for_terminal_output(
+        buffer: &Arc<Mutex<String>>,
+        expected: &str,
+        timeout: Duration,
+    ) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let output = buffer.lock().expect("terminal buffer").clone();
+            if output.contains(expected) || Instant::now() >= deadline {
+                return output;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    #[ignore = "helper executed in an isolated child process"]
+    fn terminal_shell_selection_probe_child() {
+        let expected_shell =
+            std::env::var("CMUX_TEST_EXPECTED_SHELL").expect("expected shell path");
+        let initial_command = std::env::var("CMUX_TEST_INITIAL_COMMAND").ok();
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let terminal = spawn_terminal(
+            None,
+            HashMap::new(),
+            initial_command.clone(),
+            Arc::clone(&buffer),
+            TerminalSize::default(),
+            RenderActivity::default(),
+        )
+        .expect("spawn terminal shell");
+
+        terminal
+            .send_text(&format!(
+                "printf '{SHELL_PROBE_PREFIX}%s\\n' \"$0\"\nexit\n"
+            ))
+            .expect("send shell identity probe");
+        let exit = terminal
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("wait for shell probe");
+        if exit.is_none() {
+            let _ = terminal.kill();
+        }
+        assert!(exit.is_some(), "shell probe timed out");
+
+        // The PTY reader runs independently of the child handle. Process exit can
+        // become visible just before the reader appends the shell's final bytes.
+        let expected_probe = format!("{SHELL_PROBE_PREFIX}{expected_shell}");
+        let output = wait_for_terminal_output(&buffer, &expected_probe, Duration::from_secs(3));
+        assert!(
+            output.contains(&expected_probe),
+            "expected shell {expected_shell:?}, terminal output was {output:?}"
+        );
+        if initial_command.is_some() {
+            assert!(
+                output.contains("initial-command-path"),
+                "initial command did not run before shell handoff: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_shell_prefers_explicit_cmux_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&cmux_shell);
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            cmux_shell.to_str(),
+            env_shell.to_str(),
+            cmux_shell.to_str().expect("cmux shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_runs_initial_command_before_interactive_handoff() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        write_shell_probe(&cmux_shell);
+
+        run_shell_selection_probe_with_command(
+            cmux_shell.to_str(),
+            None,
+            cmux_shell.to_str().expect("cmux shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_uses_valid_shell_environment_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            None,
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_empty_and_invalid_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&env_shell);
+
+        for cmux_shell in ["", "/definitely/missing/cmux-shell"] {
+            run_shell_selection_probe(
+                Some(cmux_shell),
+                env_shell.to_str(),
+                env_shell.to_str().expect("environment shell path"),
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_shell_skips_override_not_executable_by_current_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blocked_shell = temp.path().join("blocked-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&blocked_shell);
+        write_shell_probe(&env_shell);
+
+        let mut permissions = fs::metadata(&blocked_shell)
+            .expect("blocked shell metadata")
+            .permissions();
+        // The file has execute bits, but not for its owner (the test user).
+        // A mode-bit-only check accepts it even though execve rejects it.
+        permissions.set_mode(0o011);
+        fs::set_permissions(&blocked_shell, permissions).expect("block owner execution");
+
+        run_shell_selection_probe(
+            blocked_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_override_with_missing_shebang_interpreter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_shell);
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_unspawnable_override_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_shell);
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe_with_command(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_override_with_nested_missing_shebang_interpreter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let broken_interpreter = temp.path().join("broken-interpreter");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_interpreter);
+        write_shell_with_shebang(
+            &broken_shell,
+            broken_interpreter.to_str().expect("interpreter path"),
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_nested_unspawnable_override_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let broken_interpreter = temp.path().join("broken-interpreter");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_missing_interpreter(&broken_interpreter);
+        write_shell_with_shebang(
+            &broken_shell,
+            broken_interpreter.to_str().expect("interpreter path"),
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe_with_command(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_env_override_with_missing_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_shebang(&broken_shell, "/usr/bin/env cmux-missing-shell-command");
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_env_split_string_override_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_shebang(
+            &broken_shell,
+            "/usr/bin/env -S cmux-missing-shell-command --interactive",
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe_with_command(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_cyclic_shebang_interpreters() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broken_shell = temp.path().join("broken-shell");
+        let cyclic_interpreter = temp.path().join("cyclic-interpreter");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_with_shebang(
+            &broken_shell,
+            cyclic_interpreter
+                .to_str()
+                .expect("cyclic interpreter path"),
+        );
+        write_shell_with_shebang(
+            &cyclic_interpreter,
+            broken_shell.to_str().expect("broken shell path"),
+        );
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            broken_shell.to_str(),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_skips_excessively_deep_shebang_chain() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chain = (0..5)
+            .map(|index| temp.path().join(format!("shell-{index}")))
+            .collect::<Vec<_>>();
+        for (shell, interpreter) in chain.iter().zip(chain.iter().skip(1)) {
+            write_shell_with_shebang(shell, interpreter.to_str().expect("interpreter path"));
+        }
+        write_shell_with_shebang(chain.last().expect("last shell"), "/bin/sh");
+        let env_shell = temp.path().join("env-shell");
+        write_shell_probe(&env_shell);
+
+        run_shell_selection_probe(
+            chain.first().and_then(|path| path.to_str()),
+            env_shell.to_str(),
+            env_shell.to_str().expect("environment shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_accepts_env_path_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        write_shell_probe_with_shebang(&cmux_shell, "/usr/bin/env sh");
+
+        run_shell_selection_probe(
+            cmux_shell.to_str(),
+            None,
+            cmux_shell.to_str().expect("cmux shell path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_accepts_env_split_string_path_command_after_initial_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmux_shell = temp.path().join("cmux-shell");
+        write_shell_probe_with_shebang(&cmux_shell, "/usr/bin/env -S sh --");
+
+        run_shell_selection_probe_with_command(
+            cmux_shell.to_str(),
+            None,
+            cmux_shell.to_str().expect("cmux shell path"),
+            Some("printf initial-command-path"),
+        );
+    }
+
+    #[test]
+    fn terminal_shell_uses_passwd_fallback_for_empty_or_invalid_shell_environment() {
+        let expected = current_passwd_shell();
+
+        for shell in [None, Some(""), Some("/definitely/missing/login-shell")] {
+            run_shell_selection_probe(Some(""), shell, &expected);
+        }
+    }
+
+    #[test]
+    fn terminal_shell_uses_bin_sh_when_all_candidates_are_unusable() {
+        assert_eq!(
+            terminal_shell_from_candidates(
+                Some(OsString::new()),
+                Some(OsString::from("relative-shell")),
+                Some(PathBuf::from("/definitely/missing/passwd-shell")),
+            ),
+            PathBuf::from("/bin/sh")
+        );
+    }
+
+    #[test]
+    fn explicit_terminal_process_command_does_not_require_a_valid_interactive_shell() {
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let terminal = spawn_terminal_process(
+            None,
+            HashMap::new(),
+            "printf explicit-command-path".to_string(),
+            Arc::clone(&buffer),
+            TerminalSize::default(),
+            RenderActivity::default(),
+        )
+        .expect("spawn explicit terminal command");
+        assert_eq!(
+            terminal
+                .wait_for_exit(Duration::from_secs(3))
+                .expect("wait for explicit command"),
+            Some(0)
+        );
+        let output = buffer.lock().expect("terminal buffer").clone();
+        assert!(
+            output.contains("explicit-command-path"),
+            "output was {output:?}"
+        );
+    }
 
     #[test]
     fn terminal_key_bytes_cover_common_interactive_keys() {
@@ -654,6 +1728,24 @@ mod tests {
         assert_eq!(terminal_key_bytes("ctrl-m").unwrap(), vec![0x0d]);
         assert_eq!(terminal_key_bytes("ctrl-s").unwrap(), vec![0x13]);
         assert_eq!(terminal_key_bytes("control-l").unwrap(), vec![0x0c]);
+    }
+
+    #[test]
+    fn terminal_key_bytes_cover_numeric_control_aliases() {
+        for (digit, byte) in [
+            (2, 0x00),
+            (3, 0x1b),
+            (4, 0x1c),
+            (5, 0x1d),
+            (6, 0x1e),
+            (7, 0x1f),
+            (8, 0x7f),
+        ] {
+            assert_eq!(
+                terminal_key_bytes(&format!("ctrl-{digit}")).unwrap(),
+                vec![byte]
+            );
+        }
     }
 
     #[test]
@@ -739,6 +1831,216 @@ mod tests {
         assert_eq!(
             terminal_title_events_from_text("\x1b]1;icon\x1b\\\x1b]2;window\x1b\\"),
             vec!["icon", "window"]
+        );
+    }
+
+    #[test]
+    fn active_screen_tracker_returns_to_primary_after_ris() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[?1049h", &active, &modes, &cursor);
+        assert!(active.load(Ordering::Acquire));
+        tracker.update(b"prefix\x1b", &active, &modes, &cursor);
+        tracker.update(b"c", &active, &modes, &cursor);
+
+        assert!(
+            !active.load(Ordering::Acquire),
+            "RIS must reset the authoritative tracked screen to primary"
+        );
+    }
+
+    #[test]
+    fn active_screen_tracker_preserves_modes_outside_the_transcript() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[?1;2004", &active, &modes, &cursor);
+        tracker.update(b"h\x1b=", &active, &modes, &cursor);
+        tracker.update(&vec![b'x'; 1_000_001], &active, &modes, &cursor);
+
+        assert_eq!(
+            terminal_mode_settings(modes.load(Ordering::Acquire)),
+            vec![
+                TerminalModeSetting {
+                    code: 1,
+                    ansi: false,
+                    on: true,
+                },
+                TerminalModeSetting {
+                    code: 66,
+                    ansi: false,
+                    on: true,
+                },
+                TerminalModeSetting {
+                    code: 2004,
+                    ansi: false,
+                    on: true,
+                },
+            ]
+        );
+
+        tracker.update(b"\x1b[?1l", &active, &modes, &cursor);
+        assert_eq!(
+            terminal_mode_settings(modes.load(Ordering::Acquire))[0].on,
+            false
+        );
+        tracker.update(b"\x1bc", &active, &modes, &cursor);
+        assert!(terminal_mode_settings(modes.load(Ordering::Acquire)).is_empty());
+    }
+
+    #[test]
+    fn active_screen_tracker_preserves_cursor_presentation_outside_the_transcript() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[5 ", &active, &modes, &cursor);
+        tracker.update(b"q", &active, &modes, &cursor);
+        tracker.update(&vec![b'x'; 1_000_001], &active, &modes, &cursor);
+
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "bar",
+                blinking: true,
+            })
+        );
+
+        tracker.update(b"\x1bc", &active, &modes, &cursor);
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "block",
+                blinking: true,
+            })
+        );
+
+        let omitted = AtomicU64::new(0);
+        tracker.update(b"\x1b[ q", &active, &modes, &omitted);
+        assert_eq!(
+            terminal_cursor_presentation(omitted.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "block",
+                blinking: true,
+            })
+        );
+    }
+
+    #[test]
+    fn active_screen_tracker_resets_persistent_modes_on_decstr() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[?1;7;1000;2004h\x1b[!p", &active, &modes, &cursor);
+
+        assert_eq!(
+            terminal_mode_settings(modes.load(Ordering::Acquire)),
+            vec![
+                TerminalModeSetting {
+                    code: 1,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 66,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 7,
+                    ansi: false,
+                    on: true,
+                },
+                TerminalModeSetting {
+                    code: 2004,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1004,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1000,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1002,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1003,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1006,
+                    ansi: false,
+                    on: false,
+                },
+                TerminalModeSetting {
+                    code: 1015,
+                    ansi: false,
+                    on: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn active_screen_tracker_treats_decscusr_zero_as_blinking_block() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[0 q", &active, &modes, &cursor);
+
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "block",
+                blinking: true,
+            })
+        );
+    }
+
+    #[test]
+    fn active_screen_tracker_applies_cursor_blink_private_mode() {
+        let active = AtomicBool::new(false);
+        let modes = AtomicU64::new(0);
+        let cursor = AtomicU64::new(0);
+        let mut tracker = ActiveScreenTracker::default();
+
+        tracker.update(b"\x1b[5 q\x1b[?12", &active, &modes, &cursor);
+        tracker.update(b"l", &active, &modes, &cursor);
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "bar",
+                blinking: false,
+            })
+        );
+
+        tracker.update(b"\x1b[?12", &active, &modes, &cursor);
+        tracker.update(b"h", &active, &modes, &cursor);
+        assert_eq!(
+            terminal_cursor_presentation(cursor.load(Ordering::Acquire)),
+            Some(TerminalCursorPresentation {
+                style: "bar",
+                blinking: true,
+            })
         );
     }
 

@@ -348,6 +348,7 @@ mod backend {
             return Err("one or more shortcuts are already registered".to_string());
         }
         update_status(app_state, "x11", "registered", None, specs);
+        let connection_fd = unsafe { (x11.connection_number)(display) };
 
         while !stop.load(Ordering::Acquire) && !registration_changed(app_state, generation, specs) {
             while unsafe { (x11.pending)(display) } > 0 {
@@ -365,7 +366,14 @@ mod backend {
                     activate(app_state, binding.action);
                 }
             }
-            thread::sleep(Duration::from_millis(20));
+            let mut descriptor = PollFd {
+                fd: connection_fd,
+                events: POLLIN,
+                revents: 0,
+            };
+            unsafe {
+                poll(&mut descriptor, 1, 250);
+            }
         }
         unsafe {
             (x11.ungrab_key)(display, ANY_KEY, ANY_MODIFIER, root);
@@ -479,6 +487,13 @@ mod backend {
         minor_code: u8,
     }
 
+    #[repr(C)]
+    struct PollFd {
+        fd: c_int,
+        events: i16,
+        revents: i16,
+    }
+
     static X11_GRAB_ERROR: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "C" fn x11_error_handler(
@@ -495,6 +510,7 @@ mod backend {
         _library: *mut c_void,
         open_display: unsafe extern "C" fn(*const c_char) -> *mut Display,
         close_display: unsafe extern "C" fn(*mut Display) -> c_int,
+        connection_number: unsafe extern "C" fn(*mut Display) -> c_int,
         default_root_window: unsafe extern "C" fn(*mut Display) -> Window,
         string_to_keysym: unsafe extern "C" fn(*const c_char) -> KeySym,
         keysym_to_keycode: unsafe extern "C" fn(*mut Display, KeySym) -> u8,
@@ -521,6 +537,7 @@ mod backend {
                     _library: library,
                     open_display: symbol(library, "XOpenDisplay")?,
                     close_display: symbol(library, "XCloseDisplay")?,
+                    connection_number: symbol(library, "XConnectionNumber")?,
                     default_root_window: symbol(library, "XDefaultRootWindow")?,
                     string_to_keysym: symbol(library, "XStringToKeysym")?,
                     keysym_to_keycode: symbol(library, "XKeysymToKeycode")?,
@@ -558,10 +575,12 @@ mod backend {
     const MOD1_MASK: c_uint = 1 << 3;
     const MOD2_MASK: c_uint = 1 << 4;
     const MOD4_MASK: c_uint = 1 << 6;
+    const POLLIN: i16 = 0x0001;
 
     unsafe extern "C" {
         fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn poll(fds: *mut PollFd, nfds: usize, timeout: c_int) -> c_int;
     }
 }
 

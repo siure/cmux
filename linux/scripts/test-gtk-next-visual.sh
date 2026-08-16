@@ -172,16 +172,30 @@ if fixture == "settings":
         raise SystemExit("settings fixture is missing a settings surface")
 PY
 
-  python3 - "$actual" "$width" "$height" <<'PY'
+  python3 - "$actual" "$width" "$height" "$fixture" <<'PY'
 from PIL import ImageGrab
 import sys
-path, width, height = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+path, width, height, fixture = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 image = ImageGrab.grab()
 if image.size != (width, height):
     raise SystemExit(f"unexpected screenshot size {image.size}, expected {(width, height)}")
 colors = image.convert("RGB").getcolors(maxcolors=width * height)
 if not colors or len(colors) < 16:
     raise SystemExit("GTK screenshot is blank or has too little visual detail")
+if fixture == "browser":
+    browser = image.convert("RGB").crop(
+        (int(width * 0.60), int(height * 0.56), width - 4, height - 4)
+    )
+    page_text_pixels = sum(
+        1
+        for red, green, blue in browser.getdata()
+        if red > 220 and green > 215 and blue > 210
+    )
+    if page_text_pixels < 500:
+        raise SystemExit(
+            "WebKit page is loaded but not visible in the GTK browser pane: "
+            f"found {page_text_pixels} page-text pixels, expected at least 500"
+        )
 image.save(path, optimize=True)
 PY
 

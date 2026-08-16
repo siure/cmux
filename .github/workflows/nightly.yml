@@ -15,10 +15,6 @@ on:
         required: false
         default: false
         type: boolean
-      linux_ghostty_ref:
-        description: Published 40-character manaflow-ai/ghostty commit for the Linux bundle
-        required: false
-        type: string
 
 concurrency:
   group: nightly-build-${{ github.ref_name }}
@@ -210,7 +206,6 @@ jobs:
     uses: ./.github/workflows/build-linux-app.yml
     with:
       cmux_ref: ${{ needs.decide.outputs.head_sha }}
-      ghostty_ref: ${{ inputs.linux_ghostty_ref || vars.CMUX_LINUX_GHOSTTY_REF }}
       bundle_version: nightly-${{ needs.decide.outputs.short_sha }}
     permissions:
       contents: read

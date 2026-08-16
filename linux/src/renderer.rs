@@ -1,4 +1,5 @@
 use crate::app::{AppError, AppState};
+use crate::terminal::TERMINAL_MODE_SETTINGS;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -6,6 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const GHOSTTY_VT_DEBUG_CELL_WIDTH: f64 = 10.0;
 const GHOSTTY_VT_DEBUG_CELL_HEIGHT: f64 = 20.0;
@@ -34,10 +37,11 @@ struct RenderGridStyle {
     overline: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderGridCell {
-    ch: char,
+    text: String,
     style: RenderGridStyle,
+    continuation: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -91,8 +95,9 @@ struct RenderGridScreen {
     cursor_visible: bool,
     cursor_style: RenderGridCursorStyle,
     cursor_blinking: bool,
-    modes: HashSet<&'static str>,
+    modes: HashMap<&'static str, bool>,
     style: RenderGridStyle,
+    viewport_rows: usize,
 }
 
 impl Default for RenderGridScreen {
@@ -106,8 +111,9 @@ impl Default for RenderGridScreen {
             cursor_visible: true,
             cursor_style: RenderGridCursorStyle::Block,
             cursor_blinking: false,
-            modes: HashSet::new(),
+            modes: HashMap::new(),
             style: RenderGridStyle::default(),
+            viewport_rows: 1,
         }
     }
 }
@@ -275,6 +281,7 @@ const OPTIONAL_GHOSTTY_EXPORT_SYMBOLS: &[&str] = &[
 const MAX_UNEXPECTED_GHOSTTY_EXPORT_SYMBOLS: usize = 32;
 
 const REQUIRED_GHOSTTY_VT_SYMBOLS: &[&str] = &[
+    "ghostty_cell_get",
     "ghostty_terminal_new",
     "ghostty_terminal_free",
     "ghostty_terminal_vt_write",
@@ -347,27 +354,30 @@ pub fn snapshot_value(app: &mut AppState, params: &Value) -> Result<Value, AppEr
 
 fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<Value, AppError> {
     let backend = selected_backend(params)?;
-    let window = app.handle("window.current", &json!({}))?;
-    let focused = app.handle("system.identify", &json!({}))?;
-    let workspaces = app.handle("workspace.list", &json!({}))?;
-    let workspace_groups = app.handle("workspace.group.list", &json!({}))?;
-    let panes = app.handle("pane.list", &json!({}))?;
-    let surfaces = app.handle("surface.list", &json!({}))?;
-    let tree = app.handle("system.tree", &json!({}))?;
+    app.prepare_renderer_snapshot()?;
+    let window = app.handle_renderer_read("window.current", &json!({}))?;
+    let focused = app.handle_renderer_read("system.identify", &json!({}))?;
+    let workspaces = app.handle_renderer_read("workspace.list", &json!({}))?;
+    let workspace_groups = app.handle_renderer_read("workspace.group.list", &json!({}))?;
+    let panes = app.handle_renderer_read("pane.list", &json!({}))?;
+    let surfaces = app.handle_renderer_read("surface.list", &json!({}))?;
+    let tree = app.handle_renderer_read("system.tree", &json!({}))?;
     let window_surfaces = window_surface_inventory(&tree);
-    let layout = app.handle("debug.layout", &json!({}))?;
-    let canvas = app.handle("canvas.info", &json!({}))?;
+    let layout = app.handle_renderer_read("debug.layout", &json!({}))?;
+    let canvas = app.handle_renderer_read("canvas.info", &json!({}))?;
     let sidebar = sidebar_snapshot(app)?;
     let custom_sidebar = app.custom_sidebar_snapshot();
+    let left_sidebar = app.handle_renderer_read("sidebar.left", &json!({"action": "mode"}))?;
     let right_sidebar = right_sidebar_snapshot(app)?;
-    let notifications = app.handle("notification.list", &json!({}))?;
-    let command_palette = app.handle("debug.command_palette.results", &json!({"limit": 10}))?;
-    let shortcut_help = app.handle("help.shortcuts", &json!({}))?;
+    let notifications = app.handle_renderer_read("notification.list", &json!({}))?;
+    let command_palette =
+        app.handle_renderer_read("debug.command_palette.results", &json!({"limit": 10}))?;
+    let shortcut_help = app.handle_renderer_read("help.shortcuts", &json!({}))?;
     let mut views = surface_views(&layout, &surfaces);
     if renderer_backend_uses_text_fallback(&backend) {
         attach_render_grid_fallbacks(app, &mut views)?;
-    }
-    if backend == "ghostty-vt" {
+    } else if backend == "ghostty-vt" {
+        attach_render_grid_fallbacks(app, &mut views)?;
         attach_ghostty_vt_render_states(app, &mut views)?;
     }
     let diagnostics = cached_diagnostics_value_for_backend(&backend)?;
@@ -391,6 +401,7 @@ fn snapshot_current_window_value(app: &mut AppState, params: &Value) -> Result<V
         "canvas": canvas,
         "sidebar": sidebar,
         "custom_sidebar": custom_sidebar,
+        "left_sidebar": left_sidebar,
         "right_sidebar": right_sidebar,
         "notifications": notifications.get("notifications").cloned().unwrap_or_else(|| json!([])),
         "command_palette": command_palette,
@@ -461,9 +472,9 @@ fn cached_diagnostics_value_for_backend(backend: &str) -> Result<Value, AppError
 }
 
 fn sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
-    let mut state = app.handle("sidebar.state", &json!({}))?;
-    let statuses = app.handle("sidebar.status.list", &json!({}))?;
-    let logs = app.handle("sidebar.log.list", &json!({"limit": 5}))?;
+    let mut state = app.handle_renderer_read("sidebar.state", &json!({}))?;
+    let statuses = app.handle_renderer_read("sidebar.status.list", &json!({}))?;
+    let logs = app.handle_renderer_read("sidebar.log.list", &json!({"limit": 5}))?;
 
     if let Some(object) = state.as_object_mut() {
         object.insert(
@@ -483,11 +494,11 @@ fn sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
 }
 
 fn right_sidebar_snapshot(app: &mut AppState) -> Result<Value, AppError> {
-    let mut state = app.handle("sidebar.right", &json!({"action": "mode"}))?;
+    let mut state = app.handle_renderer_read("sidebar.right", &json!({"action": "mode"}))?;
     let include_feed = state.get("visible").and_then(Value::as_bool) == Some(true)
         && state.get("mode").and_then(Value::as_str) == Some("feed");
     let feed_items = if include_feed {
-        app.handle("feed.list", &json!({"limit": 20}))?
+        app.handle_renderer_read("feed.list", &json!({"limit": 20}))?
             .get("items")
             .cloned()
             .unwrap_or_else(|| json!([]))
@@ -643,6 +654,10 @@ fn surface_views(layout: &Value, surfaces: &Value) -> Value {
                 "terminal_initial_input": surface.and_then(|row| row.get("terminal_initial_input")).cloned().unwrap_or(Value::Null),
                 "terminal_restore_output": surface.and_then(|row| row.get("terminal_restore_output")).cloned().unwrap_or(Value::Null),
                 "terminal_env": surface.and_then(|row| row.get("terminal_env")).cloned().unwrap_or(Value::Null),
+                "terminal_output_generation": surface
+                    .and_then(|row| row.get("terminal_output_generation"))
+                    .cloned()
+                    .unwrap_or_else(|| json!(0)),
                 "remote_tmux_manual_io": surface.and_then(|row| row.get("remote_tmux_manual_io")).cloned().unwrap_or_else(|| json!(false)),
                 "embedded_terminal_size": surface.and_then(|row| row.get("embedded_terminal_size")).cloned().unwrap_or(Value::Null),
                 "terminal_size": surface.and_then(|row| row.get("terminal_size")).cloned().unwrap_or(Value::Null),
@@ -791,6 +806,9 @@ fn attach_render_grid_fallbacks(app: &mut AppState, views: &mut Value) -> Result
         return Ok(());
     };
     for view in views {
+        if view.get("render_grid").is_some() {
+            continue;
+        }
         let is_terminal = view
             .get("kind")
             .and_then(Value::as_str)
@@ -812,7 +830,7 @@ fn attach_render_grid_fallbacks(app: &mut AppState, views: &mut Value) -> Result
             .or_else(|| view.get("present_count"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let read = app.handle(
+        let read = app.handle_renderer_read(
             "surface.read_text",
             &json!({"surface_id": surface_id.clone(), "raw": true}),
         );
@@ -867,7 +885,7 @@ pub(crate) fn render_grid_from_text_with_scrollback(
 ) -> Value {
     let columns = usize::from(columns.max(1));
     let rows = usize::from(rows.max(1));
-    let screen = render_grid_screen(text);
+    let screen = render_grid_screen(text, rows);
     let lines = screen.render_lines();
     let viewport_start = lines.len().saturating_sub(rows);
     let viewport_end = viewport_start.saturating_add(rows);
@@ -919,8 +937,11 @@ pub(crate) fn render_grid_from_text_with_scrollback(
     value
 }
 
-fn render_grid_screen(text: &str) -> RenderGridScreen {
-    let mut screen = RenderGridScreen::default();
+fn render_grid_screen(text: &str, viewport_rows: usize) -> RenderGridScreen {
+    let mut screen = RenderGridScreen {
+        viewport_rows: viewport_rows.max(1),
+        ..RenderGridScreen::default()
+    };
     screen.current_line_mut();
     let chars = text.chars().collect::<Vec<_>>();
     let mut index = 0;
@@ -983,7 +1004,18 @@ fn render_grid_screen(text: &str) -> RenderGridScreen {
             '\u{8}' => screen.backspace(),
             '\t' => screen.tab(),
             ch if ch.is_control() => {}
-            ch => screen.put(ch),
+            _ => {
+                let start = index;
+                while index < chars.len() && chars[index] != '\u{1b}' && !chars[index].is_control()
+                {
+                    index += 1;
+                }
+                let printable = chars[start..index].iter().collect::<String>();
+                for grapheme in UnicodeSegmentation::graphemes(printable.as_str(), true) {
+                    screen.put(grapheme);
+                }
+                continue;
+            }
         }
         index += 1;
     }
@@ -1020,6 +1052,7 @@ fn append_render_grid_line_spans(
             flush_render_grid_span(
                 row,
                 start_column,
+                column,
                 active_style,
                 &mut text,
                 styles,
@@ -1029,10 +1062,27 @@ fn append_render_grid_line_spans(
             active_style = None;
             continue;
         };
+        if !cell.continuation
+            && column.saturating_add(UnicodeWidthStr::width(cell.text.as_str())) > limit
+        {
+            flush_render_grid_span(
+                row,
+                start_column,
+                column,
+                active_style,
+                &mut text,
+                styles,
+                style_ids,
+                spans,
+            );
+            active_style = None;
+            break;
+        }
         if active_style != Some(cell.style) {
             flush_render_grid_span(
                 row,
                 start_column,
+                column,
                 active_style,
                 &mut text,
                 styles,
@@ -1042,11 +1092,14 @@ fn append_render_grid_line_spans(
             active_style = Some(cell.style);
             start_column = column;
         }
-        text.push(cell.ch);
+        if !cell.continuation {
+            text.push_str(&cell.text);
+        }
     }
     flush_render_grid_span(
         row,
         start_column,
+        limit,
         active_style,
         &mut text,
         styles,
@@ -1058,6 +1111,7 @@ fn append_render_grid_line_spans(
 fn flush_render_grid_span(
     row: usize,
     column: usize,
+    end_column: usize,
     style: Option<RenderGridStyle>,
     text: &mut String,
     styles: &mut Vec<Value>,
@@ -1072,7 +1126,7 @@ fn flush_render_grid_span(
         text.clear();
         return;
     }
-    let cell_width = text.chars().count();
+    let cell_width = end_column.saturating_sub(column);
     let style_id = render_grid_style_id(style, styles, style_ids);
     spans.push(json!({
         "row": row,
@@ -1101,10 +1155,10 @@ fn render_grid_style_value(id: u64, style: RenderGridStyle) -> Value {
     let mut value = serde_json::Map::new();
     value.insert("id".to_string(), json!(id));
     if let Some(fg) = style.fg {
-        value.insert("fg".to_string(), render_grid_rgb_value(fg));
+        value.insert("foreground".to_string(), json!(render_grid_rgb_hex(fg)));
     }
     if let Some(bg) = style.bg {
-        value.insert("bg".to_string(), render_grid_rgb_value(bg));
+        value.insert("background".to_string(), json!(render_grid_rgb_hex(bg)));
     }
     for (key, enabled) in [
         ("bold", style.bold),
@@ -1124,8 +1178,22 @@ fn render_grid_style_value(id: u64, style: RenderGridStyle) -> Value {
     Value::Object(value)
 }
 
-fn render_grid_rgb_value(rgb: RenderGridRgb) -> Value {
-    json!({"r": rgb.r, "g": rgb.g, "b": rgb.b})
+fn render_grid_rgb_hex(rgb: RenderGridRgb) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb.r, rgb.g, rgb.b)
+}
+
+fn render_grid_rgb_object_hex(value: &Value) -> Option<String> {
+    let component = |key| {
+        value
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+    };
+    Some(render_grid_rgb_hex(RenderGridRgb {
+        r: component("r")?,
+        g: component("g")?,
+        b: component("b")?,
+    }))
 }
 
 impl RenderGridBuffer {
@@ -1156,7 +1224,7 @@ impl RenderGridBuffer {
         }
         for line in &mut lines {
             while line.last().is_some_and(|cell| match cell {
-                Some(cell) => default_blank_cell(*cell),
+                Some(cell) => default_blank_cell(cell),
                 None => true,
             }) {
                 line.pop();
@@ -1193,27 +1261,57 @@ impl RenderGridScreen {
         self.active_buffer().col
     }
 
-    fn put(&mut self, ch: char) {
+    fn put(&mut self, text: &str) {
         let style = self.style;
         let buffer = self.active_buffer_mut();
         let col = buffer.col;
         let line = buffer.current_line_mut();
+        let width = UnicodeWidthStr::width(text);
+        if width == 0 {
+            let occupied = col.min(line.len());
+            if let Some(cell) = line
+                .iter_mut()
+                .take(occupied)
+                .rev()
+                .flatten()
+                .find(|cell| !cell.continuation)
+            {
+                cell.text.push_str(text);
+            }
+            return;
+        }
         while line.len() < col {
             line.push(None);
         }
-        let cell = Some(RenderGridCell { ch, style });
-        if col < line.len() {
-            line[col] = cell;
-        } else {
-            line.push(cell);
+        while line.len() < col.saturating_add(width) {
+            line.push(None);
         }
-        buffer.col += 1;
+        for index in col..col.saturating_add(width) {
+            clear_render_grid_glyph_at(line, index);
+        }
+        line[col] = Some(RenderGridCell {
+            text: text.to_string(),
+            style,
+            continuation: false,
+        });
+        for cell in line
+            .iter_mut()
+            .skip(col.saturating_add(1))
+            .take(width.saturating_sub(1))
+        {
+            *cell = Some(RenderGridCell {
+                text: String::new(),
+                style,
+                continuation: true,
+            });
+        }
+        buffer.col = buffer.col.saturating_add(width);
     }
 
     fn tab(&mut self) {
         let spaces = 4 - (self.cursor_col() % 4);
         for _ in 0..spaces {
-            self.put(' ');
+            self.put(" ");
         }
     }
 
@@ -1250,7 +1348,11 @@ impl RenderGridScreen {
     }
 
     fn reset(&mut self) {
-        *self = Self::default();
+        let viewport_rows = self.viewport_rows;
+        *self = Self {
+            viewport_rows,
+            ..Self::default()
+        };
         self.current_line_mut();
     }
 
@@ -1283,7 +1385,9 @@ impl RenderGridScreen {
             }
             'G' => self.active_buffer_mut().col = csi_position(params.first().copied()),
             'H' | 'f' => {
-                let row = csi_position(params.first().copied());
+                let row = self
+                    .viewport_origin()
+                    .saturating_add(csi_position(params.first().copied()));
                 let col = csi_position(params.get(1).copied());
                 let buffer = self.active_buffer_mut();
                 buffer.row = row;
@@ -1300,6 +1404,13 @@ impl RenderGridScreen {
             'u' => self.restore_cursor(),
             _ => {}
         }
+    }
+
+    fn viewport_origin(&self) -> usize {
+        self.active_buffer()
+            .lines
+            .len()
+            .saturating_sub(self.viewport_rows)
     }
 
     fn apply_private_mode(&mut self, params: &[usize], enable: bool) {
@@ -1329,30 +1440,17 @@ impl RenderGridScreen {
     }
 
     fn set_mode(&mut self, mode: &'static str, enable: bool) {
-        if enable {
-            self.modes.insert(mode);
-        } else {
-            self.modes.remove(mode);
-        }
+        self.modes.insert(mode, enable);
     }
 
-    fn modes_value(&self) -> Vec<&'static str> {
-        const ORDER: [&str; 10] = [
-            "application_cursor_keys",
-            "application_keypad",
-            "wraparound",
-            "bracketed_paste",
-            "focus_events",
-            "mouse_button_tracking",
-            "mouse_drag_tracking",
-            "mouse_any_tracking",
-            "mouse_sgr",
-            "mouse_urxvt",
-        ];
-        ORDER
+    fn modes_value(&self) -> Vec<Value> {
+        TERMINAL_MODE_SETTINGS
             .iter()
-            .copied()
-            .filter(|mode| self.modes.contains(mode))
+            .filter_map(|(name, code, ansi)| {
+                self.modes
+                    .get(name)
+                    .map(|on| json!({"code": code, "ansi": ansi, "on": on}))
+            })
             .collect()
     }
 
@@ -1361,7 +1459,7 @@ impl RenderGridScreen {
         match code {
             0 | 1 => {
                 self.cursor_style = RenderGridCursorStyle::Block;
-                self.cursor_blinking = code == 1;
+                self.cursor_blinking = true;
             }
             2 => {
                 self.cursor_style = RenderGridCursorStyle::Block;
@@ -1541,8 +1639,27 @@ impl RenderGridScreen {
     }
 }
 
-fn default_blank_cell(cell: RenderGridCell) -> bool {
-    cell.ch == ' ' && cell.style == RenderGridStyle::default()
+fn clear_render_grid_glyph_at(line: &mut [Option<RenderGridCell>], index: usize) {
+    let Some(cell) = line.get(index).and_then(Option::as_ref) else {
+        return;
+    };
+    let mut start = index;
+    if cell.continuation {
+        while start > 0 && line[start].as_ref().is_some_and(|cell| cell.continuation) {
+            start -= 1;
+        }
+    }
+    line[start] = None;
+    for cell in line.iter_mut().skip(start.saturating_add(1)) {
+        if !cell.as_ref().is_some_and(|cell| cell.continuation) {
+            break;
+        }
+        *cell = None;
+    }
+}
+
+fn default_blank_cell(cell: &RenderGridCell) -> bool {
+    cell.text == " " && !cell.continuation && cell.style == RenderGridStyle::default()
 }
 
 fn is_csi_final_byte(ch: char) -> bool {
@@ -1721,7 +1838,12 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
             continue;
         };
         let (cols, rows) = frame_terminal_size(view.get("frame"));
-        let render_state = app.handle(
+        let state_seq = view
+            .get("state_seq")
+            .or_else(|| view.get("present_count"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let render_state = app.handle_renderer_read(
             "renderer.ghostty_vt.snapshot",
             &json!({
                 "surface_id": surface_id,
@@ -1732,7 +1854,7 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
         if let Some(object) = view.as_object_mut() {
             match render_state {
                 Ok(value) => {
-                    object.insert("ghostty_vt".to_string(), value);
+                    attach_ghostty_vt_snapshot(object, &surface_id, state_seq, value);
                 }
                 Err(err) => {
                     object.insert(
@@ -1744,6 +1866,343 @@ fn attach_ghostty_vt_render_states(app: &mut AppState, views: &mut Value) -> Res
         }
     }
     Ok(())
+}
+
+fn attach_ghostty_vt_snapshot(
+    object: &mut serde_json::Map<String, Value>,
+    surface_id: &str,
+    state_seq: u64,
+    value: Value,
+) {
+    let fallback_render_grid = object.get("render_grid").cloned();
+    let authoritative_modes = value.get("modes").and_then(Value::as_array).map(|modes| {
+        modes
+            .iter()
+            .filter_map(render_grid_v1_mode_setting)
+            .collect::<Vec<_>>()
+    });
+    let authoritative_cursor_presentation = value.get("cursor_presentation");
+    if let Some(mut render_grid) =
+        render_grid_from_ghostty_vt_snapshot(surface_id, state_seq, &value)
+    {
+        if let Some(modes) = authoritative_modes.as_ref() {
+            render_grid["modes"] = json!(modes);
+        }
+        if let Some(fallback_render_grid) = fallback_render_grid.as_ref() {
+            if authoritative_modes.is_none() {
+                merge_render_grid_protocol_state(&mut render_grid, fallback_render_grid);
+            }
+            if authoritative_cursor_presentation.is_none() {
+                merge_render_grid_cursor_presentation(&mut render_grid, fallback_render_grid);
+            }
+            merge_render_grid_scrollback(&mut render_grid, fallback_render_grid);
+        }
+        if let Some(cursor_presentation) = authoritative_cursor_presentation {
+            merge_render_grid_cursor_presentation(&mut render_grid, cursor_presentation);
+        }
+        object.insert("render_grid".to_string(), render_grid);
+    }
+    object.insert("ghostty_vt".to_string(), value);
+}
+
+fn merge_render_grid_protocol_state(render_grid: &mut Value, fallback: &Value) {
+    let Some(target) = render_grid.as_object_mut() else {
+        return;
+    };
+    if let Some(modes) = fallback.get("modes").and_then(Value::as_array) {
+        let modes = modes
+            .iter()
+            .filter_map(render_grid_v1_mode_setting)
+            .collect::<Vec<_>>();
+        target.insert("modes".to_string(), json!(modes));
+    }
+}
+
+fn render_grid_v1_mode_setting(mode: &Value) -> Option<Value> {
+    if let Some(name) = mode.as_str() {
+        let (_, code, ansi) = TERMINAL_MODE_SETTINGS
+            .iter()
+            .find(|(candidate, _, _)| *candidate == name)?;
+        return Some(json!({"code": code, "ansi": ansi, "on": true}));
+    }
+    let code = mode.get("code")?.as_u64()?;
+    if code > 0x7fff {
+        return None;
+    }
+    Some(json!({
+        "code": code,
+        "ansi": mode.get("ansi")?.as_bool()?,
+        "on": mode.get("on")?.as_bool()?
+    }))
+}
+
+fn merge_render_grid_cursor_presentation(render_grid: &mut Value, fallback: &Value) {
+    let Some(target) = render_grid.get_mut("cursor").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let source = fallback.get("cursor").unwrap_or(fallback);
+    if let Some(style) = source
+        .get("style")
+        .and_then(Value::as_str)
+        .filter(|style| matches!(*style, "block" | "underline" | "bar"))
+    {
+        target.insert("style".to_string(), json!(style));
+    }
+    if let Some(blinking) = source.get("blinking").and_then(Value::as_bool) {
+        target.insert("blinking".to_string(), json!(blinking));
+    }
+}
+
+fn merge_render_grid_scrollback(render_grid: &mut Value, fallback: &Value) {
+    if render_grid.get("active_screen").and_then(Value::as_str) != Some("primary")
+        || fallback.get("active_screen").and_then(Value::as_str) != Some("primary")
+    {
+        return;
+    }
+    let Some(target) = render_grid.as_object_mut() else {
+        return;
+    };
+    let Some(source_spans) = fallback.get("scrollback_spans").and_then(Value::as_array) else {
+        return;
+    };
+    let source_styles = fallback
+        .get("styles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(target_styles) = target.get_mut("styles").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut target_style_ids = target_styles
+        .iter()
+        .enumerate()
+        .map(|(index, style)| {
+            (
+                render_grid_style_key(style),
+                style
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(index as u64),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut source_to_target = HashMap::new();
+    for (index, style) in source_styles.iter().enumerate() {
+        let source_id = style
+            .get("id")
+            .and_then(Value::as_u64)
+            .unwrap_or(index as u64);
+        let key = render_grid_style_key(style);
+        let target_id = if let Some(target_id) = target_style_ids.get(&key) {
+            *target_id
+        } else {
+            let target_id = target_styles.len() as u64;
+            let mut style = style.clone();
+            if let Some(style) = style.as_object_mut() {
+                style.insert("id".to_string(), json!(target_id));
+            }
+            target_styles.push(style);
+            target_style_ids.insert(key, target_id);
+            target_id
+        };
+        source_to_target.insert(source_id, target_id);
+    }
+    let mut scrollback_spans = source_spans.clone();
+    for span in &mut scrollback_spans {
+        let Some(source_id) = span.get("style_id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(target_id) = source_to_target.get(&source_id) else {
+            continue;
+        };
+        if let Some(span) = span.as_object_mut() {
+            span.insert("style_id".to_string(), json!(target_id));
+        }
+    }
+    target.insert(
+        "scrollback_rows".to_string(),
+        fallback
+            .get("scrollback_rows")
+            .cloned()
+            .unwrap_or_else(|| json!(0)),
+    );
+    target.insert("scrollback_spans".to_string(), json!(scrollback_spans));
+}
+
+fn render_grid_style_key(style: &Value) -> String {
+    let mut style = style.clone();
+    if let Some(style) = style.as_object_mut() {
+        style.remove("id");
+    }
+    serde_json::to_string(&style).unwrap_or_default()
+}
+
+struct GhosttyRenderGridSpan {
+    row: u64,
+    column: u64,
+    style_id: u64,
+    text: String,
+    cell_width: u64,
+}
+
+fn render_grid_from_ghostty_vt_snapshot(
+    surface_id: &str,
+    state_seq: u64,
+    snapshot: &Value,
+) -> Option<Value> {
+    let columns = snapshot.get("cols")?.as_u64()?.max(1);
+    let rows = snapshot.get("rows")?.as_u64()?.max(1);
+    let active_screen = snapshot
+        .get("active_screen")
+        .and_then(Value::as_str)
+        .filter(|screen| matches!(*screen, "primary" | "alternate"))
+        .unwrap_or("primary");
+    let rows_data = snapshot.get("rows_data")?.as_array()?;
+    let mut styles = vec![json!({"id": 0})];
+    let mut style_ids = HashMap::from([("{}".to_string(), 0_u64)]);
+    let mut spans = Vec::<GhosttyRenderGridSpan>::new();
+
+    for row in rows_data {
+        let row_index = row.get("y").and_then(Value::as_u64).unwrap_or(0);
+        for cell in row
+            .get("cells")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let text = cell.get("text").and_then(Value::as_str).unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+            let style = render_grid_style_from_ghostty_vt(cell.get("style"));
+            let style_key = serde_json::to_string(&style).unwrap_or_default();
+            let style_id = if let Some(style_id) = style_ids.get(&style_key) {
+                *style_id
+            } else {
+                let style_id = styles.len() as u64;
+                let mut style = style;
+                if let Some(style) = style.as_object_mut() {
+                    style.insert("id".to_string(), json!(style_id));
+                }
+                styles.push(style);
+                style_ids.insert(style_key, style_id);
+                style_id
+            };
+            let column = cell.get("x").and_then(Value::as_u64).unwrap_or(0);
+            let cell_width = cell
+                .get("cell_width")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .max(1);
+            if let Some(span) = spans.last_mut().filter(|span| {
+                span.row == row_index
+                    && span.style_id == style_id
+                    && span.column.saturating_add(span.cell_width) == column
+            }) {
+                span.text.push_str(text);
+                span.cell_width = span.cell_width.saturating_add(cell_width);
+            } else {
+                spans.push(GhosttyRenderGridSpan {
+                    row: row_index,
+                    column,
+                    style_id,
+                    text: text.to_string(),
+                    cell_width,
+                });
+            }
+        }
+    }
+    let row_spans = spans
+        .into_iter()
+        .map(|span| {
+            json!({
+                "row": span.row,
+                "column": span.column,
+                "style_id": span.style_id,
+                "text": span.text,
+                "cell_width": span.cell_width
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut render_grid = json!({
+        "format": "cmux.render-grid.v1",
+        "parser": "ghostty-vt-adapter",
+        "surface_id": surface_id,
+        "state_seq": state_seq,
+        "columns": columns,
+        "rows": rows,
+        "full": true,
+        "cleared_rows": [],
+        "styles": styles,
+        "row_spans": row_spans,
+        "active_screen": active_screen,
+        "modes": [],
+        "scrollback_rows": 0,
+        "scrollback_spans": []
+    });
+    if let Some(cursor) = snapshot.get("cursor") {
+        match cursor.get("in_viewport").and_then(Value::as_bool) {
+            Some(false) => {
+                render_grid["cursor"] = json!({
+                    "row": 0,
+                    "column": 0,
+                    "visible": false,
+                    "style": "block",
+                    "blinking": false
+                });
+            }
+            Some(true) => {
+                if let Some((row, column)) = cursor
+                    .get("y")
+                    .and_then(Value::as_u64)
+                    .zip(cursor.get("x").and_then(Value::as_u64))
+                {
+                    render_grid["cursor"] = json!({
+                        "row": row,
+                        "column": column,
+                        "visible": cursor
+                            .get("visible")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                        "style": "block",
+                        "blinking": false
+                    });
+                }
+            }
+            None => {}
+        }
+    }
+    Some(render_grid)
+}
+
+fn render_grid_style_from_ghostty_vt(style: Option<&Value>) -> Value {
+    let Some(style) = style.and_then(Value::as_object) else {
+        return json!({});
+    };
+    let mut normalized = serde_json::Map::new();
+    for (source, target) in [("fg", "foreground"), ("bg", "background")] {
+        if let Some(value) = style.get(source).and_then(render_grid_rgb_object_hex) {
+            normalized.insert(target.to_string(), json!(value));
+        }
+    }
+    for key in [
+        "selected",
+        "bold",
+        "italic",
+        "faint",
+        "blink",
+        "inverse",
+        "invisible",
+        "underline",
+        "strikethrough",
+        "overline",
+    ] {
+        if style.get(key).and_then(Value::as_bool) == Some(true) {
+            normalized.insert(key.to_string(), json!(true));
+        }
+    }
+    Value::Object(normalized)
 }
 
 fn frame_terminal_size(frame: Option<&Value>) -> (u16, u16) {
@@ -1785,7 +2244,7 @@ fn normalize_backend(backend: &str) -> Option<&'static str> {
 }
 
 fn renderer_backend_uses_text_fallback(backend: &str) -> bool {
-    backend != "ghostty"
+    matches!(backend, "core" | "gtk")
 }
 
 fn probe_gtk4() -> GtkProbe {
@@ -3636,6 +4095,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn toggle_left_sidebar_action_hides_left_sidebar_without_hiding_right_sidebar() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+
+        let initial = snapshot_value(&mut app, &json!({})).expect("initial snapshot");
+        assert_eq!(initial["left_sidebar"]["visible"], true);
+        assert_eq!(initial["right_sidebar"]["visible"], true);
+
+        app.handle("sidebar.left", &json!({"action": "toggle"}))
+            .expect("toggle left sidebar");
+
+        let toggled = snapshot_value(&mut app, &json!({})).expect("toggled snapshot");
+        assert_eq!(toggled["left_sidebar"]["visible"], false);
+        assert_eq!(toggled["right_sidebar"]["visible"], true);
+    }
+
+    #[test]
+    fn renderer_snapshot_does_not_enter_session_persistence_path() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+        assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), 0);
+
+        snapshot_value(&mut app, &json!({})).expect("renderer snapshot");
+
+        assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), 0);
+    }
+
+    #[test]
     fn renderer_snapshot_exposes_beta_gated_right_sidebar_modes_and_feed_data() {
         let mut app = AppState::with_paths(None, None).expect("app state");
         app.set_beta_feature_settings_for_test(crate::config::BetaFeatureSettings::default());
@@ -4285,11 +4770,11 @@ mod tests {
     }
 
     #[test]
-    fn full_ghostty_backend_skips_core_text_fallback() {
+    fn ghostty_backends_skip_core_text_fallback() {
         assert!(!renderer_backend_uses_text_fallback("ghostty"));
         assert!(renderer_backend_uses_text_fallback("core"));
         assert!(renderer_backend_uses_text_fallback("gtk"));
-        assert!(renderer_backend_uses_text_fallback("ghostty-vt"));
+        assert!(!renderer_backend_uses_text_fallback("ghostty-vt"));
     }
 
     #[test]
@@ -4664,6 +5149,374 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_vt_snapshot_keeps_native_and_render_grid_schemas_distinct() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": true, "in_viewport": true, "x": 3, "y": 1},
+            "rows_data": [{
+                "y": 1,
+                "dirty": true,
+                "cells": [{
+                    "x": 0,
+                    "text": "ready",
+                    "style": {"fg": {"r": 10, "g": 20, "b": 30}, "bold": true}
+                }]
+            }]
+        });
+        let fallback = render_grid_from_text_with_scrollback(
+            "surface-a",
+            42,
+            8,
+            2,
+            "\x1b[31mold\x1b[0m\nready\n",
+            10,
+        );
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 42, native.clone());
+
+        assert_eq!(object["ghostty_vt"], native);
+        assert_eq!(object["render_grid"]["format"], "cmux.render-grid.v1");
+        assert_eq!(object["render_grid"]["surface_id"], "surface-a");
+        assert_eq!(object["render_grid"]["state_seq"], 42);
+        assert_eq!(object["render_grid"]["row_spans"][0]["text"], "ready");
+        assert_eq!(object["render_grid"]["row_spans"][0]["style_id"], 1);
+        assert_eq!(object["render_grid"]["styles"][1]["foreground"], "#0A141E");
+        assert_eq!(object["render_grid"]["styles"][1]["bold"], true);
+        assert_eq!(object["render_grid"]["cursor"]["column"], 3);
+        assert_eq!(object["render_grid"]["scrollback_rows"], 1);
+        assert_eq!(object["render_grid"]["scrollback_spans"][0]["text"], "old");
+        assert_eq!(object["render_grid"]["scrollback_spans"][0]["style_id"], 2);
+        assert_eq!(object["render_grid"]["styles"][2]["foreground"], "#CD3131");
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_keeps_alternate_rows_out_of_primary_scrollback() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "active_screen": "alternate",
+            "rows_data": [{
+                "y": 0,
+                "cells": [{"x": 0, "text": "alt-two", "style": {}}]
+            }]
+        });
+        let fallback = render_grid_from_text_with_scrollback(
+            "surface-a",
+            43,
+            8,
+            1,
+            "primary\x1b[?1049halt-one\nalt-two",
+            10,
+        );
+        assert_eq!(fallback["active_screen"], "alternate");
+        assert_eq!(fallback["scrollback_spans"][0]["text"], "alt-one");
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 43, native);
+
+        assert_eq!(object["render_grid"]["active_screen"], "alternate");
+        assert_eq!(object["render_grid"]["scrollback_rows"], 0);
+        assert_eq!(object["render_grid"]["scrollback_spans"], json!([]));
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_prefers_authoritative_modes_over_truncated_fallback() {
+        let authoritative_modes = json!([
+            {"code": 1, "ansi": false, "on": true},
+            {"code": 2004, "ansi": false, "on": true}
+        ]);
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "active_screen": "primary",
+            "modes": authoritative_modes,
+            "rows_data": []
+        });
+        // This is the retained tail after the sequence that enabled the modes
+        // has fallen outside the bounded transcript.
+        let fallback = render_grid_from_text("surface-a", 44, 8, 1, "retained");
+        assert_eq!(fallback["modes"], json!([]));
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 44, native);
+
+        assert_eq!(object["render_grid"]["modes"], authoritative_modes);
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_prefers_authoritative_cursor_presentation_over_truncated_fallback() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "active_screen": "primary",
+            "cursor": {"visible": true, "in_viewport": true, "x": 0, "y": 0},
+            "cursor_presentation": {"style": "bar", "blinking": true},
+            "rows_data": []
+        });
+        // The retained tail no longer includes the earlier DECSCUSR sequence.
+        let fallback = render_grid_from_text("surface-a", 45, 8, 1, "retained");
+        assert_eq!(fallback["cursor"]["style"], "block");
+        assert_eq!(fallback["cursor"]["blinking"], false);
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 45, native);
+
+        assert_eq!(object["render_grid"]["cursor"]["style"], "bar");
+        assert_eq!(object["render_grid"]["cursor"]["blinking"], true);
+    }
+
+    #[test]
+    fn ghostty_vt_render_grid_preserves_wide_cell_columns() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "cursor": {"visible": true, "in_viewport": true, "x": 3, "y": 0},
+            "rows_data": [{
+                "y": 0,
+                "dirty": true,
+                "cells": [
+                    {"x": 0, "text": "界", "cell_width": 2, "style": {}},
+                    {"x": 2, "text": "x", "cell_width": 1, "style": {}}
+                ]
+            }]
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 43, &snapshot).expect("render grid");
+        let spans = grid["row_spans"].as_array().expect("row spans");
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["column"], 0);
+        assert_eq!(spans[0]["text"], "界x");
+        assert_eq!(spans[0]["cell_width"], 3);
+        assert_eq!(grid["cursor"]["column"], 3);
+    }
+
+    #[test]
+    fn ghostty_vt_render_grid_styles_follow_v1_color_schema() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 2,
+            "rows": 1,
+            "rows_data": [{
+                "y": 0,
+                "cells": [{
+                    "x": 0,
+                    "text": "x",
+                    "style": {
+                        "fg": {"r": 10, "g": 20, "b": 30},
+                        "bg": {"r": 221, "g": 238, "b": 255},
+                        "bold": true
+                    }
+                }]
+            }]
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 45, &snapshot).expect("render grid");
+        let style = &grid["styles"][1];
+
+        assert_eq!(style["foreground"], "#0A141E");
+        assert_eq!(style["background"], "#DDEEFF");
+        assert_eq!(style["bold"], true);
+        assert!(style.get("fg").is_none());
+        assert!(style.get("bg").is_none());
+    }
+
+    #[test]
+    fn ghostty_vt_render_grid_preserves_hidden_cursor() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": false, "in_viewport": true, "x": 3, "y": 1},
+            "rows_data": []
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 46, &snapshot).expect("render grid");
+
+        assert_eq!(grid["cursor"]["row"], 1);
+        assert_eq!(grid["cursor"]["column"], 3);
+        assert_eq!(grid["cursor"]["visible"], false);
+    }
+
+    #[test]
+    fn ghostty_vt_render_grid_hides_cursor_outside_viewport() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": true, "in_viewport": false, "x": 3, "y": 9},
+            "rows_data": []
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 47, &snapshot).expect("render grid");
+
+        assert_eq!(grid["cursor"]["row"], 0);
+        assert_eq!(grid["cursor"]["column"], 0);
+        assert_eq!(
+            grid["cursor"]["visible"], false,
+            "an off-viewport native cursor must explicitly hide replay's cursor"
+        );
+    }
+
+    #[test]
+    fn text_fallback_render_grid_styles_follow_v1_color_schema() {
+        let grid = render_grid_from_text("surface-a", 46, 2, 1, "\x1b[38;2;10;20;30mX");
+        let style = &grid["styles"][1];
+
+        assert_eq!(style["foreground"], "#0A141E");
+        assert!(style.get("fg").is_none());
+    }
+
+    #[test]
+    fn ghostty_vt_render_grid_modes_follow_v1_array_schema() {
+        let snapshot = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "rows_data": []
+        });
+
+        let grid =
+            render_grid_from_ghostty_vt_snapshot("surface-a", 44, &snapshot).expect("render grid");
+
+        assert_eq!(grid["modes"], json!([]));
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_preserves_native_screen_and_fallback_modes() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 1,
+            "active_screen": "primary",
+            "rows_data": []
+        });
+        let fallback =
+            render_grid_from_text("surface-a", 45, 8, 1, "primary\x1b[?1049h\x1b[?2004hALT");
+        assert_eq!(fallback["active_screen"], "alternate");
+        assert!(fallback["modes"]
+            .as_array()
+            .expect("fallback modes")
+            .contains(&json!({"code": 2004, "ansi": false, "on": true})));
+        let fallback_modes = fallback["modes"].clone();
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 45, native);
+
+        assert_eq!(object["render_grid"]["active_screen"], "primary");
+        assert_eq!(object["render_grid"]["modes"], fallback_modes);
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_normalizes_legacy_fallback_modes() {
+        let mut render_grid = json!({"active_screen": "primary", "modes": []});
+        let fallback = json!({
+            "active_screen": "alternate",
+            "modes": [
+                "bracketed_paste",
+                "unknown_mode",
+                {"code": 2027, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": false},
+                {"code": 32768, "ansi": false, "on": true},
+                {"code": "1000", "ansi": false, "on": true},
+                {"code": 1004, "ansi": "false", "on": true}
+            ]
+        });
+
+        merge_render_grid_protocol_state(&mut render_grid, &fallback);
+
+        assert_eq!(render_grid["active_screen"], "primary");
+        assert_eq!(
+            render_grid["modes"],
+            json!([
+                {"code": 2004, "ansi": false, "on": true},
+                {"code": 2027, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": false}
+            ])
+        );
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_emits_decodable_v1_mode_settings() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "rows_data": []
+        });
+        let fallback = render_grid_from_text(
+            "surface-a",
+            46,
+            8,
+            2,
+            "ready\x1b[?1;7;1000;1004;1006;2004h\x1b=",
+        );
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 46, native);
+
+        assert_eq!(
+            object["render_grid"]["modes"],
+            json!([
+                {"code": 1, "ansi": false, "on": true},
+                {"code": 66, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": true},
+                {"code": 2004, "ansi": false, "on": true},
+                {"code": 1004, "ansi": false, "on": true},
+                {"code": 1000, "ansi": false, "on": true},
+                {"code": 1006, "ansi": false, "on": true}
+            ])
+        );
+    }
+
+    #[test]
+    fn renderer_text_fallback_preserves_explicit_disabled_modes() {
+        let grid = render_grid_from_text("surface-a", 47, 8, 2, "ready\x1b[?2004h\x1b[?7;2004l");
+
+        assert_eq!(
+            grid["modes"],
+            json!([
+                {"code": 7, "ansi": false, "on": false},
+                {"code": 2004, "ansi": false, "on": false}
+            ])
+        );
+    }
+
+    #[test]
+    fn ghostty_vt_snapshot_preserves_fallback_cursor_presentation() {
+        let native = json!({
+            "parser": "ghostty-vt",
+            "cols": 8,
+            "rows": 2,
+            "cursor": {"visible": false, "in_viewport": true, "x": 3, "y": 1},
+            "rows_data": []
+        });
+        let fallback = render_grid_from_text("surface-a", 47, 8, 2, "ready\x1b[5 q");
+        assert_eq!(fallback["cursor"]["style"], "bar");
+        assert_eq!(fallback["cursor"]["blinking"], true);
+        let mut object = serde_json::Map::from_iter([("render_grid".to_string(), fallback)]);
+
+        attach_ghostty_vt_snapshot(&mut object, "surface-a", 47, native);
+
+        let cursor = &object["render_grid"]["cursor"];
+        assert_eq!(cursor["row"], 1);
+        assert_eq!(cursor["column"], 3);
+        assert_eq!(cursor["visible"], false);
+        assert_eq!(cursor["style"], "bar");
+        assert_eq!(cursor["blinking"], true);
+    }
+
+    #[test]
     fn renderer_text_fallback_keeps_cursor_only_empty_grid() {
         let grid = render_grid_from_text("surface-a", 43, 8, 2, "");
         assert_eq!(grid["format"], "cmux.render-grid.v1");
@@ -4685,6 +5538,47 @@ mod tests {
         assert_eq!(grid["cursor"]["row"], 1);
         assert_eq!(grid["cursor"]["column"], 0);
         assert_eq!(grid["cursor"]["visible"], true);
+    }
+
+    #[test]
+    fn renderer_text_fallback_rebases_absolute_cursor_after_scrollback() {
+        let mut text = (0..31)
+            .map(|line| format!("line-{line}\n"))
+            .collect::<String>();
+        text.push_str("\x1b[1;1Htop");
+
+        let grid = render_grid_from_text("surface-a", 45, 20, 30, &text);
+
+        assert_eq!(grid["cursor"]["row"], 0, "grid was {grid}");
+        assert_eq!(grid["cursor"]["column"], 3, "grid was {grid}");
+        assert_eq!(grid["row_spans"][0]["text"], "tope-2", "grid was {grid}");
+    }
+
+    #[test]
+    fn renderer_text_fallback_preserves_unicode_columns_for_mobile_replay() {
+        for (text, expected_width) in [("界x", 3_u64), ("e\u{301}x", 2), ("\u{1fae0}x", 3)] {
+            let grid = render_grid_from_text("surface-a", 45, 6, 1, text);
+            let spans = grid["row_spans"].as_array().expect("row spans");
+
+            assert_eq!(spans.len(), 1, "grid was {grid}");
+            assert_eq!(spans[0]["column"], 0);
+            assert_eq!(spans[0]["text"], text);
+            assert_eq!(
+                spans[0]["cell_width"], expected_width,
+                "fallback span width must use terminal columns for {text:?}"
+            );
+            assert_eq!(
+                grid["cursor"]["column"], expected_width,
+                "mobile replay must restore the cursor after {text:?}"
+            );
+            let painted_end =
+                spans[0]["column"].as_u64().unwrap() + spans[0]["cell_width"].as_u64().unwrap();
+            assert_eq!(
+                6 - painted_end,
+                6 - expected_width,
+                "mobile replay must pad only the unpainted columns after {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -4797,19 +5691,28 @@ mod tests {
         assert_eq!(
             grid["modes"],
             json!([
-                "application_cursor_keys",
-                "application_keypad",
-                "wraparound",
-                "bracketed_paste",
-                "focus_events",
-                "mouse_button_tracking",
-                "mouse_sgr"
+                {"code": 1, "ansi": false, "on": true},
+                {"code": 66, "ansi": false, "on": true},
+                {"code": 7, "ansi": false, "on": true},
+                {"code": 2004, "ansi": false, "on": true},
+                {"code": 1004, "ansi": false, "on": true},
+                {"code": 1000, "ansi": false, "on": true},
+                {"code": 1006, "ansi": false, "on": true}
             ])
         );
     }
 
     #[test]
-    fn renderer_text_fallback_clears_cursor_shape_and_modes() {
+    fn renderer_text_fallback_treats_decscusr_zero_as_blinking_block() {
+        for sequence in ["\x1b[0 q", "\x1b[ q"] {
+            let grid = render_grid_from_text("surface-a", 52, 20, 2, sequence);
+            assert_eq!(grid["cursor"]["style"], "block");
+            assert_eq!(grid["cursor"]["blinking"], true);
+        }
+    }
+
+    #[test]
+    fn renderer_text_fallback_tracks_disabled_cursor_shape_and_modes() {
         let grid = render_grid_from_text(
             "surface-a",
             52,
@@ -4819,7 +5722,14 @@ mod tests {
         );
         assert_eq!(grid["cursor"]["style"], "bar");
         assert_eq!(grid["cursor"]["blinking"], false);
-        assert_eq!(grid["modes"], json!([]));
+        assert_eq!(
+            grid["modes"],
+            json!([
+                {"code": 66, "ansi": false, "on": false},
+                {"code": 2004, "ansi": false, "on": false},
+                {"code": 1006, "ansi": false, "on": false}
+            ])
+        );
     }
 
     #[test]
@@ -4843,8 +5753,8 @@ mod tests {
             .iter()
             .find(|style| style["id"].as_u64() == Some(style_id))
             .expect("styled span style");
-        assert_eq!(style["fg"], json!({"r": 205, "g": 49, "b": 49}));
-        assert_eq!(style["bg"], json!({"r": 1, "g": 2, "b": 3}));
+        assert_eq!(style["foreground"], "#CD3131");
+        assert_eq!(style["background"], "#010203");
         assert_eq!(style["bold"], true);
         assert_eq!(style["italic"], true);
         assert_eq!(style["underline"], true);
@@ -4870,7 +5780,7 @@ mod tests {
             .iter()
             .find(|style| style["id"].as_u64() == Some(style_id))
             .expect("styled span style");
-        assert_eq!(style["fg"], json!({"r": 255, "g": 0, "b": 0}));
+        assert_eq!(style["foreground"], "#FF0000");
         assert_eq!(grid["cursor"]["row"], 1);
         assert_eq!(grid["cursor"]["column"], 0);
     }
@@ -5942,12 +6852,9 @@ typedef enum {
             .collect::<HashSet<_>>();
         assert!(missing_required_ghostty_vt_symbols(&symbols).is_empty());
 
-        symbols.remove("ghostty_render_state_row_cells_get");
+        symbols.remove("ghostty_cell_get");
         let missing = missing_required_ghostty_vt_symbols(&symbols);
-        assert_eq!(
-            missing,
-            vec!["ghostty_render_state_row_cells_get".to_string()]
-        );
+        assert_eq!(missing, vec!["ghostty_cell_get".to_string()]);
     }
 
     #[test]

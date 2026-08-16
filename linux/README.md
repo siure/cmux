@@ -10,15 +10,16 @@ model for the native Linux app shell.
 
 ## Run
 
-For the complete native app, run these commands from the `cmux` checkout with
-the modified Ghostty checkout beside it:
+For the complete native app, run these commands from the `cmux` checkout. The
+repository pins the Linux-enabled Ghostty fork as its `ghostty` submodule:
 
 ```bash
-(cd ../ghostty && zig build -Dapp-runtime=none -Doptimize=ReleaseSafe)
+git submodule update --init ghostty
+(cd ghostty && zig build -Dapp-runtime=none -Doptimize=ReleaseSafe)
 cargo build --locked --manifest-path linux/Cargo.toml --features gtk
 
-export CMUX_GHOSTTY_LIBRARY="$PWD/../ghostty/zig-out/lib/libghostty-internal.so"
-export CMUX_GHOSTTY_ROOT="$PWD/../ghostty"
+export CMUX_GHOSTTY_LIBRARY="$PWD/ghostty/zig-out/lib/libghostty-internal.so"
+export CMUX_GHOSTTY_ROOT="$PWD/ghostty"
 linux/target/debug/cmux app --renderer ghostty
 ```
 
@@ -254,11 +255,12 @@ Build the local Ghostty fork and cmux from the repository root, then launch the
 GTK app on a private control socket:
 
 ```bash
-(cd ../ghostty && zig build -Dapp-runtime=none -Doptimize=ReleaseSafe)
+git submodule update --init ghostty
+(cd ghostty && zig build -Dapp-runtime=none -Doptimize=ReleaseSafe)
 cargo build --locked --manifest-path linux/Cargo.toml --features gtk
 
-export CMUX_GHOSTTY_LIBRARY="$PWD/../ghostty/zig-out/lib/libghostty-internal.so"
-export CMUX_GHOSTTY_ROOT="$PWD/../ghostty"
+export CMUX_GHOSTTY_LIBRARY="$PWD/ghostty/zig-out/lib/libghostty-internal.so"
+export CMUX_GHOSTTY_ROOT="$PWD/ghostty"
 linux/target/debug/cmux app --renderer ghostty --socket /tmp/cmux-mvp.sock
 ```
 
@@ -301,8 +303,6 @@ build is not sufficient.
 
 The Linux port is usable, but full product parity still requires:
 
-- Publishing the modified Ghostty checkout and pinning its immutable commit in
-  Linux release CI. Local source builds already require and validate this ABI.
 - Shipping and validating stable/nightly Linux archives through the normal
   release channel, including updater installation against real published
   assets and broader distro, compositor, and GPU coverage.
@@ -391,24 +391,21 @@ changes are contained in the recorded commits, while CI release artifacts
 record both values as `false`.
 
 The manually dispatchable `Build Linux Desktop App` GitHub Actions workflow
-builds the same validated archive from a published `manaflow-ai/ghostty`
+builds the same validated archive from the Ghostty commit pinned by the cmux
 revision:
 
 ```bash
 gh workflow run build-linux-app.yml \
-  -f ghostty_ref=<published-ghostty-commit> \
   -f bundle_version=<version>
 ```
 
-The workflow pins Rust and Zig, verifies the Zig download checksum, validates
-the relocated bundle, and uploads the archive, checksum, and a JSON provenance
-manifest. Stable and nightly desktop workflows call it automatically using the
-repository variable `CMUX_LINUX_GHOSTTY_REF`; workflow dispatches may override
-that value with `linux_ghostty_ref`. The value must be a published
-40-character commit SHA from `manaflow-ai/ghostty`, not a branch or mutable tag.
-The current local Linux Ghostty changes must therefore be committed and
-published before configuring the variable. The workflow intentionally does not
-execute untrusted arbitrary Ghostty repositories.
+The workflow pins Rust and Zig, verifies the Zig download checksum, checks that
+the initialized submodule matches the parent tree, validates the relocated
+bundle, and uploads the archive, checksum, and a JSON provenance manifest.
+Stable and nightly desktop workflows call it automatically, so a cmux revision
+and its Ghostty revision cannot drift independently. The pinned Ghostty commit
+must be published by the submodule repository before the parent pointer is
+pushed.
 
 Stable releases publish `cmux-linux-x86_64.tar.gz`, its checksum, and
 `cmux-linux-build.json` alongside the macOS and remote-daemon assets. Nightly
@@ -420,10 +417,10 @@ The local Linux release path has also been validated end to end with clean
 optimized cmux and `ReleaseSafe` Ghostty prefixes: the resulting archive is
 byte-reproducible for identical inputs, relocates through paths containing
 spaces, launches the real GTK/Ghostty UI, accepts socket control, and installs
-under an arbitrary prefix. This does not replace publication: the Ghostty
-changes must still be committed and pushed before setting
-`CMUX_LINUX_GHOSTTY_REF`, and `cmux update` remains unavailable until a stable
-or nightly GitHub release contains the archive and checksum.
+under an arbitrary prefix. This does not replace publication: the pinned
+Ghostty commit must still be pushed before the parent pointer, and `cmux update`
+remains unavailable until a stable or nightly GitHub release contains the
+archive and checksum.
 
 Run the included installer for desktop integration:
 
@@ -491,8 +488,8 @@ Installing `cmuxd-remote` beside `cmux` keeps Linux SSH bootstrap and
 `CMUX_LINUX_RENDERER=ghostty`; `core` and `ghostty-vt` installs stay
 display-free and do not require GTK development files unless
 `CMUX_LINUX_CARGO_FEATURES=gtk` is set explicitly. When
-`CMUX_LINUX_RENDERER=ghostty` (the default), it also builds the sibling Ghostty
-checkout with `zig build -Dapp-runtime=none
+`CMUX_LINUX_RENDERER=ghostty` (the default), it also builds the pinned Ghostty
+submodule with `zig build -Dapp-runtime=none
 -Doptimize=ReleaseSafe` into `~/.local/share/cmux/ghostty` so the launcher can
 set `CMUX_GHOSTTY_LIBRARY` and `CMUX_GHOSTTY_ROOT` without depending on the
 current working directory. When `CMUX_LINUX_RENDERER=ghostty-vt`, it builds
@@ -1052,7 +1049,7 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
 
 The Linux GTK shell and local libghostty renderer path are available in this
 checkout. The full Ghostty GL renderer is enabled through the GTK `GLArea` host
-when the sibling Ghostty checkout reports the expected Linux embedding ABI,
+when the pinned Ghostty submodule reports the expected Linux embedding ABI,
 runtime resources, and C layout contract. GTK4 is available as an optional shell
 feature and probed at runtime through diagnostics. The local Ghostty checkout
 now exposes a Linux embedding ABI slice with a `GHOSTTY_PLATFORM_LINUX` tag,

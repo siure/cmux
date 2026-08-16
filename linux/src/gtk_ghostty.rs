@@ -130,9 +130,60 @@ const GHOSTTY_SCROLL_MOD_PRECISION: c_int = 1;
 const GHOSTTY_STYLUS_NORMAL_PRESSURE: f64 = 0.5;
 const GHOSTTY_STYLUS_DEEP_PRESSURE_THRESHOLD: f64 = 0.75;
 static NEXT_GHOSTTY_CALLBACK_TOKEN: AtomicU64 = AtomicU64::new(1);
+static GHOSTTY_SERVICE_IDLE_PENDING: AtomicBool = AtomicBool::new(false);
+static GHOSTTY_SERVICE_SURFACE_IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+#[cfg(test)]
+static GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 thread_local! {
     static SHARED_GHOSTTY_APP: RefCell<Weak<GtkGhosttyApp>> = RefCell::new(Weak::new());
+    static GHOSTTY_SERVICE_HOSTS: RefCell<HashMap<u64, GhosttyServiceHost>> = RefCell::new(HashMap::new());
+    static GHOSTTY_SERVICE_TIMER_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_ghostty_service_dispatched_surface_ids_for_test() -> Vec<String> {
+    let mut surface_ids = GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *surface_ids)
+}
+
+pub(crate) fn request_ghostty_service(surface_id: &str) {
+    pending_ghostty_service_surface_ids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(surface_id.to_string());
+    if GHOSTTY_SERVICE_IDLE_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    glib::idle_add_once(|| {
+        GHOSTTY_SERVICE_IDLE_PENDING.store(false, Ordering::Release);
+        let surface_ids = {
+            let mut pending = pending_ghostty_service_surface_ids()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *pending)
+        };
+        #[cfg(test)]
+        GHOSTTY_SERVICE_DISPATCHED_SURFACE_IDS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(surface_ids.iter().cloned());
+        service_ghostty_surface_ids(&surface_ids);
+    });
+}
+
+fn pending_ghostty_service_surface_ids() -> &'static Mutex<HashSet<String>> {
+    GHOSTTY_SERVICE_SURFACE_IDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct GhosttyServiceHost {
+    host: Weak<RefCell<GtkGhosttyHost>>,
+    status: glib::WeakRef<gtk::Label>,
+    surface_id: Option<String>,
 }
 
 #[link(name = "dl")]
@@ -373,6 +424,67 @@ fn ghostty_status_visible(status: &str) -> bool {
     status != GHOSTTY_RENDERER_ACTIVE_STATUS
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GhosttyAreaLifecycleEvent {
+    Realize,
+    Map,
+    Resize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GhosttyAreaLifecycleAction {
+    Wait,
+    Realize,
+    Resize { width: i32, height: i32 },
+}
+
+fn ghostty_area_lifecycle_action(
+    event: GhosttyAreaLifecycleEvent,
+    mapped: bool,
+    has_host_area: bool,
+    width: i32,
+    height: i32,
+) -> GhosttyAreaLifecycleAction {
+    if width <= 1 || height <= 1 {
+        return GhosttyAreaLifecycleAction::Wait;
+    }
+
+    match event {
+        GhosttyAreaLifecycleEvent::Realize if !has_host_area => GhosttyAreaLifecycleAction::Realize,
+        GhosttyAreaLifecycleEvent::Resize if mapped && !has_host_area => {
+            GhosttyAreaLifecycleAction::Realize
+        }
+        GhosttyAreaLifecycleEvent::Resize if mapped => {
+            GhosttyAreaLifecycleAction::Resize { width, height }
+        }
+        GhosttyAreaLifecycleEvent::Map if mapped && !has_host_area => {
+            GhosttyAreaLifecycleAction::Realize
+        }
+        GhosttyAreaLifecycleEvent::Map | GhosttyAreaLifecycleEvent::Realize => {
+            GhosttyAreaLifecycleAction::Wait
+        }
+        GhosttyAreaLifecycleEvent::Resize => GhosttyAreaLifecycleAction::Wait,
+    }
+}
+
+fn update_ghostty_area_lifecycle(
+    area: &gtk::GLArea,
+    status: &gtk::Label,
+    host: &Rc<RefCell<GtkGhosttyHost>>,
+    event: GhosttyAreaLifecycleEvent,
+) {
+    let width = area.allocated_width();
+    let height = area.allocated_height();
+    let has_host_area = host.borrow().callbacks.area.is_some();
+    match ghostty_area_lifecycle_action(event, area.is_mapped(), has_host_area, width, height) {
+        GhosttyAreaLifecycleAction::Wait => {}
+        GhosttyAreaLifecycleAction::Realize => realize_ghostty_area(area, status, host),
+        GhosttyAreaLifecycleAction::Resize { width, height } => {
+            host.borrow_mut().resize(area, width, height, status);
+        }
+    }
+}
+
 pub fn ghostty_surface_widget(options: GhosttySurfaceOptions) -> GhosttySurfaceWidget {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
     root.set_hexpand(true);
@@ -501,10 +613,21 @@ fn connect_ghostty_area(
     let realize_host = Rc::clone(&host);
     let realize_status = status.clone();
     area.connect_realize(move |area| {
-        if gtk_ghostty_allocated_surface_size(area).is_none() {
-            return;
-        }
-        realize_ghostty_area(area, &realize_status, &realize_host);
+        update_ghostty_area_lifecycle(
+            area,
+            &realize_status,
+            &realize_host,
+            GhosttyAreaLifecycleEvent::Realize,
+        );
+    });
+
+    let map_host = Rc::clone(&host);
+    let map_status = status.clone();
+    area.connect_map(move |area| {
+        // GTK can realize a GLArea before layout gives it a usable allocation.
+        // Mapping is the recovery point when both that realization and an
+        // earlier unmapped resize had to defer Ghostty surface creation.
+        update_ghostty_area_lifecycle(area, &map_status, &map_host, GhosttyAreaLifecycleEvent::Map);
     });
 
     let resize_host = Rc::clone(&host);
@@ -525,18 +648,12 @@ fn connect_ghostty_area(
             let Some(area) = area.upgrade() else {
                 return;
             };
-            let width = area.allocated_width();
-            let height = area.allocated_height();
-            if !area.is_mapped() || width <= 1 || height <= 1 {
-                return;
-            }
-            if resize_host.borrow().callbacks.area.is_none() {
-                realize_ghostty_area(&area, &resize_status, &resize_host);
-            } else {
-                resize_host
-                    .borrow_mut()
-                    .resize(&area, width, height, &resize_status);
-            }
+            update_ghostty_area_lifecycle(
+                &area,
+                &resize_status,
+                &resize_host,
+                GhosttyAreaLifecycleEvent::Resize,
+            );
         });
     });
     let scale_host = Rc::clone(&host);
@@ -810,18 +927,93 @@ fn connect_ghostty_area(
         unrealize_host.borrow_mut().unrealize(area);
     });
 
-    let tick_host = Rc::clone(&host);
-    let tick_status = status.clone();
-    let weak_area = area.downgrade();
-    glib::timeout_add_local(Duration::from_millis(16), move || {
-        if weak_area.upgrade().is_none() {
-            return glib::ControlFlow::Break;
-        }
-        // Ghostty's redraw callback queues GLArea paints on this thread. This
-        // timer only services the app loop; painting here leaks idle buffers.
-        tick_host.borrow_mut().tick(&tick_status);
-        glib::ControlFlow::Continue
+    register_ghostty_service_host(&host, &status);
+}
+
+fn register_ghostty_service_host(host: &Rc<RefCell<GtkGhosttyHost>>, status: &gtk::Label) {
+    let (token, surface_id) = {
+        let host = host.borrow();
+        (
+            host.callbacks.token,
+            host.callbacks.close_surface_id.clone(),
+        )
+    };
+    GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+        hosts.borrow_mut().insert(
+            token,
+            GhosttyServiceHost {
+                host: Rc::downgrade(host),
+                status: status.downgrade(),
+                surface_id: surface_id.clone(),
+            },
+        );
     });
+    GHOSTTY_SERVICE_TIMER_ACTIVE.with(|active| {
+        if active.replace(true) {
+            return;
+        }
+        glib::timeout_add_local(GHOSTTY_TEXT_SYNC_INTERVAL, move || {
+            service_ghostty_hosts();
+            let has_hosts = GHOSTTY_SERVICE_HOSTS.with(|hosts| !hosts.borrow().is_empty());
+            if has_hosts {
+                glib::ControlFlow::Continue
+            } else {
+                GHOSTTY_SERVICE_TIMER_ACTIVE.with(|active| active.set(false));
+                glib::ControlFlow::Break
+            }
+        });
+    });
+    if let Some(surface_id) = surface_id.as_deref() {
+        request_ghostty_service(surface_id);
+    }
+}
+
+fn service_ghostty_hosts() {
+    service_ghostty_hosts_matching(None);
+}
+
+fn service_ghostty_surface_ids(surface_ids: &HashSet<String>) {
+    if surface_ids.is_empty() {
+        return;
+    }
+    service_ghostty_hosts_matching(Some(surface_ids));
+}
+
+fn ghostty_service_host_is_selected(
+    surface_id: Option<&str>,
+    requested_surface_ids: Option<&HashSet<String>>,
+) -> bool {
+    requested_surface_ids
+        .is_none_or(|requested| surface_id.is_some_and(|surface_id| requested.contains(surface_id)))
+}
+
+fn service_ghostty_hosts_matching(surface_ids: Option<&HashSet<String>>) {
+    let hosts = GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+        hosts
+            .borrow()
+            .iter()
+            .filter(|(_, entry)| {
+                ghostty_service_host_is_selected(entry.surface_id.as_deref(), surface_ids)
+            })
+            .map(|(token, entry)| (*token, entry.host.clone(), entry.status.clone()))
+            .collect::<Vec<_>>()
+    });
+    let mut expired = Vec::new();
+    for (token, host, status) in hosts {
+        let (Some(host), Some(status)) = (host.upgrade(), status.upgrade()) else {
+            expired.push(token);
+            continue;
+        };
+        host.borrow_mut().tick(&status);
+    }
+    if !expired.is_empty() {
+        GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+            let mut hosts = hosts.borrow_mut();
+            for token in expired {
+                hosts.remove(&token);
+            }
+        });
+    }
 }
 
 fn realize_ghostty_area(
@@ -829,8 +1021,14 @@ fn realize_ghostty_area(
     status: &gtk::Label,
     host: &Rc<RefCell<GtkGhosttyHost>>,
 ) {
-    match host.borrow_mut().realize(area) {
-        Ok(()) => status.set_text(GHOSTTY_RENDERER_ACTIVE_STATUS),
+    let realize_result = host.borrow_mut().realize(area);
+    match realize_result {
+        Ok(()) => {
+            status.set_text(GHOSTTY_RENDERER_ACTIVE_STATUS);
+            if let Some(surface_id) = host.borrow().callbacks.close_surface_id.as_deref() {
+                request_ghostty_service(surface_id);
+            }
+        }
         Err(err) => {
             eprintln!("cmux: Ghostty surface realization failed: {err:#}");
             status.set_text(&format!("Ghostty renderer failed: {err}"));
@@ -910,6 +1108,7 @@ impl GtkGhosttyApp {
             app_tick: None,
             surfaces: Mutex::new(HashMap::new()),
             focused_surface: AtomicUsize::new(0),
+            tick_scheduled: AtomicBool::new(false),
         });
         register_ghostty_app_userdata(callbacks.as_ref());
         let userdata = callbacks.as_mut() as *mut GtkGhosttyAppCallbacks as *mut c_void;
@@ -1041,6 +1240,7 @@ struct GtkGhosttyAppCallbacks {
     app_tick: Option<GhosttyAppTick>,
     surfaces: Mutex<HashMap<usize, (usize, u64)>>,
     focused_surface: AtomicUsize,
+    tick_scheduled: AtomicBool,
 }
 
 impl Drop for GtkGhosttyAppCallbacks {
@@ -1932,7 +2132,9 @@ impl GtkGhosttyHost {
             return;
         }
         let force_sync = self.selection_sync_requested.swap(false, Ordering::AcqRel);
-        self.sync_app_surface_snapshot(force_sync);
+        if force_sync || !self.options.occluded {
+            self.sync_app_surface_snapshot(force_sync);
+        }
     }
 
     fn drain_app_input(&self) -> bool {
@@ -3063,17 +3265,21 @@ unsafe extern "C" fn gtk_ghostty_wakeup(userdata: *mut c_void) {
     let Some((callbacks, token)) = ghostty_app_callback_ref_from_userdata(userdata) else {
         return;
     };
-    if glib::MainContext::default().is_owner() {
-        gtk_ghostty_wakeup_on_main(callbacks, token);
-    } else {
-        glib::idle_add_once(move || {
-            gtk_ghostty_wakeup_on_main(callbacks, token);
-        });
+    let should_schedule = with_ghostty_app_callbacks(callbacks, token, |callbacks| {
+        !callbacks.tick_scheduled.swap(true, Ordering::AcqRel)
+    })
+    .unwrap_or(false);
+    if !should_schedule {
+        return;
     }
+    glib::idle_add_once(move || {
+        gtk_ghostty_wakeup_on_main(callbacks, token);
+    });
 }
 
 fn gtk_ghostty_wakeup_on_main(callbacks: usize, token: u64) {
     let _ = with_ghostty_app_callbacks(callbacks, token, |callbacks| {
+        callbacks.tick_scheduled.store(false, Ordering::Release);
         let (Some(app), Some(tick)) = (callbacks.app, callbacks.app_tick) else {
             return;
         };
@@ -3714,12 +3920,7 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
     }
 
     if matches!(event, GtkGhosttyActionEvent::SelectionChanged { .. }) {
-        target
-            .selection_sync_requested
-            .store(true, Ordering::Release);
-        if let Some(area) = target.area.as_ref() {
-            area.queue_render();
-        }
+        gtk_ghostty_selection_changed(&target);
         return;
     }
 
@@ -3759,18 +3960,29 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
     let Ok(mut app) = app_state.lock() else {
         return;
     };
+    let mut presented_model_changed = false;
     match event {
         GtkGhosttyActionEvent::SetTitle { title, .. } => {
-            let _ = app.apply_embedded_terminal_title(&surface_id, &title);
+            presented_model_changed |= app
+                .apply_embedded_terminal_title(&surface_id, &title)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::Pwd { pwd, .. } => {
-            let _ = app.apply_embedded_terminal_pwd(&surface_id, &pwd);
+            presented_model_changed |= app
+                .apply_embedded_terminal_pwd(&surface_id, &pwd)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::DesktopNotification { title, body, .. } => {
-            let _ = app.create_embedded_terminal_notification(&surface_id, &title, &body);
+            presented_model_changed |= app
+                .create_embedded_terminal_notification(&surface_id, &title, &body)
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::ToggleCommandPalette { .. } => {
-            let _ = app.toggle_embedded_terminal_command_palette(&surface_id);
+            presented_model_changed |= app
+                .toggle_embedded_terminal_command_palette(&surface_id)
+                .is_ok();
         }
         GtkGhosttyActionEvent::OpenConfig { .. } => {
             let config_path = gtk_ghostty_config_open_path(&target);
@@ -3781,20 +3993,28 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
             };
         }
         GtkGhosttyActionEvent::ReloadConfig { soft, .. } => {
-            let _ = app.reload_embedded_terminal_config(&surface_id, soft);
+            presented_model_changed |= app
+                .reload_embedded_terminal_config(&surface_id, soft)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::Readonly { readonly, .. } => {
-            let _ = app.set_embedded_terminal_readonly(&surface_id, readonly);
+            presented_model_changed |= app
+                .set_embedded_terminal_readonly(&surface_id, readonly)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::CopyTitleToClipboard { .. } => {}
         GtkGhosttyActionEvent::SelectionChanged { .. } => {}
         GtkGhosttyActionEvent::PresentTerminal { .. } => {
-            let _ = app.perform_embedded_terminal_layout_action(
-                &surface_id,
-                "present_terminal",
-                None,
-                None,
-            );
+            presented_model_changed |= app
+                .perform_embedded_terminal_layout_action(
+                    &surface_id,
+                    "present_terminal",
+                    None,
+                    None,
+                )
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::SizeLimit {
             min_width,
@@ -3803,34 +4023,50 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
             max_height,
             ..
         } => {
-            let _ = app.update_embedded_terminal_size_limit(
-                &surface_id,
-                min_width,
-                min_height,
-                max_width,
-                max_height,
-            );
+            presented_model_changed |= app
+                .update_embedded_terminal_size_limit(
+                    &surface_id,
+                    min_width,
+                    min_height,
+                    max_width,
+                    max_height,
+                )
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::InitialSize { width, height, .. } => {
-            let _ = app.update_embedded_terminal_initial_size(&surface_id, width, height);
+            presented_model_changed |= app
+                .update_embedded_terminal_initial_size(&surface_id, width, height)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::CellSize { width, height, .. } => {
-            let _ = app.update_embedded_terminal_cell_size(&surface_id, width, height);
+            presented_model_changed |= app
+                .update_embedded_terminal_cell_size(&surface_id, width, height)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::RendererHealth { status, .. } => {
-            let _ = app.update_embedded_terminal_renderer_health(&surface_id, status);
+            presented_model_changed |= app
+                .update_embedded_terminal_renderer_health(&surface_id, status)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::PromptTitle { target, .. } => {
-            let _ = app.record_embedded_terminal_prompt_title(&surface_id, target);
+            presented_model_changed |= app
+                .record_embedded_terminal_prompt_title(&surface_id, target)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::QuitTimer { mode, .. } => {
-            let _ = app.update_embedded_terminal_quit_timer(&surface_id, mode);
+            presented_model_changed |= app
+                .update_embedded_terminal_quit_timer(&surface_id, mode)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::FloatWindow { mode, .. } => {
-            let _ = app.update_embedded_terminal_float_window(&surface_id, mode);
+            presented_model_changed |= app
+                .update_embedded_terminal_float_window(&surface_id, mode)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::SecureInput { mode, .. } => {
-            let _ = app.update_embedded_terminal_secure_input(&surface_id, mode);
+            presented_model_changed |= app
+                .update_embedded_terminal_secure_input(&surface_id, mode)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::ColorChange {
             kind,
@@ -3840,36 +4076,45 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
             b,
             ..
         } => {
-            let _ = app.record_embedded_terminal_color_change(
-                &surface_id,
-                kind,
-                palette_index,
-                r,
-                g,
-                b,
-            );
+            presented_model_changed |= app
+                .record_embedded_terminal_color_change(&surface_id, kind, palette_index, r, g, b)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::ConfigChange { .. } => {
-            let _ = app.record_embedded_terminal_config_change(&surface_id);
+            presented_model_changed |= app
+                .record_embedded_terminal_config_change(&surface_id)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::WindowAction { action, value, .. } => {
             let needs_confirm = gtk_ghostty_target_needs_confirm_quit(&target);
             if let Some(request_action) =
                 gtk_ghostty_window_close_request_action(action, needs_confirm)
             {
-                let _ = app.record_embedded_terminal_window_action(&surface_id, action, value);
-                let _ = app.record_embedded_terminal_ui_action(
-                    &surface_id,
-                    request_action,
-                    Some("needs_confirm"),
-                    None,
-                );
+                presented_model_changed |= app
+                    .record_embedded_terminal_window_action(&surface_id, action, value)
+                    .unwrap_or(false);
+                presented_model_changed |= app
+                    .record_embedded_terminal_ui_action(
+                        &surface_id,
+                        request_action,
+                        Some("needs_confirm"),
+                        None,
+                    )
+                    .unwrap_or(false);
             } else {
-                let _ = app.perform_embedded_terminal_window_action(&surface_id, action, value);
+                presented_model_changed |= app
+                    .perform_embedded_terminal_window_action(&surface_id, action, value)
+                    .ok()
+                    .flatten()
+                    .is_some();
             }
         }
         GtkGhosttyActionEvent::TabAction { action, amount, .. } => {
-            let _ = app.perform_embedded_terminal_tab_action(&surface_id, action, amount);
+            presented_model_changed |= app
+                .perform_embedded_terminal_tab_action(&surface_id, action, amount)
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::Render { .. }
         | GtkGhosttyActionEvent::Quit { .. }
@@ -3881,149 +4126,224 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
             ..
         } => {
             if action == "toggle_tab_overview" {
-                let _ = app.toggle_embedded_terminal_tab_overview(&surface_id);
+                presented_model_changed |= app
+                    .toggle_embedded_terminal_tab_overview(&surface_id)
+                    .is_ok();
             }
-            let _ = app.record_embedded_terminal_ui_action(&surface_id, action, value, amount);
+            presented_model_changed |= app
+                .record_embedded_terminal_ui_action(&surface_id, action, value, amount)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::KeySequence {
             active, trigger, ..
         } => {
-            let _ = app.update_embedded_terminal_key_sequence(&surface_id, active, &trigger);
+            presented_model_changed |= app
+                .update_embedded_terminal_key_sequence(&surface_id, active, &trigger)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::KeyTable { mode, name, .. } => {
-            let _ = app.update_embedded_terminal_key_table(&surface_id, mode, name.as_deref());
+            presented_model_changed |= app
+                .update_embedded_terminal_key_table(&surface_id, mode, name.as_deref())
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::ShowOnScreenKeyboard { .. } => {
-            let _ = app.request_embedded_terminal_on_screen_keyboard(&surface_id);
+            presented_model_changed |= app
+                .request_embedded_terminal_on_screen_keyboard(&surface_id)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::NewTab { .. } => {
             let inherited_options =
                 gtk_ghostty_inherited_options(&target, GHOSTTY_SURFACE_CONTEXT_TAB);
-            let _ = app.perform_embedded_terminal_layout_action_with_inherited_options(
-                &surface_id,
-                "new_tab",
-                None,
-                None,
-                inherited_options,
-            );
+            presented_model_changed |= app
+                .perform_embedded_terminal_layout_action_with_inherited_options(
+                    &surface_id,
+                    "new_tab",
+                    None,
+                    None,
+                    inherited_options,
+                )
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::NewSplit { direction, .. } => {
             let inherited_options =
                 gtk_ghostty_inherited_options(&target, GHOSTTY_SURFACE_CONTEXT_SPLIT);
-            let _ = app.perform_embedded_terminal_layout_action_with_inherited_options(
-                &surface_id,
-                "new_split",
-                Some(direction),
-                None,
-                inherited_options,
-            );
+            presented_model_changed |= app
+                .perform_embedded_terminal_layout_action_with_inherited_options(
+                    &surface_id,
+                    "new_split",
+                    Some(direction),
+                    None,
+                    inherited_options,
+                )
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::CloseTab { mode, .. } => {
             let needs_confirm = gtk_ghostty_target_needs_confirm_quit(&target);
             if let Some(request_action) =
                 gtk_ghostty_current_tab_close_request_action(mode, needs_confirm)
             {
-                let _ = app.record_embedded_terminal_layout_action(
-                    &surface_id,
-                    "close_tab",
-                    Some(mode),
-                    None,
-                );
-                let _ = app.record_embedded_terminal_ui_action(
-                    &surface_id,
-                    request_action,
-                    Some("needs_confirm"),
-                    None,
-                );
+                presented_model_changed |= app
+                    .record_embedded_terminal_layout_action(
+                        &surface_id,
+                        "close_tab",
+                        Some(mode),
+                        None,
+                    )
+                    .unwrap_or(false);
+                presented_model_changed |= app
+                    .record_embedded_terminal_ui_action(
+                        &surface_id,
+                        request_action,
+                        Some("needs_confirm"),
+                        None,
+                    )
+                    .unwrap_or(false);
             } else {
-                let _ = app.perform_embedded_terminal_layout_action(
-                    &surface_id,
-                    "close_tab",
-                    Some(mode),
-                    None,
-                );
+                presented_model_changed |= app
+                    .perform_embedded_terminal_layout_action(
+                        &surface_id,
+                        "close_tab",
+                        Some(mode),
+                        None,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some();
             }
         }
         GtkGhosttyActionEvent::GotoSplit { direction, .. } => {
-            let _ = app.perform_embedded_terminal_layout_action(
-                &surface_id,
-                "goto_split",
-                Some(direction),
-                None,
-            );
+            presented_model_changed |= app
+                .perform_embedded_terminal_layout_action(
+                    &surface_id,
+                    "goto_split",
+                    Some(direction),
+                    None,
+                )
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::ResizeSplit {
             direction, amount, ..
         } => {
-            let _ = app.perform_embedded_terminal_layout_action(
-                &surface_id,
-                "resize_split",
-                Some(direction),
-                Some(amount),
-            );
+            presented_model_changed |= app
+                .perform_embedded_terminal_layout_action(
+                    &surface_id,
+                    "resize_split",
+                    Some(direction),
+                    Some(amount),
+                )
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::EqualizeSplits { .. } => {
-            let _ = app.perform_embedded_terminal_layout_action(
-                &surface_id,
-                "equalize_splits",
-                None,
-                None,
-            );
+            presented_model_changed |= app
+                .perform_embedded_terminal_layout_action(&surface_id, "equalize_splits", None, None)
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::ToggleSplitZoom { .. } => {
-            let _ = app.perform_embedded_terminal_layout_action(
-                &surface_id,
-                "toggle_split_zoom",
-                None,
-                None,
-            );
+            presented_model_changed |= app
+                .perform_embedded_terminal_layout_action(
+                    &surface_id,
+                    "toggle_split_zoom",
+                    None,
+                    None,
+                )
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::OpenUrl { url, .. } => {
-            let _ = app.open_embedded_terminal_url(&surface_id, &url);
+            presented_model_changed |= app
+                .open_embedded_terminal_url(&surface_id, &url)
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::ProgressReport {
             state, progress, ..
         } => {
-            let _ = app.update_embedded_terminal_progress_report(&surface_id, state, progress);
+            presented_model_changed |= app
+                .update_embedded_terminal_progress_report(&surface_id, state, progress)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::CommandFinished {
             exit_code,
             duration_ns,
             ..
         } => {
-            let _ =
-                app.record_embedded_terminal_command_finished(&surface_id, exit_code, duration_ns);
+            presented_model_changed |= app
+                .record_embedded_terminal_command_finished(&surface_id, exit_code, duration_ns)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::StartSearch { needle, .. } => {
-            let _ = app.start_embedded_terminal_search(&surface_id, &needle);
+            presented_model_changed |= app
+                .start_embedded_terminal_search(&surface_id, &needle)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::EndSearch { .. } => {
-            let _ = app.end_embedded_terminal_search(&surface_id);
+            presented_model_changed |= app
+                .end_embedded_terminal_search(&surface_id)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::SearchTotal { total, .. } => {
-            let _ = app.update_embedded_terminal_search_total(&surface_id, total);
+            presented_model_changed |= app
+                .update_embedded_terminal_search_total(&surface_id, total)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::SearchSelected { selected, .. } => {
-            let _ = app.update_embedded_terminal_search_selected(&surface_id, selected);
+            presented_model_changed |= app
+                .update_embedded_terminal_search_selected(&surface_id, selected)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::Scrollbar {
             total, offset, len, ..
         } => {
-            let _ = app.update_embedded_terminal_scrollbar(&surface_id, total, offset, len);
+            presented_model_changed |= app
+                .update_embedded_terminal_scrollbar(&surface_id, total, offset, len)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::ShowChildExited {
             exit_code,
             runtime_ms,
             ..
         } => {
-            let _ = app.record_embedded_terminal_child_exited(&surface_id, exit_code, runtime_ms);
+            presented_model_changed |= app
+                .record_embedded_terminal_child_exited(&surface_id, exit_code, runtime_ms)
+                .ok()
+                .flatten()
+                .is_some();
         }
         GtkGhosttyActionEvent::RingBell { .. } => {
-            let _ = app.ring_embedded_terminal_bell(&surface_id);
+            presented_model_changed |= app
+                .ring_embedded_terminal_bell(&surface_id)
+                .unwrap_or(false);
         }
         GtkGhosttyActionEvent::MouseShape { .. }
         | GtkGhosttyActionEvent::MouseOverLink { .. }
         | GtkGhosttyActionEvent::MouseVisibility { .. } => {}
+    }
+    if presented_model_changed {
+        app.render_activity().record_model_mutation();
+    }
+}
+
+fn gtk_ghostty_selection_changed(target: &GtkGhosttyActionTarget) {
+    target
+        .selection_sync_requested
+        .store(true, Ordering::Release);
+    if let Some(surface_id) = target.surface_id.as_deref() {
+        request_ghostty_service(surface_id);
+    }
+    if let Some(area) = target.area.as_ref() {
+        area.queue_render();
     }
 }
 
@@ -6258,6 +6578,135 @@ mod tests {
     static TEST_CLIPBOARD_COMPLETE_REQUEST: AtomicUsize = AtomicUsize::new(0);
     static TEST_CLIPBOARD_COMPLETE_TEXT_LEN: AtomicUsize = AtomicUsize::new(0);
     static TEST_CLIPBOARD_COMPLETE_CONFIRMED: AtomicBool = AtomicBool::new(false);
+    static TEST_SERVICE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ghostty_service_targeting_selects_only_requested_surface() {
+        let requested = HashSet::from(["surface-a".to_string()]);
+        assert!(ghostty_service_host_is_selected(
+            Some("surface-a"),
+            Some(&requested)
+        ));
+        assert!(!ghostty_service_host_is_selected(
+            Some("surface-b"),
+            Some(&requested)
+        ));
+        assert!(!ghostty_service_host_is_selected(None, Some(&requested)));
+        assert!(ghostty_service_host_is_selected(Some("surface-b"), None));
+        assert!(ghostty_service_host_is_selected(None, None));
+    }
+
+    #[test]
+    fn ghostty_selection_change_requests_targeted_host_service() {
+        let _guard = TEST_SERVICE_LOCK.lock().expect("service test lock");
+        pending_ghostty_service_surface_ids()
+            .lock()
+            .expect("pending service ids")
+            .clear();
+        take_ghostty_service_dispatched_surface_ids_for_test();
+        let mut target = test_reload_target(None, None);
+        target.surface_id = Some("surface-selection".to_string());
+
+        gtk_ghostty_selection_changed(&target);
+
+        assert!(target.selection_sync_requested.load(Ordering::Acquire));
+        assert!(pending_ghostty_service_surface_ids()
+            .lock()
+            .expect("pending service ids")
+            .contains("surface-selection"));
+        let context = glib::MainContext::default();
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(take_ghostty_service_dispatched_surface_ids_for_test()
+            .contains(&"surface-selection".to_string()));
+    }
+
+    #[test]
+    fn gtk_ghostty_presented_model_actions_record_only_real_changes() {
+        let surface = 0xbeefusize as GhosttySurface;
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths_and_terminal_startup(
+                None,
+                None,
+                crate::app::TerminalStartupMode::RendererOwned,
+            )
+            .expect("app state"),
+        ));
+        let (surface_id, activity) = {
+            let mut app = app_state.lock().expect("app lock");
+            (
+                app.handle("surface.current", &json!({}))
+                    .expect("current surface")["surface_id"]
+                    .as_str()
+                    .expect("surface id")
+                    .to_string(),
+                app.render_activity(),
+            )
+        };
+        let mut callbacks = Box::new(test_ghostty_callbacks(Some(surface)));
+        callbacks.close_surface_id = Some(surface_id);
+        callbacks.app_state = Some(Arc::clone(&app_state));
+        let ptr = ghostty_callback_ptr(callbacks.as_ref());
+        let token = callbacks.token;
+        register_ghostty_callbacks(callbacks.as_ref());
+
+        let before_title = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::SetTitle {
+                surface: surface as usize,
+                title: "runtime title".to_string(),
+            },
+        );
+        assert!(activity.model_mutation_generation() > before_title);
+
+        let after_title = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::SetTitle {
+                surface: surface as usize,
+                title: "runtime title".to_string(),
+            },
+        );
+        assert_eq!(activity.model_mutation_generation(), after_title);
+
+        let before_pwd = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::Pwd {
+                surface: surface as usize,
+                pwd: "/tmp/cmux-ghostty".to_string(),
+            },
+        );
+        assert!(activity.model_mutation_generation() > before_pwd);
+
+        let after_pwd = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::Pwd {
+                surface: surface as usize,
+                pwd: "/tmp/cmux-ghostty".to_string(),
+            },
+        );
+        assert_eq!(activity.model_mutation_generation(), after_pwd);
+
+        let before_palette = activity.model_mutation_generation();
+        gtk_ghostty_action_on_main(
+            ptr,
+            token,
+            GtkGhosttyActionEvent::ToggleCommandPalette {
+                surface: surface as usize,
+            },
+        );
+        assert!(activity.model_mutation_generation() > before_palette);
+
+        unregister_ghostty_callbacks(callbacks.as_ref());
+    }
 
     unsafe extern "C" fn test_complete_clipboard_request(
         surface: GhosttySurface,
@@ -6316,6 +6765,7 @@ mod tests {
             app_tick: None,
             surfaces: Mutex::new(HashMap::new()),
             focused_surface: AtomicUsize::new(0),
+            tick_scheduled: AtomicBool::new(false),
         }
     }
 
@@ -8988,6 +9438,28 @@ mod tests {
         assert!(!ghostty_status_visible(GHOSTTY_RENDERER_ACTIVE_STATUS));
         assert!(ghostty_status_visible("Initializing Ghostty renderer"));
         assert!(ghostty_status_visible("Ghostty renderer draw failed"));
+    }
+
+    #[test]
+    fn gtk_ghostty_map_recovers_realize_before_allocation_race() {
+        assert_eq!(
+            ghostty_area_lifecycle_action(GhosttyAreaLifecycleEvent::Realize, false, false, 1, 1),
+            GhosttyAreaLifecycleAction::Wait
+        );
+        assert_eq!(
+            ghostty_area_lifecycle_action(
+                GhosttyAreaLifecycleEvent::Resize,
+                false,
+                false,
+                1200,
+                800,
+            ),
+            GhosttyAreaLifecycleAction::Wait
+        );
+        assert_eq!(
+            ghostty_area_lifecycle_action(GhosttyAreaLifecycleEvent::Map, true, false, 1200, 800),
+            GhosttyAreaLifecycleAction::Realize
+        );
     }
 
     #[test]

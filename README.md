@@ -174,10 +174,12 @@ to `core`. `core` is display-free, `ghostty-vt` uses the portable Ghostty VT
 snapshot library when available, and `gtk`/`ghostty` require building with
 `--features gtk`.
 
-For the full Ghostty renderer path, first build the local Ghostty checkout:
+For the full Ghostty renderer path, initialize and build the pinned Ghostty
+submodule:
 
 ```bash
-(cd ../ghostty && zig build -Dapp-runtime=none)
+git submodule update --init ghostty
+(cd ghostty && zig build -Dapp-runtime=none)
 cargo run --manifest-path linux/Cargo.toml --features gtk -- app --renderer ghostty
 ```
 

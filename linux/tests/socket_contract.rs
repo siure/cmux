@@ -872,6 +872,11 @@ fn start_server_with_env(envs: &[(&str, &str)]) -> Server {
         .arg(&socket)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Keep PTY-backed socket contracts independent of the developer's login shell.
+    // Login-shell selection itself is covered by isolated terminal unit tests.
+    if !envs.iter().any(|(key, _)| *key == "CMUX_SHELL") {
+        command.env("CMUX_SHELL", "/bin/sh");
+    }
     if !envs.iter().any(|(key, _)| *key == "XDG_STATE_HOME") {
         command.env("XDG_STATE_HOME", tmp.path().join("state"));
     }
@@ -1000,6 +1005,38 @@ fn rpc(socket: &str, method: &str, params: Value) -> Value {
     let response = rpc_response(socket, method, params);
     assert_eq!(response["ok"], true, "response was {response}");
     response["result"].clone()
+}
+
+fn simulate_sidebar_shortcut(socket: &str, combo: &str) -> Value {
+    rpc(
+        socket,
+        "debug.shortcut.simulate",
+        json!({
+            "combo": combo,
+            "context": {
+                "terminalFocus": false,
+                "browserFocus": false,
+                "sidebarFocus": true,
+                "markdownFocus": false
+            }
+        }),
+    )
+}
+
+fn simulate_non_terminal_shortcut(socket: &str, combo: &str) -> Value {
+    rpc(
+        socket,
+        "debug.shortcut.simulate",
+        json!({
+            "combo": combo,
+            "context": {
+                "terminalFocus": false,
+                "browserFocus": false,
+                "sidebarFocus": false,
+                "markdownFocus": false
+            }
+        }),
+    )
 }
 
 fn free_tcp_port() -> u16 {
@@ -11295,11 +11332,7 @@ fn app_workspace_settings_drive_shortcut_placement_and_cwd_inheritance() {
         json!({"key": "newWorkspacePlacement", "value": "top"}),
     );
     assert_eq!(top_settings["newWorkspacePlacement"], "top");
-    let top = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+n"}),
-    );
+    let top = simulate_sidebar_shortcut(&server.socket, "ctrl+n");
     let top_id = top["workspace_id"].as_str().unwrap().to_string();
     assert_eq!(top["cwd"], "/tmp/cmux-source");
     assert_eq!(top["inherited_working_directory"], true);
@@ -11353,11 +11386,7 @@ fn app_workspace_settings_drive_shortcut_placement_and_cwd_inheritance() {
         "workspace.select",
         json!({"workspace_id": source}),
     );
-    let end = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+n"}),
-    );
+    let end = simulate_sidebar_shortcut(&server.socket, "ctrl+n");
     let end_id = end["workspace_id"].as_str().unwrap().to_string();
     assert!(end["cwd"].is_null());
     assert_eq!(end["inherited_working_directory"], false);
@@ -11377,11 +11406,7 @@ fn app_workspace_settings_drive_shortcut_placement_and_cwd_inheritance() {
         "workspace.select",
         json!({"workspace_id": guard}),
     );
-    let adjacent = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+n"}),
-    );
+    let adjacent = simulate_sidebar_shortcut(&server.socket, "ctrl+n");
     let adjacent_id = adjacent["workspace_id"].as_str().unwrap().to_string();
     let adjacent_rows = rpc(&server.socket, "workspace.list", json!({}));
     let adjacent_order = adjacent_rows["workspaces"]
@@ -11754,11 +11779,7 @@ fn close_confirmation_requests_round_trip_through_renderer_and_reply() {
         .iter()
         .any(|surface| surface["surface_id"] == second_surface));
 
-    let quit = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+q"}),
-    );
+    let quit = simulate_sidebar_shortcut(&server.socket, "ctrl+q");
     assert_eq!(quit["blocked"], true);
     let quit_confirmation_id = quit["confirmation"]["id"]
         .as_str()
@@ -11894,11 +11915,7 @@ fn shortcut_cmd_n_inside_workspace_group_creates_focused_member_after_active_wor
         "workspace.select",
         json!({"workspace_id": child_b}),
     );
-    let added = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+n"}),
-    );
+    let added = simulate_sidebar_shortcut(&server.socket, "ctrl+n");
     assert_eq!(added["group_id"], group_id);
     let added_workspace_id = added["workspace_id"].as_str().unwrap().to_string();
 
@@ -14192,11 +14209,7 @@ fn super_shortcut_defaults_are_unhandled_but_explicit_overrides_dispatch_and_res
         json!({"combo": "super+alt+x"}),
     );
     assert_eq!(old_override["handled"], false);
-    rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+t"}),
-    );
+    simulate_sidebar_shortcut(&server.socket, "ctrl+t");
     assert_eq!(
         rpc(&server.socket, "surface.list", json!({}))["surfaces"]
             .as_array()
@@ -14204,6 +14217,155 @@ fn super_shortcut_defaults_are_unhandled_but_explicit_overrides_dispatch_and_res
             .len(),
         initial_surface_count + 2
     );
+}
+
+#[test]
+fn terminal_focus_defers_control_sequences_but_explicit_shortcuts_still_win() {
+    let server = start_server();
+    let terminal_context = json!({
+        "terminalFocus": true,
+        "browserFocus": false,
+        "sidebarFocus": false,
+        "markdownFocus": false,
+        "commandPaletteVisible": false
+    });
+
+    for combo in [
+        "ctrl+b",
+        "ctrl+p",
+        "ctrl+n",
+        "ctrl+t",
+        "ctrl+f",
+        "ctrl+e",
+        "ctrl+r",
+        "ctrl+o",
+        "ctrl+q",
+        "ctrl+[",
+        "ctrl+]",
+        "ctrl+shift+c",
+    ] {
+        let result = rpc(
+            &server.socket,
+            "debug.shortcut.simulate",
+            json!({"combo": combo, "context": terminal_context.clone()}),
+        );
+        assert_eq!(
+            result["handled"], false,
+            "terminal-owned shortcut {combo} was intercepted: {result}"
+        );
+    }
+
+    let claude_help = rpc(&server.socket, "help.shortcuts", json!({}));
+    assert!(
+        claude_help["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["title"] != "Claude Code"),
+        "unbound Claude Code action leaked into shortcut help: {claude_help}"
+    );
+
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "toggle_sidebar", "combo": "ctrl+p"}),
+    );
+    let explicit = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+p", "context": terminal_context.clone()}),
+    );
+    assert_eq!(explicit["visible"], false);
+    assert_eq!(
+        rpc(&server.socket, "debug.command_palette.visible", json!({}))["visible"],
+        false,
+        "the colliding command-palette default beat the explicit override"
+    );
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "toggle_sidebar", "combo": "reset"}),
+    );
+
+    let surface_count = rpc(&server.socket, "surface.list", json!({}))["surfaces"]
+        .as_array()
+        .unwrap()
+        .len();
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "new_terminal", "combo": "ctrl+b c"}),
+    );
+    let prefix = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+b", "context": terminal_context.clone()}),
+    );
+    assert_eq!(prefix["chord_pending"], true);
+    let completed = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "c", "context": terminal_context.clone()}),
+    );
+    assert_eq!(completed["chord_completed"], true);
+    assert_eq!(
+        rpc(&server.socket, "surface.list", json!({}))["surfaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        surface_count + 1
+    );
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "new_terminal", "combo": "reset"}),
+    );
+
+    let copy_mode = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+shift+m", "context": terminal_context.clone()}),
+    );
+    assert_eq!(copy_mode["terminal_shortcut_action"], "toggle_copy_mode");
+    assert_eq!(copy_mode["terminal_copy_mode_active"], true);
+    rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+shift+m", "context": terminal_context.clone()}),
+    );
+
+    let browser_default = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({
+            "combo": "ctrl+p",
+            "context": {
+                "terminalFocus": false,
+                "browserFocus": true,
+                "sidebarFocus": false,
+                "markdownFocus": false,
+                "commandPaletteVisible": false
+            }
+        }),
+    );
+    assert_eq!(browser_default["visible"], true);
+    rpc(&server.socket, "debug.command_palette.toggle", json!({}));
+
+    let sidebar_default = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({
+            "combo": "ctrl+b",
+            "context": {
+                "terminalFocus": false,
+                "browserFocus": false,
+                "sidebarFocus": true,
+                "markdownFocus": false,
+                "commandPaletteVisible": false
+            }
+        }),
+    );
+    assert_eq!(sidebar_default["visible"], true);
 }
 
 #[test]
@@ -14336,11 +14498,7 @@ fn browser_shortcuts_use_stable_actions_and_route_focused_browser_operations() {
     assert_eq!(open_browser["config_id"], "openBrowser");
     assert_eq!(open_browser["default_combo"], "ctrl+shift+l");
 
-    let focused = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+l"}),
-    );
+    let focused = simulate_sidebar_shortcut(&server.socket, "ctrl+l");
     let browser_id = focused["surface_id"].as_str().unwrap().to_string();
     assert_eq!(focused["browser_shortcut_action"], "focus_address_bar");
     assert_eq!(focused["handled"], true);
@@ -15060,21 +15218,19 @@ fn find_shortcuts_route_terminal_search_and_preserve_browser_fallthrough() {
             "missing {command_id} in palette {palette}"
         );
     }
-    rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "escape"}),
-    );
+    rpc(&server.socket, "debug.command_palette.toggle", json!({}));
 
     let terminal_id = rpc(&server.socket, "surface.current", json!({}))["surface_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let find = rpc(
+    let terminal_find = rpc(
         &server.socket,
         "debug.shortcut.simulate",
         json!({"combo": "ctrl+f"}),
     );
+    assert_eq!(terminal_find["handled"], false);
+    let find = simulate_sidebar_shortcut(&server.socket, "ctrl+f");
     assert_eq!(find["handled"], true);
     assert_eq!(find["action"], "find");
     assert_eq!(find["binding_action"], "search:");
@@ -15088,11 +15244,7 @@ fn find_shortcuts_route_terminal_search_and_preserve_browser_fallthrough() {
         .expect("terminal search view");
     assert_eq!(terminal_view["terminal_search"]["active"], true);
 
-    let next = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+g"}),
-    );
+    let next = simulate_sidebar_shortcut(&server.socket, "ctrl+g");
     assert_eq!(next["binding_action"], "navigate_search:next");
     let previous = rpc(
         &server.socket,
@@ -15100,11 +15252,7 @@ fn find_shortcuts_route_terminal_search_and_preserve_browser_fallthrough() {
         json!({"combo": "ctrl+alt+g"}),
     );
     assert_eq!(previous["binding_action"], "navigate_search:previous");
-    let selection = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+e"}),
-    );
+    let selection = simulate_sidebar_shortcut(&server.socket, "ctrl+e");
     assert_eq!(selection["binding_action"], "search_selection");
     let hidden = rpc(
         &server.socket,
@@ -15185,11 +15333,7 @@ fn palette_navigation_fullscreen_and_quit_use_stable_window_actions() {
     assert_eq!(fullscreen_row["config_id"], "toggleFullScreen");
     assert_eq!(fullscreen_row["default_combo"], Value::Null);
 
-    let direct_workspace = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+n"}),
-    );
+    let direct_workspace = simulate_sidebar_shortcut(&server.socket, "ctrl+n");
     assert!(direct_workspace["workspace_id"].is_string());
     rpc(
         &server.socket,
@@ -15295,11 +15439,7 @@ fn palette_navigation_fullscreen_and_quit_use_stable_window_actions() {
     );
     assert_eq!(explicit["fullscreen"], false);
 
-    let quit = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+q"}),
-    );
+    let quit = simulate_sidebar_shortcut(&server.socket, "ctrl+q");
     assert_eq!(quit["handled"], true);
     assert_eq!(quit["quit"], false);
     assert_eq!(quit["blocked"], true);
@@ -18980,13 +19120,13 @@ fn mobile_terminal_replay_uses_renderer_fallback_styles_and_modes() {
         .iter()
         .find(|style| style["id"].as_u64() == Some(style_id))
         .unwrap_or_else(|| panic!("style missing from replay: {replay}"));
-    assert_eq!(style["fg"], json!({"r": 7, "g": 8, "b": 9}));
+    assert_eq!(style["foreground"], "#070809");
     assert_eq!(grid["cursor"]["style"], "bar");
     assert!(grid["modes"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|mode| mode == "bracketed_paste"));
+        .any(|mode| mode["code"] == 2004 && mode["ansi"] == false && mode["on"] == true));
 }
 
 #[test]
@@ -29621,8 +29761,8 @@ fn renderer_snapshot_text_fallback_preserves_ansi_styles() {
         .iter()
         .find(|style| style["id"].as_u64() == Some(style_id))
         .unwrap_or_else(|| panic!("style missing for marker span: {snapshot}"));
-    assert_eq!(style["fg"], json!({"r": 1, "g": 2, "b": 3}));
-    assert_eq!(style["bg"], json!({"r": 4, "g": 5, "b": 6}));
+    assert_eq!(style["foreground"], "#010203");
+    assert_eq!(style["background"], "#040506");
     assert_eq!(style["bold"], true);
     assert_eq!(style["italic"], true);
     assert_eq!(style["underline"], true);
@@ -29678,6 +29818,109 @@ fn renderer_snapshot_text_fallback_restores_primary_after_alternate_screen() {
         !row_text.contains(alternate),
         "alternate-screen text leaked into restored primary grid: {grid}"
     );
+}
+
+#[test]
+fn ghostty_vt_adapter_preserves_active_screen_across_transcript_truncation() {
+    let server = start_server();
+    let fixture = tempfile::tempdir().expect("active-screen fixture");
+    let ready = fixture.path().join("alternate-ready");
+    let ready_text = ready.display().to_string();
+    let command = format!(
+        "printf '\\033[?1049h'; head -c 1100000 /dev/zero | tr '\\000' x; printf '\\nCMUX_ALT_TAIL\\n'; touch '{}'; IFS= read -r _; printf '\\033[?1049lCMUX_PRIMARY_RESTORED\\n'; sleep 1",
+        ready_text.replace('\'', "'\\''")
+    );
+    let created = rpc(
+        &server.socket,
+        "surface.create",
+        json!({
+            "type": "terminal",
+            "title": "truncated alternate screen",
+            "command": command
+        }),
+    );
+    let surface_id = created["surface_id"].as_str().expect("surface id");
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !ready.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        ready.exists(),
+        "alternate-screen fixture did not become ready"
+    );
+    let retained = rpc(
+        &server.socket,
+        "surface.read_text",
+        json!({"surface_id": surface_id, "raw": true}),
+    )["text"]
+        .as_str()
+        .expect("retained transcript")
+        .to_string();
+    assert!(retained.contains("CMUX_ALT_TAIL"));
+    assert!(
+        !retained.contains("\u{1b}[?1049h"),
+        "fixture did not truncate the alternate-screen entry sequence"
+    );
+
+    let alternate = rpc(
+        &server.socket,
+        "renderer.snapshot",
+        json!({"backend": "ghostty-vt"}),
+    );
+    let alternate_view = alternate["surface_views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["surface_id"].as_str() == Some(surface_id))
+        .unwrap_or_else(|| panic!("terminal view missing: {alternate}"));
+    if alternate_view.get("ghostty_vt_error").is_some() {
+        assert!(alternate_view["ghostty_vt_error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("libghostty-vt was not found"));
+        eprintln!("SKIP: libghostty-vt is not available");
+        return;
+    }
+    assert_eq!(
+        alternate_view["render_grid"]["active_screen"], "alternate",
+        "truncated replay lost authoritative alternate-screen state: {alternate_view}"
+    );
+
+    rpc(
+        &server.socket,
+        "surface.send_text",
+        json!({"surface_id": surface_id, "text": "continue\n"}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let restored = loop {
+        let snapshot = rpc(
+            &server.socket,
+            "renderer.snapshot",
+            json!({"backend": "ghostty-vt"}),
+        );
+        let view = snapshot["surface_views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["surface_id"].as_str() == Some(surface_id))
+            .expect("restored terminal view");
+        if view["render_grid"]["active_screen"] == "primary" {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "alternate-screen exit did not restore primary: {view}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let restored_view = restored["surface_views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["surface_id"].as_str() == Some(surface_id))
+        .expect("restored terminal view");
+    assert_eq!(restored_view["render_grid"]["active_screen"], "primary");
 }
 
 #[test]
@@ -29763,20 +30006,15 @@ fn renderer_snapshot_text_fallback_exposes_cursor_shape_and_modes() {
         if row_text.contains(marker) {
             assert_eq!(grid["cursor"]["style"], "bar", "grid was {grid}");
             assert_eq!(grid["cursor"]["blinking"], true, "grid was {grid}");
-            for expected_mode in [
-                "application_cursor_keys",
-                "application_keypad",
-                "bracketed_paste",
-                "focus_events",
-                "mouse_button_tracking",
-                "mouse_sgr",
-            ] {
+            for expected_mode in [1, 66, 2004, 1004, 1000, 1006] {
                 assert!(
                     grid["modes"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|mode| mode == expected_mode),
+                        .any(|mode| mode["code"] == expected_mode
+                            && mode["ansi"] == false
+                            && mode["on"] == true),
                     "missing mode {expected_mode}: {grid}"
                 );
             }
@@ -29870,8 +30108,8 @@ fn shortcut_help_toggle_exposes_keyboard_shortcuts() {
     }));
     assert!(initial["rows"].as_array().unwrap().iter().any(|row| {
         row["title"] == "Toggle Canvas Layout"
-            && row["shortcut_hint"] == "⌃C"
-            && row["shortcut_label"] == "Ctrl+C"
+            && row["shortcut_hint"] == "⇧⌃⌥C"
+            && row["shortcut_label"] == "Shift+Ctrl+Alt+C"
     }));
     assert!(initial["rows"].as_array().unwrap().iter().any(|row| {
         row["title"] == "Canvas: Zoom In"
@@ -29971,11 +30209,7 @@ fn core_shortcuts_cover_workspace_layout_configuration_and_notifications() {
         "sidebar.right",
         json!({"action": "set", "mode": "files"}),
     );
-    let notifications = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+i"}),
-    );
+    let notifications = simulate_sidebar_shortcut(&server.socket, "ctrl+i");
     assert_eq!(notifications["visible"], true);
     assert_eq!(notifications["mode"], "feed");
 
@@ -30006,17 +30240,9 @@ fn core_shortcuts_cover_workspace_layout_configuration_and_notifications() {
         .as_str()
         .unwrap()
         .to_string();
-    let previous = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+["}),
-    );
+    let previous = simulate_sidebar_shortcut(&server.socket, "ctrl+[");
     assert_eq!(previous["workspace_id"], first_workspace);
-    let next = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+]"}),
-    );
+    let next = simulate_sidebar_shortcut(&server.socket, "ctrl+]");
     assert_eq!(next["workspace_id"], second_workspace);
 
     rpc(
@@ -30074,11 +30300,7 @@ fn right_sidebar_shortcuts_toggle_focus_and_switch_modes_in_sidebar_context() {
     assert_eq!(focused["focused"], true);
     assert_eq!(focused["focus_generation"], 1);
 
-    let numbered = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+2"}),
-    );
+    let numbered = simulate_non_terminal_shortcut(&server.socket, "ctrl+2");
     assert_eq!(numbered["handled"], true);
     assert_eq!(numbered["action"], "selectSurfaceByNumber");
     assert_eq!(numbered["digit"], 2);
@@ -30151,25 +30373,13 @@ fn numbered_shortcuts_select_surface_and_workspace_families_with_sidebar_priorit
         assert_eq!(row["numbered"], true);
     }
 
-    let selected_second = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+2"}),
-    );
+    let selected_second = simulate_non_terminal_shortcut(&server.socket, "ctrl+2");
     assert_eq!(selected_second["action"], "selectSurfaceByNumber");
     assert_eq!(selected_second["digit"], 2);
     assert_eq!(selected_second["surface_id"], second_surface);
-    let selected_last = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+9"}),
-    );
+    let selected_last = simulate_non_terminal_shortcut(&server.socket, "ctrl+9");
     assert_eq!(selected_last["surface_id"], third_surface);
-    let out_of_range = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+8"}),
-    );
+    let out_of_range = simulate_non_terminal_shortcut(&server.socket, "ctrl+8");
     assert_eq!(out_of_range["handled"], true);
     assert_eq!(out_of_range["selected"], false);
 
@@ -30438,11 +30648,7 @@ fn mark_oldest_unread_shortcut_defers_focused_notification_and_opens_next() {
         .unwrap()
         .to_string();
 
-    let jumped = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+u"}),
-    );
+    let jumped = simulate_sidebar_shortcut(&server.socket, "ctrl+u");
     assert_eq!(jumped["opened"], true);
     assert_eq!(jumped["id"], next);
     assert_eq!(jumped["deferred_notification_id"], deferred);
@@ -30492,11 +30698,7 @@ fn mark_oldest_unread_shortcut_marks_surface_and_skips_its_workspace() {
         json!({"surface_id": second_surface, "action": "mark-unread"}),
     );
 
-    let jumped = rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+u"}),
-    );
+    let jumped = simulate_sidebar_shortcut(&server.socket, "ctrl+u");
     assert_eq!(jumped["opened"], true);
     assert_eq!(jumped["manual_unread"], true);
     assert_eq!(jumped["workspace_id"], second_workspace);
@@ -30591,11 +30793,7 @@ fn shortcut_overrides_drive_dispatch_unbinding_reset_and_canvas_actions() {
     );
     assert_eq!(reset["mode"], "default");
     assert_eq!(reset["shortcut_hint"], "⌃T");
-    rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+t"}),
-    );
+    simulate_sidebar_shortcut(&server.socket, "ctrl+t");
     assert_eq!(
         rpc(&server.socket, "surface.list", json!({}))["surfaces"]
             .as_array()
@@ -30677,6 +30875,11 @@ fn shortcut_overrides_drive_dispatch_unbinding_reset_and_canvas_actions() {
         .unwrap();
     assert_eq!(current_workspace["title"], "Shortcut Workspace");
 
+    rpc(
+        &server.socket,
+        "debug.shortcut.set",
+        json!({"name": "rename_tab", "combo": "ctrl+r"}),
+    );
     let rename_tab = rpc(
         &server.socket,
         "debug.shortcut.simulate",
@@ -30787,11 +30990,13 @@ fn transformed_ctrl_shift_defaults_replace_conflicting_terminal_aliases() {
         json!({"combo": "ctrl+alt+shift+right"}),
     );
     assert!(split["pane_id"].is_string(), "response was {split}");
-    let terminal = rpc(
+    let terminal_default = rpc(
         &server.socket,
         "debug.shortcut.simulate",
         json!({"combo": "ctrl+t"}),
     );
+    assert_eq!(terminal_default["handled"], false);
+    let terminal = simulate_sidebar_shortcut(&server.socket, "ctrl+t");
     assert!(
         terminal["surface_id"].is_string(),
         "response was {terminal}"
@@ -30934,11 +31139,7 @@ fn shortcut_bindings_load_reload_and_persist_through_cmux_json() {
     let written: Value = serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap())
         .expect("reset shortcut config");
     assert!(written["shortcuts"]["bindings"].get("newSurface").is_none());
-    rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+t"}),
-    );
+    simulate_sidebar_shortcut(&server.socket, "ctrl+t");
     assert_eq!(
         rpc(&server.socket, "surface.list", json!({}))["surfaces"]
             .as_array()
@@ -31428,6 +31629,9 @@ fn renderer_snapshot_ghostty_vt_embeds_render_state_for_terminal_views() {
         return;
     }
 
+    assert_eq!(view["render_grid"]["format"], "cmux.render-grid.v1");
+    assert_eq!(view["render_grid"]["parser"], "ghostty-vt-adapter");
+    assert_ne!(view["render_grid"], view["ghostty_vt"]);
     let render = &view["ghostty_vt"];
     assert_eq!(render["parser"], "ghostty-vt");
     assert_eq!(render["cols"], 80);
@@ -34386,7 +34590,7 @@ fn command_palette_lists_api_commands_and_executes_core_actions() {
     assert!(
         rows.iter().any(|row| {
             row["command_id"].as_str() == Some("palette.openClaudeCode")
-                && row["shortcut_hint"] == "⇧⌃C"
+                && row["shortcut_hint"] == ""
         }),
         "missing Claude Code command row: {catalog}"
     );
@@ -34644,8 +34848,8 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
     assert_eq!(hide, "");
     let hidden = rpc(
         &server.socket,
-        "debug.sidebar.visible",
-        json!({"window_id": current_window}),
+        "sidebar.right",
+        json!({"action": "mode", "window_id": current_window}),
     );
     assert_eq!(hidden["visible"], false);
     assert_eq!(hidden["mode"], "files");
@@ -34686,6 +34890,31 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
         error.contains("--no-focus is only valid with set"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn socket_left_sidebar_controls_visibility_without_changing_right_sidebar() {
+    let server = start_server();
+    let initial = rpc(&server.socket, "sidebar.left", json!({"action": "mode"}));
+    assert_eq!(initial["visible"], true);
+
+    let hidden = rpc(&server.socket, "sidebar.left", json!({"action": "hide"}));
+    assert_eq!(hidden["visible"], false);
+    assert_eq!(
+        rpc(
+            &server.socket,
+            "debug.sidebar.visible",
+            json!({"window_id": hidden["window_id"]})
+        )["visible"],
+        false
+    );
+    assert_eq!(
+        rpc(&server.socket, "sidebar.right", json!({"action": "mode"}))["visible"],
+        true
+    );
+
+    let shown = rpc(&server.socket, "sidebar.left", json!({"action": "toggle"}));
+    assert_eq!(shown["visible"], true);
 }
 
 #[test]
@@ -35105,11 +35334,7 @@ fn command_palette_switcher_searches_recent_surface_input() {
         "surface.focus",
         json!({"surface_id": left_surface}),
     );
-    rpc(
-        &server.socket,
-        "debug.shortcut.simulate",
-        json!({"combo": "ctrl+p"}),
-    );
+    simulate_sidebar_shortcut(&server.socket, "ctrl+p");
     rpc(&server.socket, "debug.type", json!({"text": token}));
 
     let results = rpc(
@@ -35754,7 +35979,7 @@ fn surface_respawn_reports_macos_style_validation_errors() {
 }
 
 #[test]
-fn claude_warm_pool_shortcut_claims_prestarted_terminal_and_refills() {
+fn claude_warm_pool_palette_action_claims_prestarted_terminal_and_refills() {
     let token = format!("CMUX_CLAUDE_WARM_READY_{}", std::process::id());
     let command = format!("printf '{}\\n'", token);
     let env = [("CMUX_CLAUDE_COMMAND", command.as_str())];
@@ -35791,13 +36016,20 @@ fn claude_warm_pool_shortcut_claims_prestarted_terminal_and_refills() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|row| { row["title"] == "Claude Code" && row["shortcut_hint"] == "⇧⌃C" }));
+        .all(|row| row["title"] != "Claude Code"));
 
-    let claimed = rpc(
+    let terminal_copy = rpc(
         &server.socket,
         "debug.shortcut.simulate",
-        json!({"combo": "ctrl+shift+c"}),
+        json!({"combo": "ctrl+shift+c", "context": {"terminalFocus": true}}),
     );
+    assert_eq!(terminal_copy["handled"], false);
+    assert_eq!(
+        rpc(&server.socket, "workspace.current", json!({}))["workspace_id"],
+        initial_workspace
+    );
+
+    let claimed = rpc(&server.socket, "agent.claude.warm_pool.claim", json!({}));
     let claimed_workspace = claimed["workspace_id"].as_str().unwrap();
     let claimed_surface = claimed["surface_id"].as_str().unwrap();
     assert_eq!(claimed_workspace, first_warm_workspace);
