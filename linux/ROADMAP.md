@@ -88,6 +88,13 @@ be closed before calling a Linux build release-ready:
 - Multi-monitor behavior needs a real compositor smoke test.
 - The development bundle and desktop installation need a clean-environment
   verification.
+- The GTK feature test binary is not reliably isolated from process-global GTK
+  initialization. On the 2026-08-20 Ubuntu audit host, full ownership-branch
+  runs showed cross-thread GTK initialization failures or a headless SIGSEGV,
+  while each reported GTK test passed alone. The pre-cleanup integration commit
+  independently reproduces the headless serial SIGSEGV. The GTK release gate
+  remains open until display-backed tests run on one owned GTK thread or are
+  separated into safe test processes.
 
 ## Deferred feature families
 

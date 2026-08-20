@@ -138,6 +138,17 @@ The native suite requires the GTK and WebKitGTK development files. A passing
 display-free suite does not validate the embedded terminal, clipboard, IME,
 GL, or compositor behavior.
 
+The 2026-08-20 ownership audit found a pre-existing test-harness limitation:
+the complete GTK feature test binary can initialize process-global GTK from
+different test threads or query the icon theme without a display. On the audit
+host this makes the full command above nondeterministic and can end in a
+headless SIGSEGV. The headless serial SIGSEGV independently reproduces at the
+pre-cleanup integration commit. On the ownership branch, each reported GTK
+test passes alone and the live Xvfb app smoke passes. Focused tests are useful
+for diagnosis, but they do not make the full GTK release gate green. Fix the
+harness to run display-backed GTK tests on one owned GTK thread or in isolated
+test processes before treating that gate as reliable.
+
 ## Renderer diagnostics
 
 With Ghostty already built, inspect the exact embedding library and resources:
