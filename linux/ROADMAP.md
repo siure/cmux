@@ -134,7 +134,8 @@ Status: complete.
 - Make only mechanical moves first, then extract behavior behind focused tests.
 - Introduce more Cargo crates only when a real dependency boundary requires one.
 
-Status: planned.
+Status: complete for the hierarchy foundation. Further extraction proceeds one
+behavior boundary at a time.
 
 ### 4. Close the contract gaps
 

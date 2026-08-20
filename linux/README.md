@@ -75,7 +75,11 @@ Use `--socket <path>` for an isolated development instance.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/` | Rust application, protocol, renderer, terminal, and GTK implementation. |
+| `src/app/` | Authoritative application state and configuration. |
+| `src/cli/` | CLI dispatch and socket-server transport. |
+| `src/terminal/` | Terminal model, copy mode, and Ghostty integration. |
+| `src/ui/` | Display-independent app commands and the native GTK shell. |
+| `src/` | Supporting feature modules and the renderer contract. |
 | `tests/` | End-to-end socket and behavioral contracts. |
 | `scripts/` | Reproducible development, bundle, install, and visual-smoke commands. |
 | `dist/` | Desktop entry, launcher, and bundle installer inputs. |

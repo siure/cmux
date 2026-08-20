@@ -4,7 +4,7 @@ mod browser_environment;
 #[path = "../src/browser_runtime.rs"]
 mod browser_runtime;
 #[allow(dead_code)]
-#[path = "../src/gtk_webkit.rs"]
+#[path = "../src/ui/gtk/webkit.rs"]
 mod gtk_webkit;
 
 use browser_environment::{BrowserEnvironmentState, BrowserGeolocationState};

@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-#[path = "../src/gtk_webkit.rs"]
+#[path = "../src/ui/gtk/webkit.rs"]
 mod gtk_webkit;
 
 use gtk4::glib;

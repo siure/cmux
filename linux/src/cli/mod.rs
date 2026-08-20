@@ -3294,7 +3294,7 @@ const OPENCODE_SESSION_PLUGIN_FILENAME: &str = "cmux-session.js";
 const OPENCODE_SESSION_PLUGIN_CONFIG_SPEC: &str = "./plugins/cmux-session.js";
 const OPENCODE_FEED_PLUGIN_MARKER: &str = "cmux-feed-plugin-marker";
 const OPENCODE_FEED_PLUGIN_FILENAME: &str = "cmux-feed.js";
-const OPENCODE_FEED_PLUGIN_SOURCE: &str = include_str!("../../Resources/opencode-plugin.js");
+const OPENCODE_FEED_PLUGIN_SOURCE: &str = include_str!("../../../Resources/opencode-plugin.js");
 const OPENCODE_SESSION_PLUGIN_SOURCE: &str = r#"// cmux-opencode-session-plugin-marker v1
 // Bridges OpenCode session lifecycle events into cmux's restorable session store.
 // Installed by `cmux hooks opencode install` or `cmux hooks setup`.

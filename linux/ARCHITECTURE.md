@@ -24,7 +24,7 @@ of that state and sends mutations back through shared actions instead of
 owning a second application model.
 
 Not every CLI path enters `AppState`. Help, version, selected update and tmux
-utilities, and other no-socket commands return from `cli.rs` directly. Some
+utilities, and other no-socket commands return from `cli/mod.rs` directly. Some
 socket handlers also coordinate bounded browser, feedback, or host side effects
 around the model mutation. Trace those adapters before assuming a command is a
 pure `AppState` call.
@@ -35,48 +35,54 @@ long-running process, network, or renderer work.
 
 ## Composition root and entry points
 
-`src/main.rs` currently declares the module graph, installs broken-pipe panic
-handling, dispatches the private sidebar interpreter worker, and then hands
-normal arguments to `cli::run`.
+`src/lib.rs` declares the module graph and dispatches either the private sidebar
+interpreter worker or normal arguments to the CLI. `src/main.rs` is deliberately
+limited to process policy: broken-pipe panic handling, top-level error output,
+and the exit code.
+
+The first hierarchy pass preserves the existing crate-level module names so the
+move does not change behavior. `lib.rs` uses explicit source paths where a
+module's physical responsibility directory differs from its legacy name. New
+code should follow the physical directories; do not add another flat root
+module without a cross-cutting reason.
 
 The Cargo package produces two executables:
 
 - `cmux`: user CLI, display-free daemon, and GTK application
 - `cmuxd-remote`: remote daemon used by SSH and remote-host flows
 
-Phase 5 moves the module graph into `src/lib.rs` so `main.rs` contains only
-process-level policy and dispatch.
-
 ## Module ownership
 
-The source tree is still mostly flat. Use these responsibility groups when
-finding code or deciding where new behavior belongs.
+Use these responsibility groups when finding code or deciding where new
+behavior belongs.
 
 | Area | Current modules | Owns |
 | --- | --- | --- |
-| Application model | `app.rs`, `config.rs`, `project.rs` | Authoritative topology, actions, persistence, configuration, and project metadata. |
-| Protocol and entry points | `cli.rs`, `server.rs`, `src/bin/cmuxd-remote.rs` | CLI parsing and output, JSON-lines socket transport, daemon startup, and remote process entry. |
-| Renderer contract | `renderer.rs`, `ui.rs` | Display-independent snapshots, diagnostics, render models, and UI-facing actions. |
-| Terminal core | `terminal.rs`, `terminal_copy_mode.rs`, `ghostty_vt.rs` | PTY state, key encoding, copy mode, fallback terminal parsing, and the optional Ghostty VT interface. |
-| Ghostty GTK integration | `ghostty_embed.rs`, `gtk_ghostty.rs` | Dynamic FFI loading and validation, Ghostty application/surface lifetime, GL hosting, input, clipboard, and callbacks. |
-| Native GTK shell | `gtk_ui.rs`, `gtk_ui/`, `gtk_webkit.rs`, `global_shortcuts.rs` | Windows, workspaces, panes, native controls, WebKit surfaces, and desktop shortcuts. |
+| Application model | `app/mod.rs`, `app/config.rs`, `project.rs` | Authoritative topology, actions, persistence, configuration, and project metadata. |
+| Protocol and entry points | `cli/mod.rs`, `cli/server.rs`, `src/bin/cmuxd-remote.rs` | CLI parsing and output, JSON-lines socket transport, daemon startup, and remote process entry. |
+| Renderer contract | `renderer.rs`, `ui/mod.rs` | Display-independent snapshots, diagnostics, render models, and UI-facing actions. |
+| Terminal core | `terminal/mod.rs`, `terminal/copy_mode.rs`, `terminal/ghostty/vt.rs` | PTY state, key encoding, copy mode, fallback terminal parsing, and the optional Ghostty VT interface. |
+| Ghostty GTK integration | `terminal/ghostty/embed.rs`, `terminal/ghostty/gtk_host.rs` | Dynamic FFI loading and validation, Ghostty application/surface lifetime, GL hosting, input, clipboard, and callbacks. |
+| Native GTK shell | `ui/gtk/mod.rs`, `ui/gtk/`, `ui/gtk/webkit.rs`, `ui/gtk/global_shortcuts.rs` | Windows, workspaces, panes, native controls, WebKit surfaces, and desktop shortcuts. |
 | Browser model | `browser_runtime.rs`, `browser_settings.rs`, `browser_environment.rs`, `browser_omnibar.rs` | Browser state, automation model, profiles, environment emulation, and suggestions. |
 | Agent and remote flows | `agent_session.rs`, `agent_hibernation_settings.rs`, `resume_approval.rs`, `remote_tmux.rs`, `mobile_host.rs` | Provider sessions, recovery policy, remote tmux, and mobile-host protocol. |
 | Extension surfaces | `custom_sidebar.rs`, `swift_sidebar.rs`, `sidebar_extension.rs` | Declarative sidebars, bounded Swift interpretation, state, and isolated extension execution. |
 | Supporting features | `diff_viewer.rs`, `diff_baseline.rs`, `file_url.rs`, `linux_update.rs`, `shortcut_when.rs` | Focused feature models and utilities. |
 
-Most tests live beside their module. `tests/socket_contract.rs` exercises the
-compiled `cmux` binary across its public socket and CLI behavior.
+Most unit tests live beside their module. `tests/socket_contract.rs` exercises
+the compiled `cmux` binary across its public socket and CLI behavior. That large
+contract source remains an explicit future behavior-family split rather than
+being mixed into the mechanical hierarchy move.
 
 ## State and mutation flow
 
 There are three normal mutation paths:
 
-1. A normal external CLI command is converted into a request by `cli.rs` and
-   sent over the Unix socket. `server.rs` locks the shared state, applies the
-   command, and serializes the response.
+1. A normal external CLI command is converted into a request by `cli/mod.rs`
+   and sent over the Unix socket. `cli/server.rs` locks the shared state,
+   applies the command, and serializes the response.
 2. `cmux app --script` and the display-free application REPL are parsed by
-   `ui.rs` and apply the same model and renderer operations in-process.
+   `ui/mod.rs` and apply the same model and renderer operations in-process.
 3. GTK translates input or widget actions into shared model operations, then
    reconciles native widgets from a new renderer snapshot.
 
@@ -98,14 +104,16 @@ Ghostty checkout is not interchangeable with the pinned commit.
 
 The integration has three layers:
 
-1. `ghostty_embed.rs` declares the C ABI, loads `libghostty-internal.so`, checks
-   required and unexpected symbols, validates layout and constant fingerprints,
-   locates runtime resources, and wraps FFI lifetimes.
-2. `gtk_ghostty.rs` owns the GTK GL host and maps cmux surfaces, input,
-   clipboard, renderer wakeups, and Ghostty actions to the application model.
-3. `ghostty_vt.rs` exposes a display-free terminal parsing path used by tests
-   and fallback renderer diagnostics. It is not the native GTK daily-driver
-   renderer.
+1. `terminal/ghostty/embed.rs` declares the C ABI, loads
+   `libghostty-internal.so`, checks required and unexpected symbols, validates
+   layout and constant fingerprints, locates runtime resources, and wraps FFI
+   lifetimes.
+2. `terminal/ghostty/gtk_host.rs` owns the GTK GL host and maps cmux surfaces,
+   input, clipboard, renderer wakeups, and Ghostty actions to the application
+   model.
+3. `terminal/ghostty/vt.rs` exposes a display-free terminal parsing path used
+   by tests and fallback renderer diagnostics. It is not the native GTK
+   daily-driver renderer.
 
 `linux/scripts/run-dev.sh` is the normal integration entry point. It verifies
 the submodule SHA, provisions the exact Zig version required by the submodule,
@@ -132,16 +140,20 @@ This split is intentional:
 
 ## Structural debt and direction
 
-The largest files are currently `app.rs`, `tests/socket_contract.rs`,
-`gtk_ui.rs`, `cli.rs`, and `gtk_ghostty.rs`. Their size makes navigation and
-ownership difficult, but file size alone is not a reason to invent abstractions.
+The largest files are currently `app/mod.rs`, `tests/socket_contract.rs`,
+`ui/gtk/mod.rs`, `cli/mod.rs`, and `terminal/ghostty/gtk_host.rs`. Their size
+makes navigation and ownership difficult, but file size alone is not a reason
+to invent abstractions.
 
 The safe reduction strategy is incremental:
 
-1. establish a library composition root and responsibility-based directories
-2. move code mechanically with no behavior change
-3. extract one coherent behavior at a time behind existing contract tests
-4. introduce a new crate only when an actual dependency boundary needs it
+The library composition root and responsibility-based directories are now in
+place. Continue with smaller changes:
+
+1. extract one coherent behavior at a time behind existing contract tests
+2. split the socket contract by behavior family when a touched family has a
+   stable support boundary
+3. introduce a new crate only when an actual dependency boundary needs it
 
 Avoid a simultaneous rewrite of the model, GTK shell, and Ghostty host. Those
 layers meet on lifetime, threading, and reconciliation contracts that are much
