@@ -2,6 +2,9 @@
 
 This directory contains the Rust Linux port of cmux.
 
+The [Linux roadmap](ROADMAP.md) defines the daily-driver contract, release
+gates, current evidence, and deliberately deferred feature families.
+
 The Linux port centers on a shared Rust app core plus a `cmux` CLI that speaks
 the same JSON-lines Unix socket protocol used by the macOS tests. The
 display-free core remains the default build for contract tests and automation,
