@@ -27,9 +27,8 @@ pinned by the parent repository.
 
 Every daily-driver release must meet all of these gates:
 
-1. The build and launch commands in `README.md` work from a clean checkout on
-   the primary environment defined below. Phase 4 will move those commands to
-   `DEVELOPMENT.md` without changing this gate.
+1. The build and launch commands in `DEVELOPMENT.md` work from a clean checkout
+   on the primary environment defined below.
 2. `cargo test --locked --manifest-path linux/Cargo.toml` passes.
 3. `cargo test --locked --manifest-path linux/Cargo.toml --features gtk` passes
    in an environment with the documented GTK and WebKitGTK development files.
@@ -125,7 +124,7 @@ Status: complete.
 - Turn `README.md` into a short entry point and move detailed reference material
   behind explicit links.
 
-Status: in progress.
+Status: complete.
 
 ### 3. Reduce structural friction
 
