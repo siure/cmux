@@ -1047,10 +1047,27 @@ mod tests {
         );
         assert!(view.main_slot.width() >= metrics::MIN_TERMINAL_WIDTH);
         assert_eq!(view.left_width.get(), 400);
+        let controllers = view.left_frame.last_child().unwrap().observe_controllers();
+        let gesture = (0..controllers.n_items())
+            .find_map(|i| controllers.item(i).and_downcast::<gtk::GestureDrag>())
+            .unwrap();
+        gesture.emit_by_name::<()>("drag-begin", &[&0.0f64, &0.0f64]);
+        gesture.emit_by_name::<()>("drag-update", &[&10.0f64, &0.0f64]);
+        gesture.emit_by_name::<()>("drag-end", &[&10.0f64, &0.0f64]);
+        assert_eq!(
+            call_app_value(
+                &app_state,
+                "sidebar.left",
+                json!({"action": "mode", "window_id": window_id}),
+            ).unwrap()["width"],
+            410,
+            "compact drag adjusts the preference, not its temporary display clamp",
+        );
+        assert_eq!(view.left_slot.first_child().unwrap().width_request(), compact_width / 3);
         window.set_default_size(1600, 500);
         settle();
         assert!(!view.compact.get());
-        assert_eq!(view.left_slot.first_child().unwrap().width_request(), 400);
+        assert_eq!(view.left_slot.first_child().unwrap().width_request(), 410);
         assert_eq!(view.right_slot.first_child().unwrap().width_request(), 440);
         window.destroy();
     }
