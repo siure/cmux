@@ -2971,6 +2971,10 @@ pub(crate) enum GlobalWindowCommand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CloseConfirmationAction {
+    Workspace {
+        workspace_id: String,
+        source: String,
+    },
     Surface {
         surface_id: String,
         source: SurfaceCloseSource,
@@ -4441,6 +4445,14 @@ impl AppState {
 
     fn close_confirmation_request_value(&self, request: &CloseConfirmationRequest) -> Value {
         let (kind, title, message, accept_label, surface_id, source) = match &request.action {
+            CloseConfirmationAction::Workspace { source, .. } => (
+                "workspace",
+                "Close workspace?",
+                "This will close the workspace and all of its panels.",
+                "Close",
+                None,
+                Some(source.as_str()),
+            ),
             CloseConfirmationAction::Surface { surface_id, source } => (
                 "surface",
                 "Close tab?",
@@ -4547,6 +4559,20 @@ impl AppState {
         }
 
         let mut result = match request.action {
+            CloseConfirmationAction::Workspace {
+                workspace_id,
+                source,
+            } => {
+                if !self.workspaces.contains_key(&workspace_id) {
+                    json!({"handled": false, "reason": "workspace_not_found"})
+                } else {
+                    self.close_workspace(&json!({
+                        "workspace_id": workspace_id,
+                        "source": source,
+                        "confirmed": true
+                    }))?
+                }
+            }
             CloseConfirmationAction::Surface { surface_id, source } => {
                 if !self.surfaces.contains_key(&surface_id) {
                     json!({"handled": false, "reason": "surface_not_found"})
@@ -8404,8 +8430,8 @@ impl AppState {
                 )
             }) {
                 self.render_activity.record_model_mutation();
+                self.persist_session_snapshot_after_method(method);
             }
-            self.persist_session_snapshot_after_method(method);
         }
         result
     }
@@ -14127,6 +14153,43 @@ impl AppState {
             .iter()
             .find(|w| w.id == window_id)
             .ok_or_else(|| AppError::not_found("window not found"))?;
+        let source = string_param(params, "source").unwrap_or_else(|| "api".to_string());
+        let interactive = !matches!(source.as_str(), "api" | "socket" | "cli");
+        let confirmed = bool_param(params, "confirmed").unwrap_or(false);
+        let dirty = self
+            .workspace_surface_ids(&id)
+            .iter()
+            .any(|surface_id| self.surface_needs_close_confirmation(surface_id));
+        let pinned = self
+            .workspaces
+            .get(&id)
+            .is_some_and(|workspace| workspace.pinned);
+        let requires_confirmation = interactive
+            && !confirmed
+            && (pinned || match source.as_str() {
+                "tab_button" => self.app_workspace_settings.warn_before_closing_tab_x_button
+                    || (dirty && self.app_workspace_settings.warn_before_closing_tab),
+                _ => dirty,
+            });
+        if requires_confirmation {
+            let confirmation = self.enqueue_close_confirmation(
+                window_id.clone(),
+                dirty,
+                CloseConfirmationAction::Workspace {
+                    workspace_id: id.clone(),
+                    source,
+                },
+            );
+            return Ok(json!({
+                "closed": false, "blocked": true, "confirmation_required": true,
+                "workspace_id": id, "window_id": window_id, "confirmation": confirmation
+            }));
+        }
+        if window.workspaces.len() <= 1 && interactive {
+            return self.window_close_request(&json!({
+                "window_id": window_id, "source": source, "confirmed": confirmed
+            }));
+        }
         if window.workspaces.len() <= 1 {
             return Err(AppError::invalid_params(
                 "cannot close the last workspace in a window",
@@ -30803,6 +30866,26 @@ impl AppState {
                 let window_id = self.command_palette_window_id(params)?;
                 Ok(json!({"selected_index": self.command_palette_state(&window_id).selected_index}))
             }
+            "debug.command_palette.activate" => {
+                let window_id = self.command_palette_window_id(params)?;
+                let command_id = string_param(params, "command_id")
+                    .ok_or_else(|| AppError::invalid_params("command_id is required"))?;
+                let state = self.command_palette_state(&window_id);
+                if !state.visible
+                    || matches!(state.mode,
+                        CommandPaletteMode::RenameInput | CommandPaletteMode::WorkspaceDescriptionInput)
+                {
+                    return Err(AppError::invalid_state("command palette has no selectable results"));
+                }
+                let index = self.command_palette_rows(&window_id).iter()
+                    .position(|row| {
+                        row.get("command_id").and_then(Value::as_str) == Some(command_id.as_str())
+                    })
+                    .ok_or_else(|| AppError::not_found("command palette result is no longer available"))?;
+                self.current_window = window_id.clone();
+                self.command_palette_state_mut(&window_id).selected_index = index;
+                self.command_palette_accept_current()
+            }
             "debug.command_palette.delete_backward" => {
                 let window_id = self.command_palette_window_id(params)?;
                 self.command_palette_delete_backward(&window_id)
@@ -33328,7 +33411,7 @@ impl AppState {
             "previous_workspace" => self.relative_workspace(-1),
             "close_workspace" => {
                 let workspace_id = self.current_workspace_id()?;
-                self.close_workspace(&json!({"workspace_id": workspace_id}))
+                self.close_workspace(&json!({"workspace_id": workspace_id, "source": "shortcut"}))
             }
             "close_other_tabs_in_pane" => self.close_other_tabs_in_focused_pane(),
             "toggle_focused_workspace_group_collapsed" => {
@@ -54205,6 +54288,11 @@ fn method_persists_session_snapshot(method: &str) -> bool {
     matches!(
         method,
         "session.restore_previous"
+            | "app.close_confirmation.reply"
+            | "history.reopen_closed"
+            | "tab.action"
+            | "debug.shortcut.simulate"
+            | "debug.command_palette.activate"
             | "open.targets"
             | "settings.open"
             | "settings.set_target"
@@ -65892,6 +65980,7 @@ fn supported_methods() -> Vec<&'static str> {
         "debug.command_palette.rename_input.selection",
         "debug.command_palette.rename_tab.open",
         "debug.command_palette.selection",
+        "debug.command_palette.activate",
         "debug.command_palette.toggle",
         "debug.command_palette.visible",
         "debug.empty_panel.count",
