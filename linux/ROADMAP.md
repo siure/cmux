@@ -30,7 +30,7 @@ Every daily-driver release must meet all of these gates:
 1. The build and launch commands in `DEVELOPMENT.md` work from a clean checkout
    on the primary environment defined below.
 2. `cargo test --locked --manifest-path linux/Cargo.toml` passes.
-3. `cargo test --locked --manifest-path linux/Cargo.toml --features gtk` passes
+3. `xvfb-run -a dbus-run-session -- cargo test --locked --manifest-path linux/Cargo.toml --features gtk` passes
    in an environment with the documented GTK and WebKitGTK development files.
 4. A live Ghostty smoke test covers launch, typing, Unicode, tab creation,
    splitting, focus, resize, copy and paste, scrollback, find, workspace
@@ -77,24 +77,27 @@ The 2026-08-20 ownership audit established this baseline:
   creation, focus, split equalization, scrollback output, terminal find,
   workspace switching, and clean quit.
 
-The baseline does not yet prove the full daily-driver contract. These gaps must
-be closed before calling a Linux build release-ready:
+The [2026-09-20 daily-use audit](AUDIT.md) extends that baseline:
 
-- Launch, quit, and session reopen have not been exercised as one isolated
-  persistence scenario.
-- Clipboard selection and copy, input-method composition, and real interactive
-  Unicode entry need display-backed validation.
-- Hardware-accelerated Wayland and X11 sessions need coverage beyond Xvfb.
-- Multi-monitor behavior needs a real compositor smoke test.
-- The development bundle and desktop installation need a clean-environment
-  verification.
-- The GTK feature test binary is not reliably isolated from process-global GTK
-  initialization. On the 2026-08-20 Ubuntu audit host, full ownership-branch
-  runs showed cross-thread GTK initialization failures or a headless SIGSEGV,
-  while each reported GTK test passed alone. The pre-cleanup integration commit
-  independently reproduces the headless serial SIGSEGV. The GTK release gate
-  remains open until display-backed tests run on one owned GTK thread or are
-  separated into safe test processes.
+- The display-free suite and complete display-backed GTK suite pass. Widget
+  tests share GTK's owned test thread and no longer skip assertions after a
+  failed initialization.
+- A real Ghostty/X11 session accepts Unicode output, keyboard input in find,
+  focus-preserving metadata updates, continuous resize, and system clipboard
+  paste. Clean quit/reopen preserves workspace and pane topology.
+- Six reviewed GTK screenshots cover dense panes, attention, browser content,
+  settings, narrow layout, and 2x scale.
+- A development bundle builds from the compiled binaries and pinned Ghostty
+  resources. Its installation into a fresh temporary prefix launches with
+  relocated resources, independent of source-tree runtime paths.
+
+This still does not prove every daily-driver release gate:
+
+- Native GNOME Wayland and hardware-accelerated rendering need desktop checks.
+- Mouse selection/copy, IME composition, accessibility, and multi-monitor
+  behavior need checks on the supported compositor.
+- The installed development bundle smoke does not replace a fresh release
+  build and its native desktop-entry launch on the primary environment.
 
 ## Deferred feature families
 

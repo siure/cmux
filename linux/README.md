@@ -66,6 +66,7 @@ Use `--socket <path>` for an isolated development instance.
 | --- | --- |
 | [Architecture](ARCHITECTURE.md) | Runtime flow, module ownership, Ghostty integration, state boundaries, and structural debt. |
 | [Development](DEVELOPMENT.md) | Setup, build, test, diagnostics, installation, and contributor workflow. |
+| [Daily-use audit](AUDIT.md) | Original/port comparison, verified fixes, test evidence, and remaining differences. |
 | [Roadmap](ROADMAP.md) | Daily-driver contract, release gates, supported environment, and deferred features. |
 | [Reference](REFERENCE.md) | Detailed capabilities, command examples, configuration, browser, sidebar, mobile, and distribution notes. |
 | [Linux Git workflow](../docs/linux-port-git-workflow.md) | Canonical branches, remotes, topic branches, and integration rules. |
