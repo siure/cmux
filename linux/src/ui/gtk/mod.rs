@@ -23671,6 +23671,138 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
         assert!(browser_surface_requires_recreation("work", 8, &state));
     }
 
+    fn native_entry_capture_keys(entry: &impl IsA<gtk::Widget>) -> gtk::EventControllerKey {
+        let controllers = entry.observe_controllers();
+        (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .filter_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .find(|keys| keys.propagation_phase() == gtk::PropagationPhase::Capture)
+            .expect("application capture controller")
+    }
+
+    fn emit_native_entry_key(keys: &gtk::EventControllerKey, key: gdk::Key) -> bool {
+        keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &gdk::ModifierType::empty()])
+    }
+
+    #[gtk::test]
+    fn gtk_terminal_find_preedit_keeps_native_key_ownership() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let ghostty = crate::gtk_ghostty::ghostty_surface_widget(Default::default());
+        let controls = ensure_terminal_search_controls(
+            &GtkTerminalSearchState {
+                surface_id: "ime-terminal-find".into(),
+                query: String::new(),
+                total: None,
+                selected: None,
+            },
+            &app_state,
+            &ghostty,
+            &Rc::new(RefCell::new(HashMap::new())),
+        );
+        let keys = native_entry_capture_keys(&controls.entry);
+        let text = controls
+            .entry
+            .delegate()
+            .and_downcast::<gtk::Text>()
+            .unwrap();
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        text.emit_by_name::<()>("preedit-changed", &[&"日本語"]);
+        for key in [gdk::Key::Return, gdk::Key::KP_Enter, gdk::Key::Escape] {
+            assert!(!emit_native_entry_key(&keys, key), "IME owns {key:?}");
+        }
+        text.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        assert!(emit_native_entry_key(&keys, gdk::Key::Escape));
+    }
+
+    fn browser_controls_for_native_preedit_test() -> (BrowserSurfaceControls, gtk::Window) {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let browser = call_app_value(
+            &app_state,
+            "surface.create",
+            json!({"type": "browser", "url": "about:blank"}),
+        )
+        .unwrap();
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": browser["surface_id"],
+            "focused": true,
+            "browser": {"profile_id": "default", "url": "about:blank"}
+        }))
+        .unwrap();
+        let controls = ensure_browser_surface_controls(
+            &state,
+            None,
+            &app_state,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+        );
+        let window = gtk::Window::builder().child(&controls.root).build();
+        window.present();
+        (controls, window)
+    }
+
+    #[gtk::test]
+    fn gtk_browser_find_preedit_keeps_native_key_ownership() {
+        let (controls, window) = browser_controls_for_native_preedit_test();
+        assert!(
+            controls.web_view.is_some(),
+            "native WebKit required for Find"
+        );
+        controls.find_bar.set_visible(true);
+        controls.find_entry.grab_focus();
+        let keys = native_entry_capture_keys(&controls.find_entry);
+        let text = controls
+            .find_entry
+            .delegate()
+            .and_downcast::<gtk::Text>()
+            .unwrap();
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        text.emit_by_name::<()>("preedit-changed", &[&"日本語"]);
+        for key in [gdk::Key::Return, gdk::Key::KP_Enter, gdk::Key::Escape] {
+            assert!(!emit_native_entry_key(&keys, key), "IME owns {key:?}");
+            assert!(controls.find_bar.is_visible());
+        }
+        text.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        assert!(emit_native_entry_key(&keys, gdk::Key::Escape));
+        assert!(!controls.find_bar.is_visible());
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_browser_omnibar_preedit_keeps_native_key_ownership() {
+        let (controls, window) = browser_controls_for_native_preedit_test();
+        controls.location.grab_focus();
+        controls.location.set_text("https://draft.example/path");
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        let keys = native_entry_capture_keys(&controls.location);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Down));
+        let text = controls
+            .location
+            .delegate()
+            .and_downcast::<gtk::Text>()
+            .unwrap();
+        text.emit_by_name::<()>("preedit-changed", &[&"日本語"]);
+        for key in [
+            gdk::Key::Return,
+            gdk::Key::KP_Enter,
+            gdk::Key::Escape,
+            gdk::Key::Up,
+            gdk::Key::Down,
+        ] {
+            assert!(!emit_native_entry_key(&keys, key), "IME owns {key:?}");
+            assert_eq!(
+                controls.location.text().as_str(),
+                "https://draft.example/path"
+            );
+        }
+        text.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Escape));
+        assert_eq!(controls.location.text().as_str(), "");
+        window.destroy();
+    }
+
     #[gtk::test]
     fn gtk_browser_omnibar_preserves_native_draft_and_selection_on_refresh() {
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
