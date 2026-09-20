@@ -15,6 +15,8 @@ mkdir -p \
     "$ghostty_prefix/lib" \
     "$ghostty_prefix/share/ghostty/shell-integration/bash" \
     "$ghostty_prefix/share/ghostty/themes" \
+    "$ghostty_prefix/share/terminfo/x" \
+    "$ghostty_prefix/share/terminfo/g" \
     "$output_dir" \
     "$second_output_dir"
 
@@ -50,6 +52,8 @@ ln -s libghostty-vt.so.0 "$ghostty_prefix/lib/libghostty-vt.so"
 printf 'fixture shell integration\n' \
     > "$ghostty_prefix/share/ghostty/shell-integration/bash/ghostty.bash"
 printf 'palette = 0=#000000\n' > "$ghostty_prefix/share/ghostty/themes/Fixture"
+printf 'fixture compiled terminfo\n' > "$ghostty_prefix/share/terminfo/x/xterm-ghostty"
+ln -s ../x/xterm-ghostty "$ghostty_prefix/share/terminfo/g/ghostty"
 
 CMUX_LINUX_BUNDLE_BUILD=0 \
 CMUX_LINUX_BUNDLE_VALIDATE=0 \
@@ -98,6 +102,8 @@ for required in \
     cmux-linux-x86_64/share/cmux/ghostty/lib/libghostty-vt.so \
     cmux-linux-x86_64/share/cmux/ghostty/include/ghostty.h \
     cmux-linux-x86_64/share/cmux/ghostty/share/ghostty/themes/Fixture \
+    cmux-linux-x86_64/share/cmux/ghostty/share/terminfo/x/xterm-ghostty \
+    cmux-linux-x86_64/share/cmux/ghostty/share/terminfo/g/ghostty \
     cmux-linux-x86_64/share/cmux/bundle-version \
     cmux-linux-x86_64/share/cmux/build-provenance.txt \
     cmux-linux-x86_64/share/applications/ai.manaflow.cmux.desktop
@@ -112,6 +118,11 @@ relocated_parent="$tmp_dir/relocated bundle"
 mkdir -p "$relocated_parent"
 tar -xzf "$archive" -C "$relocated_parent"
 relocated="$relocated_parent/cmux-linux-x86_64"
+cmp "$ghostty_prefix/share/terminfo/x/xterm-ghostty" \
+    "$relocated/share/cmux/ghostty/share/terminfo/x/xterm-ghostty"
+[[ -L "$relocated/share/cmux/ghostty/share/terminfo/g/ghostty" ]]
+cmp "$ghostty_prefix/share/terminfo/x/xterm-ghostty" \
+    "$relocated/share/cmux/ghostty/share/terminfo/g/ghostty"
 provenance="$relocated/share/cmux/build-provenance.txt"
 grep -Fx "schema=cmux.linux-bundle.provenance.v1" "$provenance"
 grep -Fx "version=test-version" "$provenance"
@@ -144,6 +155,8 @@ HOME="$tmp_dir/install-home" PREFIX="$install_root" \
     "$relocated/install.sh" >/dev/null
 [[ -x "$install_root/bin/cmux-linux-app" ]]
 [[ -f "$install_root/share/cmux/ghostty/lib/libghostty-internal.so" ]]
+cmp "$ghostty_prefix/share/terminfo/x/xterm-ghostty" \
+    "$install_root/share/cmux/ghostty/share/terminfo/g/ghostty"
 [[ -f "$install_root/share/cmux/bundle-version" ]]
 [[ -f "$install_root/share/cmux/build-provenance.txt" ]]
 [[ -f "$install_root/share/applications/ai.manaflow.cmux.desktop" ]]
