@@ -10,8 +10,8 @@ The audit used five parallel source reviews, failing behavioral tests, the
 existing socket contracts, six native GTK screenshot scenarios, and a real
 embedded Ghostty session under Xvfb. macOS cannot run on this Linux host;
 original behavior was verified against its implementation and checked-in
-screenshots. Hardware Wayland behavior requires a separate desktop check. The follow-up pass
-also tests a private software-rendered Weston compositor.
+screenshots. Follow-up passes add private software Weston, LXDE, actual
+IBus/Anthy, virtual RandR outputs, and Radeon hardware-rendered Weston checks.
 
 ## Verified problems and changes
 
@@ -67,7 +67,7 @@ not end-to-end keyboard or rendering latency.
 | Session restart | A native Ghostty launch, Unicode input, split, quit, and reopen preserved workspace names and pane topology. Reopening starts new shells; it is not continuation of an existing process. |
 | Terminal rendering | The port embeds the pinned Ghostty fork, with ABI/resource diagnostics and renderer-driven wakeups. No per-keystroke drawing loop was added. |
 | Keyboard shortcuts | Linux uses terminal-safe platform bindings rather than mechanically replacing macOS Command with Control. Existing shortcut settings and context guards remain authoritative. |
-| Clipboard, selection, scrollback, find, IME | Existing implementations and contracts remain. Native search/focus, pointer selection, and cross-process X11 clipboard copy/paste are exercised. Actual desktop IME composition still needs validation. |
+| Clipboard, selection, scrollback, find, IME | Existing implementations and contracts remain. Native search/focus, pointer selection, and cross-process X11 clipboard copy/paste are exercised. Real IBus/Anthy composition is exercised under LXDE; see the desktop validation below. |
 | Browser panes | WebKit panes, navigation controls, and a rendered page are present in the native browser fixture. This does not establish browser-extension/import or website compatibility parity. |
 | Settings/configuration | Existing settings surface and parsers remain; Settings is discoverable through the menu, scrollable, searchable, and can open/reset its configuration. New visible strings are in both Linux catalogs. |
 | Notifications | Workspace badges and pane attention states appear in the attention fixture. Desktop notification delivery depends on the desktop service and is not established by a screenshot. |
@@ -83,10 +83,14 @@ resizable persisted sidebars, terminal/workspace/window closed history, and
 background UI autosaves. The remaining limits concern platform validation and
 features outside the checked daily-use workflows:
 
-- Native GNOME Wayland, hardware GPU latency, IME, multi-monitor scaling,
-  screen-reader use, cannot be certified by Xvfb or software Weston. Cross-process X11 clipboard
-  copy and paste pass, but primary-desktop ownership still needs checking. The audit does not call this a release-ready daily driver
-  until the [roadmap](ROADMAP.md) gates are satisfied.
+- Native GNOME Wayland, hardware input-to-photon latency, physical monitor
+  hotplug, mixed-DPI scaling, and screen-reader use still require checks.
+  The tested GTK/IBus stack also loses the first IME character when replacing
+  selected text on X11; the independent control and workaround are below.
+  LXDE/IBus, virtual RandR outputs, and a hardware-rendered headless Weston
+  session now have separate evidence below. Cross-process X11 clipboard copy
+  and paste pass, but primary-desktop ownership still needs checking. The
+  [roadmap](ROADMAP.md) retains the outstanding release gates.
 - Remote/cloud/mobile flows, browser migration, and custom sidebar extensions
   were checked only for their interaction with the touched core paths. Their
   complete feature parity is outside the existing daily-driver contract.
@@ -160,3 +164,65 @@ file. The bundle is a development build, not a published release.
 
 Follow-up logs, native probes, and screenshots are stored beside the original
 evidence under `../../cmux-daily-audit-2026-09-20/`.
+
+## LXDE, IME, and hardware validation
+
+The next pass runs private LXDE sessions with Openbox, lxpanel, and pcmanfm.
+Desktop packages and Anthy were extracted into temporary directories; system
+packages, desktop configuration, and device permissions were unchanged.
+
+- Native XTest keyboard input reaches the terminal after minimize/restore,
+  maximize, fullscreen exit, virtual desktop moves/switches, and palette close.
+  Each stage checks executed shell output, with screenshots retained.
+- Stock Openbox reserves Ctrl+Alt+arrow for virtual desktop navigation. The
+  same key therefore cannot reach cmux pane focus. Changing Focus Left to
+  Ctrl+Shift+Left through the existing shortcut settings works with actual
+  keyboard events and persists the override.
+- Two independently configured Xorg dummy/RandR outputs exercise window moves,
+  maximize on the second output, primary-output changes, removal/reconnection,
+  vertical arrangement, and mode changes. Terminal input and rendering remain
+  live. These output tests use llvmpipe. After removing a lower output, Openbox
+  can leave a normal window partly off-screen with its titlebar reachable;
+  an independent stock GTK window reproduces the same placement. A maximized
+  cmux window relocates and resizes to the remaining work area.
+- A non-root disposable container with only the Radeon render node exposed
+  runs packaged cmux under a hardware-rendered headless Weston compositor.
+  Mesa identifies the AMD Radeon 780M; cmux opens the render node and its
+  amdgpu fdinfo records graphics and compute work. Terminal command output,
+  split creation, frame presentation, and clean quit pass at output scales
+  1 and 2. This verifies hardware rendering, not physical display scanout,
+  input-to-photon latency, or transitions between monitors with different DPI.
+
+Actual IBus/Anthy testing found three additional defects: terminal Find and
+browser Find consumed Enter before the IME committed converted text, and the
+address bar could navigate an old suggestion during composition. All three
+capture handlers now yield to GTK while the native editor has preedit text.
+Three GTK behavioral tests failed before the fix and pass afterward. Normal
+Find and address navigation resume when composition ends. The complete GTK
+suite passes **1,095 tests** (762 library, one daemon, 332 socket contracts),
+with five existing explicit ignores. Formatting and the GTK build pass.
+
+Desktop evidence is under `../../cmux-daily-audit-2026-09-20/desktop-ime/`,
+`desktop-gpu/`, and `desktop-lxde-keyboard/`. Hardware rendering and real IME
+coverage reduce the earlier validation gap; the remaining limits above still
+apply.
+
+The real-engine rerun uses XTest romaji input, Anthy candidate conversion,
+and IBus protocol logs. It verifies `nihongo` becoming `日本語` in the
+terminal, palette, terminal Find, browser Find, and address editor, including
+an address with an existing suggestion. The initial address is explicitly
+cleared before composition because of the GTK limitation below. Terminal Find
+reports two matches.
+Palette editing survives metadata refresh during composition; its first
+Escape cancels composition without closing the palette. Candidate selection
+uses the real IBus popup, rather than injected Unicode or synthetic preedit.
+
+Replacing selected text has a separate limitation in the installed GTK/IBus
+stack on X11: the first preedit character can be lost. A standalone GTK Entry,
+selected after mapping with End then Ctrl+A, reproduces the same `nihongo` →
+`意本語` result. Native reset stacks show GTK's PRIMARY clipboard handling
+resetting the IME during selection deletion, without a cmux callback. Clearing
+the selected text with Backspace before starting composition avoids this path.
+The audit records this as an unresolved toolkit limitation, not a fixed cmux
+bug. An experimental suggestion-refresh change did not correct it and was
+excluded from the final source.

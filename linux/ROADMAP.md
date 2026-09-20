@@ -93,9 +93,13 @@ The [2026-09-20 daily-use audit](AUDIT.md) extends that baseline:
 
 This still does not prove every daily-driver release gate:
 
-- Native GNOME Wayland and hardware-accelerated rendering need desktop checks.
-- Mouse selection/copy, IME composition, accessibility, and multi-monitor
-  behavior need checks on the supported compositor.
+- Native GNOME Wayland, hardware input-to-photon latency, accessibility,
+  physical monitor hotplug, and mixed-DPI behavior need primary-desktop checks.
+- LXDE window lifecycle, real IBus/Anthy composition, virtual multi-output
+  changes, and headless Radeon hardware rendering now have audit evidence.
+- The installed GTK/IBus stack can lose the first IME character when replacing
+  selected text on X11, also reproduced in a standalone GTK entry. Clear the
+  selection before composing; see the audit for the unresolved toolkit limit.
 - The installed development bundle smoke does not replace a fresh release
   build and its native desktop-entry launch on the primary environment.
 
@@ -157,8 +161,9 @@ behavior boundary at a time.
 
 Status: automated session/configuration, native X11 interaction, software
 Wayland launch, and relocated installation are covered by the daily-use audit.
-Native GNOME Wayland, hardware GPU latency, actual IME composition, and
-multi-monitor checks still require the primary desktop environment.
+LXDE, real Japanese IME, virtual multi-output changes, and Radeon hardware
+rendering are also exercised. Native GNOME Wayland, hardware latency, physical
+monitor hotplug, mixed-DPI scaling, and accessibility remain unverified.
 
 ## Feature intake rule
 

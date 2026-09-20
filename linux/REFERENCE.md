@@ -640,7 +640,11 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   Hide Find and Split Browser Down. Layered `shortcuts.bindings` values load
   from `cmux.json` at startup and on config reload; the native Keyboard
   Shortcuts settings surface edits, unbinds, and resets the primary file using
-  the shared macOS action IDs. Two-stroke arrays and recorder object forms use
+  the shared macOS action IDs. Desktop-reserved keys take precedence: stock
+  LXDE/Openbox consumes Ctrl+Alt+arrow for virtual desktops. Remap pane focus
+  in Keyboard Shortcuts when needed; native LXDE testing verifies that changing
+  Focus Left to Ctrl+Shift+Left reaches cmux and focuses the adjacent pane.
+  Two-stroke arrays and recorder object forms use
   the macOS immediate-next-key chord contract, including bare second strokes
   routed through GTK without stealing ordinary terminal input. Command-palette
   navigation uses configurable `commandPaletteNext` and
