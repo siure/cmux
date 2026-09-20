@@ -30283,6 +30283,13 @@ fn core_shortcuts_cover_workspace_layout_configuration_and_notifications() {
 fn right_sidebar_shortcuts_toggle_focus_and_switch_modes_in_sidebar_context() {
     let server = start_server();
 
+    let shown = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+alt+b"}),
+    );
+    assert_eq!(shown["visible"], true);
+
     let hidden = rpc(
         &server.socket,
         "debug.shortcut.simulate",
@@ -34841,7 +34848,7 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
         &[],
     );
     assert_eq!(initial["window_id"], current_window);
-    assert_eq!(initial["visible"], true);
+    assert_eq!(initial["visible"], false);
     assert_eq!(initial["mode"], "files");
 
     let hide = cli(&server.socket, &["right-sidebar", "hide"]);
@@ -34895,6 +34902,7 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
 #[test]
 fn socket_left_sidebar_controls_visibility_without_changing_right_sidebar() {
     let server = start_server();
+    rpc(&server.socket, "sidebar.right", json!({"action": "show"}));
     let initial = rpc(&server.socket, "sidebar.left", json!({"action": "mode"}));
     assert_eq!(initial["visible"], true);
 

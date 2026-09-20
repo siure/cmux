@@ -2971,6 +2971,11 @@ pub(crate) enum GlobalWindowCommand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CloseConfirmationAction {
+    WorkspaceBatch {
+        workspace_id: String,
+        action: String,
+        targets: Vec<String>,
+    },
     Workspace {
         workspace_id: String,
         source: String,
@@ -4065,7 +4070,7 @@ impl AppState {
                 self.right_sidebar_visible_by_window
                     .get(&window.id)
                     .copied()
-                    .unwrap_or(true),
+                    .unwrap_or(false),
             ),
             sidebar_mode: self.right_sidebar_mode(&window.id),
             workspaces: window
@@ -4445,6 +4450,14 @@ impl AppState {
 
     fn close_confirmation_request_value(&self, request: &CloseConfirmationRequest) -> Value {
         let (kind, title, message, accept_label, surface_id, source) = match &request.action {
+            CloseConfirmationAction::WorkspaceBatch { .. } => (
+                "workspace-batch",
+                "Close workspaces?",
+                "This will close the selected workspaces and all of their panels.",
+                "Close",
+                None,
+                Some("workspace-batch"),
+            ),
             CloseConfirmationAction::Workspace { source, .. } => (
                 "workspace",
                 "Close workspace?",
@@ -4559,6 +4572,17 @@ impl AppState {
         }
 
         let mut result = match request.action {
+            CloseConfirmationAction::WorkspaceBatch {
+                workspace_id,
+                action,
+                targets,
+            } => {
+                if !self.workspaces.contains_key(&workspace_id) {
+                    json!({"handled": false, "reason": "workspace_not_found"})
+                } else {
+                    self.close_workspace_targets(&action, &workspace_id, targets)?
+                }
+            }
             CloseConfirmationAction::Workspace {
                 workspace_id,
                 source,
@@ -7550,6 +7574,7 @@ impl AppState {
     ) -> AppResult<Value> {
         let command_palette_was_visible = self.palette_visible_for_current_window();
         let mut debug_shortcut_was_terminal_input = false;
+        let mut debug_shortcut_was_palette_input = false;
         let result = match method {
             "system.ping" => Ok(json!({"pong": true})),
             "system.capabilities" => Ok(json!({
@@ -8371,16 +8396,20 @@ impl AppState {
                         }))
                     }
                 } else if self.palette_visible_for_current_window() && normalized == "ctrl+a" {
+                    debug_shortcut_was_palette_input = true;
                     self.command_palette_select_all()
                 } else if self.palette_visible_for_current_window() && normalized == "backspace" {
+                    debug_shortcut_was_palette_input = true;
                     self.command_palette_delete_backward_current()
                 } else if self.palette_visible_for_current_window()
                     && matches!(normalized.as_str(), "down" | "up" | "pagedown" | "pageup")
                 {
+                    debug_shortcut_was_palette_input = true;
                     self.command_palette_move_selection(&normalized)
                 } else if self.workspace_description_palette_visible()
                     && normalized == "shift+enter"
                 {
+                    debug_shortcut_was_palette_input = true;
                     self.command_palette_type_text("\n")
                 } else if self.palette_visible_for_current_window()
                     && matches!(normalized.as_str(), "enter" | "return")
@@ -8402,6 +8431,7 @@ impl AppState {
                     self.surface_send_key(&json!({"key": "enter"}))
                 } else if self.palette_visible_for_current_window() && trimmed.chars().count() == 1
                 {
+                    debug_shortcut_was_palette_input = true;
                     self.command_palette_type_text(trimmed)
                 } else if trimmed.chars().count() == 1 {
                     debug_shortcut_was_terminal_input = true;
@@ -8430,7 +8460,14 @@ impl AppState {
                 )
             }) {
                 self.render_activity.record_model_mutation();
-                self.persist_session_snapshot_after_method(method);
+                let transient_shortcut = matches!(
+                    method,
+                    "debug.shortcut.simulate" | "debug.command_palette.activate"
+                ) && (debug_shortcut_was_palette_input
+                    || result.as_ref().is_ok_and(shortcut_result_is_transient));
+                if !transient_shortcut {
+                    self.persist_session_snapshot_after_method(method);
+                }
             }
         }
         result
@@ -14166,11 +14203,14 @@ impl AppState {
             .is_some_and(|workspace| workspace.pinned);
         let requires_confirmation = interactive
             && !confirmed
-            && (pinned || match source.as_str() {
-                "tab_button" => self.app_workspace_settings.warn_before_closing_tab_x_button
-                    || (dirty && self.app_workspace_settings.warn_before_closing_tab),
-                _ => dirty,
-            });
+            && (pinned
+                || match source.as_str() {
+                    "tab_button" => {
+                        self.app_workspace_settings.warn_before_closing_tab_x_button
+                            || (dirty && self.app_workspace_settings.warn_before_closing_tab)
+                    }
+                    _ => dirty,
+                });
         if requires_confirmation {
             let confirmation = self.enqueue_close_confirmation(
                 window_id.clone(),
@@ -17390,7 +17430,7 @@ impl AppState {
                 workspace.custom_color = None;
             }
             "close_others" | "close_above" | "close_below" => {
-                return self.close_neighbor_workspaces_action(&action, &workspace_id);
+                return self.close_neighbor_workspaces_action(&action, &workspace_id, params);
             }
             _ => {
                 return Err(AppError::invalid_params(format!(
@@ -17566,13 +17606,14 @@ impl AppState {
         &mut self,
         action: &str,
         workspace_id: &str,
+        params: &Value,
     ) -> AppResult<Value> {
         let (window_id, anchor_index, _len) = self.workspace_window_index_len(workspace_id)?;
-        let (window_workspace_ids, selected_before) = self
+        let window_workspace_ids = self
             .windows
             .iter()
             .find(|window| window.id == window_id)
-            .map(|window| (window.workspaces.clone(), window.selected_workspace.clone()))
+            .map(|window| window.workspaces.clone())
             .ok_or_else(|| AppError::not_found("window not found"))?;
         let targets = match action {
             "close_above" => window_workspace_ids[..anchor_index].to_vec(),
@@ -17588,10 +17629,67 @@ impl AppState {
             _ => Vec::new(),
         };
 
+        let source = string_param(params, "source").unwrap_or_else(|| "api".to_string());
+        let interactive = !matches!(source.as_str(), "api" | "socket" | "cli");
+        let closable_targets = targets
+            .iter()
+            .filter(|id| {
+                self.workspaces
+                    .get(*id)
+                    .is_some_and(|workspace| !workspace.pinned)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if interactive
+            && self.app_workspace_settings.warn_before_closing_tab
+            && !closable_targets.is_empty()
+        {
+            let dirty = closable_targets.iter().any(|workspace_id| {
+                self.workspace_surface_ids(workspace_id)
+                    .iter()
+                    .any(|surface_id| self.surface_needs_close_confirmation(surface_id))
+            });
+            let confirmation = self.enqueue_close_confirmation(
+                window_id.clone(),
+                dirty,
+                CloseConfirmationAction::WorkspaceBatch {
+                    workspace_id: workspace_id.to_string(),
+                    action: action.to_string(),
+                    targets: closable_targets,
+                },
+            );
+            return Ok(json!({
+                "closed": 0, "blocked": true, "confirmation_required": true,
+                "workspace_id": workspace_id, "window_id": window_id,
+                "confirmation": confirmation
+            }));
+        }
+        self.close_workspace_targets(action, workspace_id, targets)
+    }
+
+    fn close_workspace_targets(
+        &mut self,
+        action: &str,
+        workspace_id: &str,
+        targets: Vec<String>,
+    ) -> AppResult<Value> {
+        let (window_id, _, _) = self.workspace_window_index_len(workspace_id)?;
+        let selected_before = self
+            .windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .and_then(|window| window.selected_workspace.clone());
         let mut closed_workspace_ids = Vec::new();
         let mut closed_workspace_refs = Vec::new();
         let mut skipped_pinned = 0;
         for target_id in targets {
+            if !self
+                .workspaces
+                .get(&target_id)
+                .is_some_and(|workspace| workspace.window_id == window_id)
+            {
+                continue;
+            }
             if self
                 .workspaces
                 .get(&target_id)
@@ -23244,7 +23342,7 @@ impl AppState {
                     .right_sidebar_visible_by_window
                     .get(&window_id)
                     .copied()
-                    .unwrap_or(true);
+                    .unwrap_or(false);
                 self.right_sidebar_visible_by_window
                     .insert(window_id.clone(), next);
             }
@@ -23343,7 +23441,7 @@ impl AppState {
         json!({
             "window_id": window_id,
             "window_ref": self.window_ref(window_id),
-            "visible": self.right_sidebar_visible_by_window.get(window_id).copied().unwrap_or(true),
+            "visible": self.right_sidebar_visible_by_window.get(window_id).copied().unwrap_or(false),
             "mode": self.right_sidebar_mode(window_id),
             "available_modes": self.available_right_sidebar_modes(),
             "focus_generation": self.right_sidebar_focus_generation_by_window.get(window_id).copied().unwrap_or(0),
@@ -30872,16 +30970,25 @@ impl AppState {
                     .ok_or_else(|| AppError::invalid_params("command_id is required"))?;
                 let state = self.command_palette_state(&window_id);
                 if !state.visible
-                    || matches!(state.mode,
-                        CommandPaletteMode::RenameInput | CommandPaletteMode::WorkspaceDescriptionInput)
+                    || matches!(
+                        state.mode,
+                        CommandPaletteMode::RenameInput
+                            | CommandPaletteMode::WorkspaceDescriptionInput
+                    )
                 {
-                    return Err(AppError::invalid_state("command palette has no selectable results"));
+                    return Err(AppError::invalid_state(
+                        "command palette has no selectable results",
+                    ));
                 }
-                let index = self.command_palette_rows(&window_id).iter()
+                let index = self
+                    .command_palette_rows(&window_id)
+                    .iter()
                     .position(|row| {
                         row.get("command_id").and_then(Value::as_str) == Some(command_id.as_str())
                     })
-                    .ok_or_else(|| AppError::not_found("command palette result is no longer available"))?;
+                    .ok_or_else(|| {
+                        AppError::not_found("command palette result is no longer available")
+                    })?;
                 self.current_window = window_id.clone();
                 self.command_palette_state_mut(&window_id).selected_index = index;
                 self.command_palette_accept_current()
@@ -31979,13 +32086,13 @@ impl AppState {
             "palette.moveWorkspaceDown" => self.workspace_action(&json!({"action": "move-down"})),
             "palette.moveWorkspaceToTop" => self.workspace_action(&json!({"action": "move-top"})),
             "palette.closeOtherWorkspaces" => {
-                self.workspace_action(&json!({"action": "close-others"}))
+                self.workspace_action(&json!({"action": "close-others", "source": "palette"}))
             }
             "palette.closeWorkspacesBelow" => {
-                self.workspace_action(&json!({"action": "close-below"}))
+                self.workspace_action(&json!({"action": "close-below", "source": "palette"}))
             }
             "palette.closeWorkspacesAbove" => {
-                self.workspace_action(&json!({"action": "close-above"}))
+                self.workspace_action(&json!({"action": "close-above", "source": "palette"}))
             }
             "palette.markWorkspaceRead" => self.workspace_action(&json!({"action": "mark-read"})),
             "palette.markWorkspaceUnread" => {
@@ -54316,6 +54423,39 @@ fn method_persists_session_snapshot(method: &str) -> bool {
         || method.starts_with("sidebar.")
 }
 
+// Palette/search presentation is observable, but is not part of the saved session.
+fn shortcut_result_is_transient(result: &Value) -> bool {
+    result.get("blocked").and_then(Value::as_bool) == Some(true)
+        || result.get("chord_pending").and_then(Value::as_bool) == Some(true)
+        || result.get("chord_cancelled").and_then(Value::as_bool) == Some(true)
+        || result.get("selected_index").is_some()
+        || result.get("terminal_search").is_some()
+        || result.get("diff_shortcut_action").is_some()
+        || (result.get("rows").is_some() && result.get("visible").is_some())
+        || matches!(
+            result.get("mode").and_then(Value::as_str),
+            Some(
+                "commands"
+                    | "switcher"
+                    | "global_search"
+                    | "rename_input"
+                    | "workspace_description_input"
+            )
+        )
+        || matches!(
+            result.get("action").and_then(Value::as_str),
+            Some(
+                "find"
+                    | "findNext"
+                    | "findPrevious"
+                    | "hideFind"
+                    | "useSelectionForFind"
+                    | "commandPaletteNext"
+                    | "commandPalettePrevious"
+            )
+        )
+}
+
 fn method_changes_presented_model(
     method: &str,
     params: &Value,
@@ -66312,10 +66452,22 @@ mod daily_workflow_tests {
     fn daily_reads_and_terminal_input_do_not_write_session_snapshots() {
         let mut app = app();
         let initial = app.session_snapshot_persist_attempt_count_for_test();
-        for method in ["workspace.list", "workspace.current", "surface.list", "pane.list",
-            "surface.read_text", "browser.status", "settings.shortcuts", "sidebar.state"] {
+        for method in [
+            "workspace.list",
+            "workspace.current",
+            "surface.list",
+            "pane.list",
+            "surface.read_text",
+            "browser.status",
+            "settings.shortcuts",
+            "sidebar.state",
+        ] {
             app.handle(method, &json!({})).expect(method);
-            assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), initial, "{method}");
+            assert_eq!(
+                app.session_snapshot_persist_attempt_count_for_test(),
+                initial,
+                "{method}"
+            );
         }
         for (method, params) in [
             ("surface.send_text", json!({"text": ""})),
@@ -66324,9 +66476,14 @@ mod daily_workflow_tests {
             ("debug.shortcut.simulate", json!({"combo": "enter"})),
         ] {
             app.handle(method, &params).expect(method);
-            assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), initial, "{method}");
+            assert_eq!(
+                app.session_snapshot_persist_attempt_count_for_test(),
+                initial,
+                "{method}"
+            );
         }
-        app.handle("workspace.create", &json!({"title": "Saved workspace"})).unwrap();
+        app.handle("workspace.create", &json!({"title": "Saved workspace"}))
+            .unwrap();
         assert!(app.session_snapshot_persist_attempt_count_for_test() > initial);
     }
 
@@ -66335,18 +66492,28 @@ mod daily_workflow_tests {
         let mut app = app();
         let target = app.current_workspace_id().unwrap();
         let surface = app.current_surface_id().unwrap();
-        app.handle("workspace.create", &json!({"title": "Other"})).unwrap();
-        app.update_embedded_terminal_close_confirmation(&surface, true).unwrap();
+        app.handle("workspace.create", &json!({"title": "Other"}))
+            .unwrap();
+        app.update_embedded_terminal_close_confirmation(&surface, true)
+            .unwrap();
         let params = json!({"workspace_id": target, "source": "tab_button"});
         let result = app.handle("workspace.close", &params).unwrap();
         assert_eq!(result["confirmation_required"], true);
         assert!(app.workspaces.contains_key(&target));
         let id = result["confirmation"]["id"].clone();
-        app.handle("app.close_confirmation.reply", &json!({"id": id, "confirmed": false})).unwrap();
+        app.handle(
+            "app.close_confirmation.reply",
+            &json!({"id": id, "confirmed": false}),
+        )
+        .unwrap();
         assert!(app.surfaces.contains_key(&surface));
         let result = app.handle("workspace.close", &params).unwrap();
         let before = app.session_snapshot_persist_attempt_count_for_test();
-        app.handle("app.close_confirmation.reply", &json!({"id": result["confirmation"]["id"], "confirmed": true})).unwrap();
+        app.handle(
+            "app.close_confirmation.reply",
+            &json!({"id": result["confirmation"]["id"], "confirmed": true}),
+        )
+        .unwrap();
         assert!(!app.workspaces.contains_key(&target));
         assert!(!app.surfaces.contains_key(&surface));
         assert!(app.session_snapshot_persist_attempt_count_for_test() > before);
@@ -66356,10 +66523,13 @@ mod daily_workflow_tests {
     fn daily_workspace_shortcut_protects_pinned_workspace() {
         let mut app = app();
         let target = app.current_workspace_id().unwrap();
-        app.handle("workspace.create", &json!({"title": "Other"})).unwrap();
+        app.handle("workspace.create", &json!({"title": "Other"}))
+            .unwrap();
         app.select_workspace_by_id(&target).unwrap();
         app.workspaces.get_mut(&target).unwrap().pinned = true;
-        let result = app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+w"})).unwrap();
+        let result = app
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+w"}))
+            .unwrap();
         assert_eq!(result["confirmation_required"], true);
         assert!(app.workspaces.contains_key(&target));
     }
@@ -66367,10 +66537,19 @@ mod daily_workflow_tests {
     #[test]
     fn daily_last_workspace_shortcut_closes_window() {
         let mut app = app();
-        let result = app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+w"})).unwrap();
+        let result = app
+            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+w"}))
+            .unwrap();
         assert_eq!(result["confirmation_required"], true);
-        app.handle("app.close_confirmation.reply", &json!({"id": result["confirmation"]["id"], "confirmed": true})).unwrap();
-        assert_eq!(app.drain_global_window_commands(), vec![GlobalWindowCommand::Quit]);
+        app.handle(
+            "app.close_confirmation.reply",
+            &json!({"id": result["confirmation"]["id"], "confirmed": true}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.drain_global_window_commands(),
+            vec![GlobalWindowCommand::Quit]
+        );
     }
 
     #[test]
@@ -66378,9 +66557,12 @@ mod daily_workflow_tests {
         let mut app = app();
         let target = app.current_workspace_id().unwrap();
         let surface = app.current_surface_id().unwrap();
-        app.handle("workspace.create", &json!({"title": "Other"})).unwrap();
-        app.update_embedded_terminal_close_confirmation(&surface, true).unwrap();
-        app.handle("workspace.close", &json!({"workspace_id": target})).unwrap();
+        app.handle("workspace.create", &json!({"title": "Other"}))
+            .unwrap();
+        app.update_embedded_terminal_close_confirmation(&surface, true)
+            .unwrap();
+        app.handle("workspace.close", &json!({"workspace_id": target}))
+            .unwrap();
         assert!(!app.workspaces.contains_key(&target));
     }
 }
@@ -66392,21 +66574,68 @@ mod palette_pointer_activation_tests {
 
     #[test]
     fn pointer_activation_targets_visible_command_in_owning_window() {
-        let mut app = AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned).unwrap();
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .unwrap();
         let first = app.current_window.clone();
-        let second = app.handle("window.create", &json!({})).unwrap()["window_id"].as_str().unwrap().to_string();
-        app.command_palette_toggle(&first, CommandPaletteMode::Commands).unwrap();
+        let second = app.handle("window.create", &json!({})).unwrap()["window_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        app.command_palette_toggle(&first, CommandPaletteMode::Commands)
+            .unwrap();
         app.current_window = second.clone();
-        let first_count = app.windows.iter().find(|w| w.id == first).unwrap().workspaces.len();
-        let second_count = app.windows.iter().find(|w| w.id == second).unwrap().workspaces.len();
-        app.handle("debug.command_palette.activate", &json!({"window_id": first, "command_id": "palette.newWorkspace"})).unwrap();
-        assert_eq!(app.windows.iter().find(|w| w.id == first).unwrap().workspaces.len(), first_count + 1);
-        assert_eq!(app.windows.iter().find(|w| w.id == second).unwrap().workspaces.len(), second_count);
+        let first_count = app
+            .windows
+            .iter()
+            .find(|w| w.id == first)
+            .unwrap()
+            .workspaces
+            .len();
+        let second_count = app
+            .windows
+            .iter()
+            .find(|w| w.id == second)
+            .unwrap()
+            .workspaces
+            .len();
+        app.handle(
+            "debug.command_palette.activate",
+            &json!({"window_id": first, "command_id": "palette.newWorkspace"}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.windows
+                .iter()
+                .find(|w| w.id == first)
+                .unwrap()
+                .workspaces
+                .len(),
+            first_count + 1
+        );
+        assert_eq!(
+            app.windows
+                .iter()
+                .find(|w| w.id == second)
+                .unwrap()
+                .workspaces
+                .len(),
+            second_count
+        );
         assert!(!app.command_palette_state(&first).visible);
-        app.command_palette_toggle(&first, CommandPaletteMode::Commands).unwrap();
+        app.command_palette_toggle(&first, CommandPaletteMode::Commands)
+            .unwrap();
         app.command_palette_state_mut(&first).query = "no matching command".to_string();
         let count = app.workspaces.len();
-        assert!(app.handle("debug.command_palette.activate", &json!({"window_id": first, "command_id": "palette.newWorkspace"})).is_err());
+        assert!(app
+            .handle(
+                "debug.command_palette.activate",
+                &json!({"window_id": first, "command_id": "palette.newWorkspace"})
+            )
+            .is_err());
         assert_eq!(app.workspaces.len(), count);
         assert!(app.command_palette_state(&first).visible);
     }
@@ -66418,7 +66647,8 @@ mod daily_workspace_batch_tests {
     use serde_json::json;
 
     fn app() -> AppState {
-        AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned).unwrap()
+        AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned)
+            .unwrap()
     }
 
     #[test]
@@ -66426,18 +66656,45 @@ mod daily_workspace_batch_tests {
         let mut app = app();
         app.app_workspace_settings.warn_before_closing_tab = true;
         let anchor = app.current_workspace_id().unwrap();
-        let target = app.handle("workspace.create", &json!({"title": "Target"})).unwrap()["workspace_id"].as_str().unwrap().to_string();
-        let pinned = app.handle("workspace.create", &json!({"title": "Pinned"})).unwrap()["workspace_id"].as_str().unwrap().to_string();
+        let target = app
+            .handle("workspace.create", &json!({"title": "Target"}))
+            .unwrap()["workspace_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let pinned = app
+            .handle("workspace.create", &json!({"title": "Pinned"}))
+            .unwrap()["workspace_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         app.workspaces.get_mut(&pinned).unwrap().pinned = true;
-        let params = json!({"workspace_id": anchor, "action": "close-others", "source": "context_menu"});
+        let params =
+            json!({"workspace_id": anchor, "action": "close-others", "source": "context_menu"});
         let request = app.handle("workspace.action", &params).unwrap();
         assert_eq!(request["confirmation_required"], true);
         assert!(app.workspaces.contains_key(&target));
-        app.handle("app.close_confirmation.reply", &json!({"id": request["confirmation"]["id"], "confirmed": false})).unwrap();
+        app.handle(
+            "app.close_confirmation.reply",
+            &json!({"id": request["confirmation"]["id"], "confirmed": false}),
+        )
+        .unwrap();
         assert!(app.workspaces.contains_key(&target));
         let request = app.handle("workspace.action", &params).unwrap();
-        let later = app.handle("workspace.create", &json!({"title": "Created after dialog"})).unwrap()["workspace_id"].as_str().unwrap().to_string();
-        app.handle("app.close_confirmation.reply", &json!({"id": request["confirmation"]["id"], "confirmed": true})).unwrap();
+        let later = app
+            .handle(
+                "workspace.create",
+                &json!({"title": "Created after dialog"}),
+            )
+            .unwrap()["workspace_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        app.handle(
+            "app.close_confirmation.reply",
+            &json!({"id": request["confirmation"]["id"], "confirmed": true}),
+        )
+        .unwrap();
         assert!(!app.workspaces.contains_key(&target));
         assert!(app.workspaces.contains_key(&anchor));
         assert!(app.workspaces.contains_key(&pinned));
@@ -66492,14 +66749,50 @@ mod shortcut_snapshot_tests {
     #[test]
     fn transient_shortcuts_do_not_save_but_workspace_creation_does() {
         let mut app = AppState::with_paths_and_terminal_startup(
-            None, None, TerminalStartupMode::RendererOwned,
-        ).unwrap();
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .unwrap();
         let before = app.session_snapshot_persist_attempt_count_for_test();
-        for combo in ["ctrl+shift+p", "w", "down", "up", "backspace", "n", "down", "ctrl+shift+p", "ctrl+f", "ctrl+alt+shift+f"] {
-            app.handle("debug.shortcut.simulate", &json!({"combo": combo})).unwrap();
-            assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), before, "{combo}");
+        for combo in [
+            "ctrl+shift+p",
+            "w",
+            "down",
+            "up",
+            "backspace",
+            "n",
+            "down",
+            "ctrl+shift+p",
+            "ctrl+f",
+            "ctrl+alt+shift+f",
+        ] {
+            let result = app
+                .handle(
+                    "debug.shortcut.simulate",
+                    &json!({"combo": combo, "context": {"terminalFocus": false}}),
+                )
+                .unwrap();
+            if combo == "ctrl+f" {
+                assert_eq!(result["action"], "find");
+                assert_eq!(result["handled"], true);
+            }
+            assert_eq!(
+                app.session_snapshot_persist_attempt_count_for_test(),
+                before,
+                "{combo}"
+            );
         }
-        app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+n"})).unwrap();
+        app.handle(
+            "debug.shortcut.set",
+            &json!({"name": "new_workspace", "combo": "ctrl+alt+shift+n"}),
+        )
+        .unwrap();
+        app.handle(
+            "debug.shortcut.simulate",
+            &json!({"combo": "ctrl+alt+shift+n"}),
+        )
+        .unwrap();
         assert!(app.session_snapshot_persist_attempt_count_for_test() > before);
         assert_eq!(app.workspaces.len(), 2);
     }
