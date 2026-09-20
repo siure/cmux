@@ -66792,6 +66792,76 @@ mod palette_pointer_activation_tests {
     use serde_json::json;
 
     #[test]
+    fn open_directory_requests_picker_without_creating_a_workspace() {
+        let mut app = AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned).unwrap();
+        let count = app.workspaces.len();
+        let before = app.session_snapshot_persist_attempt_count_for_test();
+        let result = app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+o"})).unwrap();
+        assert_eq!(result["native_action"], "open_directory");
+        assert_eq!(result["window_id"], app.current_window);
+        assert_eq!(app.workspaces.len(), count);
+        assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), before);
+        app.command_palette_toggle_current(CommandPaletteMode::Commands).unwrap();
+        let result = app.handle("debug.command_palette.activate", &json!({"command_id": "palette.terminalOpenDirectory"})).unwrap();
+        assert_eq!(result["native_action"], "open_directory");
+        assert_eq!(app.workspaces.len(), count);
+    }
+
+    #[test]
+    fn native_palette_edits_are_scoped_and_transient_but_acceptance_is_saved() {
+        let mut app =
+            AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned)
+                .unwrap();
+        let first = app.current_window.clone();
+        app.command_palette_toggle(&first, CommandPaletteMode::Commands)
+            .unwrap();
+        let second = app.handle("window.create", &json!({})).unwrap()["window_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let before = app.session_snapshot_persist_attempt_count_for_test();
+        app.handle(
+            "debug.command_palette.input.set",
+            &json!({"window_id": first, "mode": "commands", "text": "new workspace"}),
+        )
+        .unwrap();
+        assert_eq!(app.current_window, second);
+        assert_eq!(app.command_palette_state(&first).query, "new workspace");
+        assert_eq!(
+            app.handle(
+                "debug.command_palette.input.set",
+                &json!({"window_id": first, "mode": "rename_input", "text": "stale editor"})
+            )
+            .unwrap()["updated"],
+            false
+        );
+        for key in ["down", "up"] {
+            app.handle(
+                "debug.command_palette.input.key",
+                &json!({"window_id": first, "key": key}),
+            )
+            .unwrap();
+        }
+        app.handle(
+            "debug.command_palette.input.key",
+            &json!({"window_id": first, "key": "shortcut", "combo": "ctrl+a"}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.session_snapshot_persist_attempt_count_for_test(),
+            before
+        );
+        let count = app.workspaces.len();
+        app.handle(
+            "debug.command_palette.input.key",
+            &json!({"window_id": first, "key": "enter"}),
+        )
+        .unwrap();
+        assert_eq!(app.workspaces.len(), count + 1);
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > before);
+    }
+
+    #[test]
     fn pointer_activation_targets_visible_command_in_owning_window() {
         let mut app = AppState::with_paths_and_terminal_startup(
             None,

@@ -22465,6 +22465,191 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
     }
 
     #[gtk::test]
+    fn gtk_palette_native_editing_preserves_selection_and_model_window() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let windows = call_app_value(&app_state, "window.list", json!({})).unwrap();
+        let window_id = windows["windows"][0]["id"]
+            .as_str()
+            .or_else(|| windows["windows"][0]["window_id"].as_str())
+            .unwrap();
+        call_app(
+            &app_state,
+            "debug.command_palette.toggle",
+            json!({"window_id": window_id}),
+        );
+        let snapshot = |app: &Arc<Mutex<AppState>>| {
+            json!({
+                "window": {"window_id": window_id},
+                "command_palette": call_app_value(app, "debug.command_palette.results", json!({"window_id": window_id})).unwrap()
+            })
+        };
+        let panel = command_palette_panel(&snapshot(&app_state), &app_state).unwrap();
+        let entry = widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-input")
+            .unwrap()
+            .downcast::<gtk::Entry>()
+            .expect("palette must provide a native editor");
+        entry.set_text("alpha beta");
+        entry.select_region(0, 5);
+        assert!(update_command_palette_panel(
+            &panel,
+            &snapshot(&app_state),
+            &app_state
+        ));
+        assert_eq!(entry.selection_bounds(), Some((0, 5)));
+        entry.delete_selection();
+        let mut position = entry.position();
+        entry.insert_text("gamma", &mut position);
+        let result = call_app_value(
+            &app_state,
+            "debug.command_palette.results",
+            json!({"window_id": window_id}),
+        )
+        .unwrap();
+        assert_eq!(result["input_text"], "gamma beta");
+        assert_eq!(
+            widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-input").unwrap(),
+            entry.clone().upcast::<gtk::Widget>()
+        );
+        // A second window becoming active must not redirect changes from this input.
+        call_app(&app_state, "window.create", json!({}));
+        entry.set_text("original window");
+        let result = call_app_value(
+            &app_state,
+            "debug.command_palette.results",
+            json!({"window_id": window_id}),
+        )
+        .unwrap();
+        assert_eq!(result["input_text"], "original window");
+    }
+
+    #[gtk::test]
+    fn gtk_palette_open_takes_focus_from_existing_editor() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        call_app(&app_state, "debug.command_palette.toggle", json!({}));
+        let snapshot = json!({"command_palette": call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap()});
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let previous = gtk::Entry::new();
+        content.append(&previous);
+        let window = gtk::Window::builder().child(&content).build();
+        window.present();
+        previous.grab_focus();
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        content.append(&panel);
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-palette-input"
+        ));
+        content.remove(&panel);
+        assert!(
+            gtk::prelude::GtkWindowExt::focus(&window)
+                .is_some_and(|focused| widget_is_or_descendant_of(&focused, previous.upcast_ref()))
+        );
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_palette_multiline_editing_and_preedit_keep_native_key_ownership() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        call_app(&app_state, "debug.command_palette.toggle", json!({}));
+        assert!(call_app(
+            &app_state,
+            "debug.command_palette.activate",
+            json!({"command_id": "palette.editWorkspaceDescription"})
+        ));
+        let snapshot = json!({"command_palette": call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap()});
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        let view = panel
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::TextView>()
+            .unwrap();
+        let buffer = view.buffer();
+        buffer.set_text("first\nlast");
+        buffer.place_cursor(&buffer.iter_at_offset(6));
+        buffer.insert_at_cursor("middle\n");
+        let result = call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap();
+        assert_eq!(result["input_text"], "first\nmiddle\nlast");
+        let controllers = panel.observe_controllers();
+        let keys = (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .find_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .unwrap();
+        for (key, modifiers) in [
+            (gdk::Key::Return, gdk::ModifierType::SHIFT_MASK),
+            (gdk::Key::Up, gdk::ModifierType::empty()),
+            (gdk::Key::a, gdk::ModifierType::CONTROL_MASK),
+            (gdk::Key::v, gdk::ModifierType::CONTROL_MASK),
+        ] {
+            assert!(!keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &modifiers]));
+        }
+        view.emit_by_name::<()>("preedit-changed", &[&"に"]);
+        for key in [gdk::Key::Return, gdk::Key::Escape] {
+            assert!(
+                !keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &gdk::ModifierType::empty()])
+            );
+        }
+        assert!(palette_visible(&app_state));
+        view.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(keys.emit_by_name::<bool>(
+            "key-pressed",
+            &[&gdk::Key::Return, &0_u32, &gdk::ModifierType::empty()]
+        ));
+        assert!(!palette_visible(&app_state));
+    }
+
+    #[gtk::test]
+    fn gtk_open_directory_picker_cancellation_and_selection_target_owner() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let request = call_app_value(&app_state, "debug.shortcut.simulate", json!({"combo": "ctrl+o"})).unwrap();
+        let owner = request["window_id"].as_str().unwrap().to_string();
+        let before = call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap()["workspaces"].as_array().unwrap().len();
+        let parent = gtk::Window::new();
+        let dialog = open_directory_picker(&parent, &app_state, &request).unwrap();
+        assert_eq!(dialog.action(), gtk::FileChooserAction::SelectFolder);
+        assert_eq!(dialog.transient_for(), Some(parent.clone()));
+        dialog.emit_by_name::<()>("response", &[&gtk::ResponseType::Cancel]);
+        assert_eq!(call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap()["workspaces"].as_array().unwrap().len(), before);
+        let other = call_app_value(&app_state, "window.create", json!({})).unwrap()["window_id"].as_str().unwrap().to_string();
+        let folder = std::env::temp_dir();
+        assert!(accept_open_directory(&app_state, &owner, gtk::ResponseType::Accept, Some(gio::File::for_path(&folder))));
+        let workspaces = call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap();
+        assert_eq!(workspaces["workspaces"].as_array().unwrap().len(), before + 1);
+        assert!(workspaces["workspaces"].as_array().unwrap().iter().any(|workspace| workspace["cwd"] == folder.to_string_lossy().as_ref()));
+        assert_eq!(call_app_value(&app_state, "workspace.list", json!({"window_id": other})).unwrap()["workspaces"].as_array().unwrap().len(), 1);
+        parent.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_palette_native_activation_delivers_clipboard_results() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        call_app(&app_state, "debug.command_palette.toggle", json!({}));
+        call_app(
+            &app_state,
+            "debug.command_palette.input.set",
+            json!({"mode": "commands", "text": "Copy Workspace ID"}),
+        );
+        let snapshot = json!({"command_palette": call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap()});
+        assert_eq!(
+            snapshot["command_palette"]["results"][0]["command_id"],
+            "palette.copyWorkspaceID"
+        );
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        let entry = panel
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Entry>()
+            .unwrap();
+        entry.emit_activate();
+        assert!(!palette_visible(&app_state));
+        let clipboard = gdk::Display::default().unwrap().clipboard();
+        let text = glib::MainContext::default()
+            .block_on(clipboard.read_text_future())
+            .unwrap()
+            .unwrap();
+        assert!(text.starts_with("workspace_id="));
+    }
+
+    #[gtk::test]
     fn gtk_command_palette_results_are_pointer_actions() {
         let snapshot = json!({"command_palette": {
             "visible": true,
