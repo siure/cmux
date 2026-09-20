@@ -62880,6 +62880,48 @@ mod embedded_terminal_action_tests {
     }
 
     #[test]
+    fn recently_closed_history_skips_disabled_browser_container_without_partial_restore() {
+        for close_window in [false, true] {
+            let (mut app, _, _, workspace_id) = app_with_current_surface();
+            let older = app.handle("surface.create", &json!({"workspace_id": workspace_id})).unwrap();
+            app.handle("surface.close", &json!({"surface_id": older["surface_id"]})).unwrap();
+            let container = if close_window {
+                app.handle("window.create", &json!({})).unwrap()
+            } else {
+                app.handle("workspace.create", &json!({})).unwrap()
+            };
+            let target_workspace = if close_window { app.current_workspace_id().unwrap() }
+                else { container["workspace_id"].as_str().unwrap().to_string() };
+            let browser = app.handle("surface.create", &json!({"workspace_id": target_workspace})).unwrap();
+            app.surfaces.get_mut(browser["surface_id"].as_str().unwrap()).unwrap().kind = SurfaceKind::Browser;
+            if close_window { app.handle("window.close", &json!({"window_id": container["window_id"]})).unwrap(); }
+            else { app.handle("workspace.close", &json!({"workspace_id": target_workspace})).unwrap(); }
+            app.browser_enabled = false;
+            let shape = (app.windows.len(), app.workspaces.len(), app.panes.len());
+            let reopened = app.handle("history.reopen_closed", &json!({})).unwrap();
+            assert_eq!(reopened["handled"], true);
+            assert_eq!(reopened["workspace_id"], workspace_id);
+            assert_eq!((app.windows.len(), app.workspaces.len(), app.panes.len()), shape);
+        }
+    }
+
+    #[test]
+    fn recently_closed_history_remaps_consecutively_closed_split_anchors() {
+        let (mut app, first, _, workspace_id) = app_with_current_surface();
+        let second = app.handle("surface.split", &json!({"surface_id": first, "direction": "right"})).unwrap();
+        let second_id = second["surface_id"].as_str().unwrap().to_string();
+        app.handle("surface.split", &json!({"surface_id": second_id, "direction": "right"})).unwrap();
+        app.handle("surface.close", &json!({"surface_id": first})).unwrap();
+        app.handle("surface.close", &json!({"surface_id": second_id})).unwrap();
+        app.handle("history.reopen_closed", &json!({})).unwrap();
+        app.handle("history.reopen_closed", &json!({})).unwrap();
+        assert_eq!(app.workspaces[&workspace_id].panes.len(), 3);
+        for pane_id in &app.workspaces[&workspace_id].panes {
+            assert_eq!(app.panes[pane_id].surfaces.len(), 1);
+        }
+    }
+
+    #[test]
     fn recently_closed_browser_restores_same_pane_index_history_and_zoom() {
         let (mut app, terminal_id, _surface_ref, workspace_id) = app_with_current_surface();
         app.browser_enabled = true;
