@@ -155,7 +155,10 @@ behavior boundary at a time.
 - Validate the relocatable bundle and user-local desktop installation.
 - Publish release evidence with known limitations.
 
-Status: planned.
+Status: automated session/configuration, native X11 interaction, software
+Wayland launch, and relocated installation are covered by the daily-use audit.
+Native GNOME Wayland, hardware GPU latency, actual IME composition, and
+multi-monitor checks still require the primary desktop environment.
 
 ## Feature intake rule
 

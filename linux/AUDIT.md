@@ -10,7 +10,8 @@ The audit used five parallel source reviews, failing behavioral tests, the
 existing socket contracts, six native GTK screenshot scenarios, and a real
 embedded Ghostty session under Xvfb. macOS cannot run on this Linux host;
 original behavior was verified against its implementation and checked-in
-screenshots. Hardware Wayland behavior requires a separate desktop check.
+screenshots. Hardware Wayland behavior requires a separate desktop check. The follow-up pass
+also tests a private software-rendered Weston compositor.
 
 ## Verified problems and changes
 
@@ -31,6 +32,33 @@ screenshots. Hardware Wayland behavior requires a separate desktop check.
 | Native validation | A passing test must execute its assertions. | Widget tests initialized global GTK from different test threads and silently returned when initialization failed. | Use the existing GTK test macro to own the GTK thread; supply Xvfb and D-Bus in CI. |
 | Fixture isolation | Tests should exercise known input and private state. | An empty home triggered zsh onboarding; inherited browser paths could point outside the fixture; D-Bus services lacked the Xvfb display. | Deterministic Bash fixtures, isolated XDG/browser paths, Xvfb before D-Bus, and retained failure diagnostics. |
 
+## Follow-up corrections
+
+The second audit added behavioral regressions for these differences:
+
+| Area | Verified difference | Correction |
+| --- | --- | --- |
+| Sidebars | Fixed widths prevented adapting the layout to paths and file lists. | Drag handles on both edges; per-window widths survive restart, hide/show, and temporary compact layouts. The terminal retains usable space. |
+| Closed history | Only browser panels could reopen. | Terminal panels, workspaces, and windows restore layout, order, and cwd with fresh shells. History survives restart and supports choosing an older item. Saved commands are not rerun. |
+| Persistence | A topology change serialized and synced a full session on the GTK thread. | Immutable snapshots enter a serial worker with one coalesced pending write. Explicit save/quit and socket mutation replies retain their durable boundary. Errors remain visible. |
+| Palette editing | Query and rename text were labels with append/backspace handling. | Persistent native editors provide caret movement, selection, clipboard, undo, and input-method composition. Command results reach native clipboard, browser, and document handlers. |
+| Browser address bar | Refresh replaced an in-progress address and selection because focus belonged to the entry's child. | Descendant focus checks preserve drafts and native selection; suggestions respect editor focus. |
+| Browser navigation | Forward was only accessible through a menu. | Forward appears beside Back in the toolbar. |
+| Settings | Long pages overflowed; no cross-section search; cmux.json displayed the Ghostty configuration; Reset was a placeholder. | Scrollable pages, native search over real settings rows, opening the correct JSON file, and confirmed reset of managed settings while preserving unrelated configuration. |
+| New terminals | Switching panes then creating a tab/split could inherit another pane's cwd. | Shared creation resolves cwd and font from the source terminal, with explicit cwd taking priority. |
+| Terminal EOF | Ctrl+D immediately deleted a split instead of reaching its running program. | Route EOF through normal terminal input. A real `cat` contract checks that its shell and pane survive. |
+| Open Directory | The action created a workspace without selecting a directory. | A native folder chooser targets the owning window; cancellation leaves workspaces unchanged. |
+| Installed resources | The bundle omitted Ghostty's sibling terminfo data while ABI-only validation passed. | Package terminfo aliases and locale data, and require complete runtime resources after relocation. |
+
+Review also identified failed-history restoration leaving partial objects,
+consecutive split restores losing placement anchors, and palette results losing
+native side effects. These have focused regression coverage.
+
+The background-save profile uses 24 terminal snapshots and about 11.7 MB of
+encoded JSON. In a debug build, capture took 4.1 ms and serialization took
+304.7 ms; serialization now runs on the worker. This measures snapshot work,
+not end-to-end keyboard or rendering latency.
+
 ## Broader comparison
 
 | Capability | Assessment |
@@ -39,9 +67,9 @@ screenshots. Hardware Wayland behavior requires a separate desktop check.
 | Session restart | A native Ghostty launch, Unicode input, split, quit, and reopen preserved workspace names and pane topology. Reopening starts new shells; it is not continuation of an existing process. |
 | Terminal rendering | The port embeds the pinned Ghostty fork, with ABI/resource diagnostics and renderer-driven wakeups. No per-keystroke drawing loop was added. |
 | Keyboard shortcuts | Linux uses terminal-safe platform bindings rather than mechanically replacing macOS Command with Control. Existing shortcut settings and context guards remain authoritative. |
-| Clipboard, selection, scrollback, find, IME | Existing implementations and contracts remain. Native search/focus and X11 system-clipboard paste are exercised; selection/copy and IME composition still need real-desktop validation. |
+| Clipboard, selection, scrollback, find, IME | Existing implementations and contracts remain. Native search/focus, pointer selection, and cross-process X11 clipboard copy/paste are exercised. Actual desktop IME composition still needs validation. |
 | Browser panes | WebKit panes, navigation controls, and a rendered page are present in the native browser fixture. This does not establish browser-extension/import or website compatibility parity. |
-| Settings/configuration | Existing settings surface and parsers remain; Settings becomes discoverable through the menu. New visible strings are in both Linux catalogs. |
+| Settings/configuration | Existing settings surface and parsers remain; Settings is discoverable through the menu, scrollable, searchable, and can open/reset its configuration. New visible strings are in both Linux catalogs. |
 | Notifications | Workspace badges and pane attention states appear in the attention fixture. Desktop notification delivery depends on the desktop service and is not established by a screenshot. |
 | Dense/narrow/high-DPI layout | Existing compact tabs and flat dark chrome are retained. Dense, 900 px narrow, and 2x scale fixtures exercise the layout. Narrow right-sidebar behavior remains an overlay. |
 | Build/install | Locked Rust builds and the pinned Ghostty library are used. The development bundle and clean-prefix launcher checks pass; a fresh release build remains a separate gate. |
@@ -50,25 +78,20 @@ screenshots. Hardware Wayland behavior requires a separate desktop check.
 
 ## Remaining differences and limits
 
-- The workspace sidebar has fixed normal/compact widths. The original supports
-  drag resizing and persistence. This is a usability difference, but it does
-  not block terminal work; a future change should add one persisted model
-  setting rather than a GTK-only width that resets on reload.
-- Reopen-closed currently restores browser entries; original history also
-  handles terminal/workspace closures. Session restart is a separate feature.
-  Restoring a shell must not silently rerun arbitrary former commands.
-- Durable topology mutations still serialize sessions synchronously. The
-  confirmed read/input hot path is fixed; background persistence would require
-  ordered writes and shutdown/error handling and should follow profiling.
+The follow-up removes the three implementation gaps recorded in the first pass:
+resizable persisted sidebars, terminal/workspace/window closed history, and
+background UI autosaves. The remaining limits concern platform validation and
+features outside the checked daily-use workflows:
+
 - Native GNOME Wayland, hardware GPU latency, IME, multi-monitor scaling,
-  screen-reader use, and cross-application clipboard ownership cannot be
-  certified by Xvfb. The audit does not call this a release-ready daily driver
+  screen-reader use, cannot be certified by Xvfb or software Weston. Cross-process X11 clipboard
+  copy and paste pass, but primary-desktop ownership still needs checking. The audit does not call this a release-ready daily driver
   until the [roadmap](ROADMAP.md) gates are satisfied.
 - Remote/cloud/mobile flows, browser migration, and custom sidebar extensions
   were checked only for their interaction with the touched core paths. Their
   complete feature parity is outside the existing daily-driver contract.
 
-## Validation
+## Initial validation
 
 Baseline display-free suite: **843 passed, four existing ignored tests**.
 Baseline native Ghostty run passed Unicode output (`λ-é-猫`), split I/O,
@@ -96,9 +119,9 @@ workspace close, bulk close, session writes, and palette access. Final checks:
   Model size samples change while resize events continue. This is not a
   measurement of hardware input-to-photon latency.
 - All six screenshot comparisons pass against the reviewed updated goldens.
-- The 34 MB development bundle validates Ghostty ABI/resources, installs into
-  a fresh temporary prefix, and its relocated launcher passes Unicode, split,
-  session reopen, and quit checks without source-tree Ghostty overrides.
+- The initial 34 MB bundle passed ABI, installation, and native interaction
+  checks. Follow-up inspection found that its validation missed absent
+  terminfo resources; the corrected bundle and stronger gate are described below.
 - Eight new UI strings have nonempty English and Japanese translations; both
   catalogs parse and contain the same 47 keys. Existing untranslated surfaces
   outside this change were not claimed as localized.
@@ -111,3 +134,29 @@ The six updated, reviewed references are in
 The native probe scripts, raw diagnostics, screenshots, suite logs, and bundle
 checksum are retained in `../../cmux-daily-audit-2026-09-20/` relative to this
 file. The bundle is a development build, not a published release.
+
+## Follow-up validation
+
+- Full display-free suite: **877 passed** (542 library, one daemon, 334 socket
+  contracts). Four existing subprocess helpers and one manual profiling test
+  are ignored.
+- Full GTK suite: **1,092 passed** (759 library, one daemon, 332 socket
+  contracts), with the same five explicit ignores. Native folder-dialog
+  tests exercise deferred presentation, cancellation, and window cleanup.
+- Native X11 events verify pointer sidebar resizing, palette select-all and
+  text replacement, palette clipboard output, terminal pointer selection and
+  clipboard copy to another process, paste from another process, Ctrl+D
+  inside a program, input focus after metadata refresh, and continuous resize.
+- A private software Weston compositor runs the installed Ghostty application
+  through Unicode output, split I/O, session restart, and clean quit. This is
+  Wayland protocol/launch evidence, not hardware or GNOME desktop certification.
+- The package regression failed on the old bundle. A rebuilt and relocated
+  package reports complete Ghostty resources; `infocmp` resolves both
+  `xterm-ghostty` and its `ghostty` alias from the installed terminfo directory.
+- Six reviewed screenshot fixtures cover dense panes, attention, browser,
+  settings, narrow palette/sidebar, and 2x scaling. The mounted compact-drawer
+  regression verifies visible file content after opening a previously hidden sidebar.
+- The English and Japanese catalogs each contain 66 nonempty keys.
+
+Follow-up logs, native probes, and screenshots are stored beside the original
+evidence under `../../cmux-daily-audit-2026-09-20/`.

@@ -650,12 +650,14 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   across every window before terminating the GTK application.
   `reopenPreviousSession` preserves the immutable launch-time session snapshot
   and appends cloned windows through the normal GTK window-host reconciler,
-  without replacing current-launch topology. `reopenClosedBrowserPanel` keeps
-  a bounded LIFO history of closed browser surfaces and restores URL, title,
-  navigation history, zoom, workspace, pane/tab placement, and focus through
-  the same model-to-GTK reconciliation path. Removed browser-only panes are
-  recreated relative to a surviving split neighbor, while entries whose
-  workspace was deleted are skipped. `globalSearch` opens a dedicated
+  without replacing current-launch topology. `reopenClosedBrowserPanel` and
+  `history.reopen_closed` restore the latest available terminal/browser panel,
+  workspace, or window. `history.list`, `history.reopen` with an entry `id`,
+  and `history.clear` expose the same persistent history used by the palette.
+  History retains up to 100 entries and 8 MiB, with bounded terminal output.
+  Reopened terminals start fresh shells with restored cwd and layout;
+  former commands are not rerun. Browser history, zoom, tab placement,
+  workspace groups, and surviving split anchors are restored. `globalSearch` opens a dedicated
   cross-window palette backed by live title, browser, and Markdown content;
   result activation reconciles the destination GTK window and propagates an
   escaped inline-search needle to WebKitGTK or the native Markdown view.
@@ -794,6 +796,11 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   sidebar honors `right-sidebar show|hide|toggle|set`, exposes native mode
   controls, and renders bounded Files/Find filesystem views, resumable Vault
   entries, feed activity, and terminal Dock targets from the shared snapshot.
+  Both sidebar edges can be dragged. `sidebar resize <width>` and
+  `right-sidebar resize <width>` use the same `sidebar.left` / `sidebar.right`
+  `resize` action (`width` in logical pixels, optional `window_id`). Widths are
+  saved per window and retained when hidden. Compact windows use drawers and
+  temporarily bound the displayed widths without overwriting the saved sizes.
   Feed and Dock follow the shared beta defaults and are omitted until
   `rightSidebar.beta.feed.enabled` or `rightSidebar.beta.dock.enabled` is
   enabled. The native Beta Features page also controls Custom Sidebars and
@@ -846,7 +853,9 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   `~/.local/state/cmux/`, with atomic writes after app layout/browser/session
   mutations and startup hydration for saved windows, workspace groups,
   workspaces, panes, surfaces, focus, terminal/browser reopen metadata,
-  scrollback, and surface resume bindings.
+  scrollback, and surface resume bindings. UI autosaves serialize and write
+  on one worker with a coalesced pending snapshot; explicit save/quit and
+  socket mutations wait for their durable write.
 - Workspace group socket/CLI support, including `cmux.json`
   `workspaceGroups.byCwd` placement, color, icon, and context-menu metadata in
   renderer-facing group snapshots.
@@ -855,6 +864,10 @@ matching Cargo's override contract for nonstandard toolchains and sysroots.
   branch state.
 - Settings surfaces for CLI/socket clients and command-palette rows for opening
   Settings, cmux.json, and Ghostty config targets inside the Linux app shell.
+  Settings content scrolls within its pane and supports cross-section search.
+  The cmux.json page opens the actual configuration in its associated editor.
+  `settings.reset` requires `confirmed: true`; it removes supported global
+  settings and managed shortcut overrides while preserving unrelated keys.
   The native Account section drives hosted browser sign-in/sign-out, reports
   the active credential store, and persists team selection. Mobile reports the
   Linux host routes and creates copyable short-lived pairing links. Automation
