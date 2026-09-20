@@ -22598,24 +22598,90 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
     }
 
     #[gtk::test]
+    fn gtk_native_directory_picker_survives_idle_and_closes_with_its_window() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let request = call_app_value(&app_state, "debug.shortcut.simulate", json!({
+            "combo": "ctrl+o", "context": {"terminalFocus": false}
+        })).unwrap();
+        let parent = gtk::Window::new();
+        parent.present();
+        let picker = native_directory_picker_state(&parent);
+        apply_native_dialog_result(&parent, &app_state, &picker, &request);
+        let weak = picker.borrow().as_ref().unwrap().downgrade();
+        while glib::MainContext::default().pending() {
+            glib::MainContext::default().iteration(false);
+        }
+        assert!(weak.upgrade().is_some_and(|dialog| dialog.is_visible()), "deferred launch must retain the native chooser until response");
+        apply_native_dialog_result(&parent, &app_state, &picker, &request);
+        assert_eq!(picker.borrow().as_ref(), weak.upgrade().as_ref());
+        weak.upgrade().unwrap().emit_by_name::<()>("response", &[&gtk::ResponseType::Cancel]);
+        assert!(picker.borrow().is_none());
+        apply_native_dialog_result(&parent, &app_state, &picker, &request);
+        parent.destroy();
+        assert!(picker.borrow().is_none(), "closing the owning window must release its chooser even before deferred launch");
+        while glib::MainContext::default().pending() {
+            glib::MainContext::default().iteration(false);
+        }
+    }
+
+    #[gtk::test]
     fn gtk_open_directory_picker_cancellation_and_selection_target_owner() {
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
-        let request = call_app_value(&app_state, "debug.shortcut.simulate", json!({"combo": "ctrl+o"})).unwrap();
+        let request = call_app_value(
+            &app_state,
+            "debug.shortcut.simulate",
+            json!({"combo": "ctrl+o", "context": {"terminalFocus": false}}),
+        )
+        .unwrap();
         let owner = request["window_id"].as_str().unwrap().to_string();
-        let before = call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap()["workspaces"].as_array().unwrap().len();
+        let before = call_app_value(&app_state, "workspace.list", json!({"window_id": owner}))
+            .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .len();
         let parent = gtk::Window::new();
         let dialog = open_directory_picker(&parent, &app_state, &request).unwrap();
         assert_eq!(dialog.action(), gtk::FileChooserAction::SelectFolder);
         assert_eq!(dialog.transient_for(), Some(parent.clone()));
         dialog.emit_by_name::<()>("response", &[&gtk::ResponseType::Cancel]);
-        assert_eq!(call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap()["workspaces"].as_array().unwrap().len(), before);
-        let other = call_app_value(&app_state, "window.create", json!({})).unwrap()["window_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap()
+                ["workspaces"]
+                .as_array()
+                .unwrap()
+                .len(),
+            before
+        );
+        let other = call_app_value(&app_state, "window.create", json!({})).unwrap()["window_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let folder = std::env::temp_dir();
-        assert!(accept_open_directory(&app_state, &owner, gtk::ResponseType::Accept, Some(gio::File::for_path(&folder))));
-        let workspaces = call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap();
-        assert_eq!(workspaces["workspaces"].as_array().unwrap().len(), before + 1);
-        assert!(workspaces["workspaces"].as_array().unwrap().iter().any(|workspace| workspace["cwd"] == folder.to_string_lossy().as_ref()));
-        assert_eq!(call_app_value(&app_state, "workspace.list", json!({"window_id": other})).unwrap()["workspaces"].as_array().unwrap().len(), 1);
+        assert!(accept_open_directory(
+            &app_state,
+            &owner,
+            gtk::ResponseType::Accept,
+            Some(gio::File::for_path(&folder))
+        ));
+        let workspaces =
+            call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap();
+        assert_eq!(
+            workspaces["workspaces"].as_array().unwrap().len(),
+            before + 1
+        );
+        assert!(workspaces["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|workspace| workspace["cwd"] == folder.to_string_lossy().as_ref()));
+        assert_eq!(
+            call_app_value(&app_state, "workspace.list", json!({"window_id": other})).unwrap()
+                ["workspaces"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         parent.destroy();
     }
 
