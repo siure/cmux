@@ -66411,3 +66411,50 @@ mod palette_pointer_activation_tests {
         assert!(app.command_palette_state(&first).visible);
     }
 }
+
+#[cfg(test)]
+mod daily_workspace_batch_tests {
+    use super::{AppState, TerminalStartupMode};
+    use serde_json::json;
+
+    fn app() -> AppState {
+        AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned).unwrap()
+    }
+
+    #[test]
+    fn bulk_close_confirms_exact_targets_and_preserves_pinned_workspaces() {
+        let mut app = app();
+        app.app_workspace_settings.warn_before_closing_tab = true;
+        let anchor = app.current_workspace_id().unwrap();
+        let target = app.handle("workspace.create", &json!({"title": "Target"})).unwrap()["workspace_id"].as_str().unwrap().to_string();
+        let pinned = app.handle("workspace.create", &json!({"title": "Pinned"})).unwrap()["workspace_id"].as_str().unwrap().to_string();
+        app.workspaces.get_mut(&pinned).unwrap().pinned = true;
+        let params = json!({"workspace_id": anchor, "action": "close-others", "source": "context_menu"});
+        let request = app.handle("workspace.action", &params).unwrap();
+        assert_eq!(request["confirmation_required"], true);
+        assert!(app.workspaces.contains_key(&target));
+        app.handle("app.close_confirmation.reply", &json!({"id": request["confirmation"]["id"], "confirmed": false})).unwrap();
+        assert!(app.workspaces.contains_key(&target));
+        let request = app.handle("workspace.action", &params).unwrap();
+        let later = app.handle("workspace.create", &json!({"title": "Created after dialog"})).unwrap()["workspace_id"].as_str().unwrap().to_string();
+        app.handle("app.close_confirmation.reply", &json!({"id": request["confirmation"]["id"], "confirmed": true})).unwrap();
+        assert!(!app.workspaces.contains_key(&target));
+        assert!(app.workspaces.contains_key(&anchor));
+        assert!(app.workspaces.contains_key(&pinned));
+        assert!(app.workspaces.contains_key(&later));
+    }
+
+    #[test]
+    fn right_sidebar_starts_hidden_and_restores_explicit_visibility() {
+        let mut app = app();
+        assert_eq!(app.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["visible"], false);
+        assert_eq!(app.session_snapshot(false).windows[0].right_sidebar_visible, Some(false));
+        assert_eq!(app.handle("sidebar.right", &json!({"action": "toggle"})).unwrap()["visible"], true);
+        let mut restored = self::app();
+        restored.restore_session_snapshot(app.session_snapshot(false)).unwrap();
+        assert_eq!(restored.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["visible"], true);
+        restored.handle("sidebar.right", &json!({"action": "hide"})).unwrap();
+        app.restore_session_snapshot(restored.session_snapshot(false)).unwrap();
+        assert_eq!(app.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["visible"], false);
+    }
+}
