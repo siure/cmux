@@ -9508,4 +9508,33 @@ mod tests {
         );
         assert_eq!(ghostty_pressure_stage(2.0), GHOSTTY_MOUSE_PRESSURE_DEEP);
     }
+    #[gtk::test]
+    fn gtk_ghostty_refresh_preserves_foreign_focus_but_selection_change_focuses_terminal() {
+        let area = gtk::GLArea::new();
+        area.set_focusable(true);
+        let entry = gtk::Entry::new();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&entry);
+        root.append(&area);
+        let window = gtk::Window::builder().child(&root).build();
+        window.present();
+        entry.grab_focus();
+        let widget = GhosttySurfaceWidget {
+            root,
+            area: area.clone(),
+            scrollbar: gtk::Scrollbar::new(gtk::Orientation::Vertical, None::<&gtk::Adjustment>),
+            scrollbar_adjustment: gtk::Adjustment::new(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+            scrollbar_syncing: Rc::new(Cell::new(false)),
+            model_focused: Rc::new(Cell::new(true)),
+            focus_retry_active: Rc::new(Cell::new(false)),
+            host: None,
+        };
+        widget.update_presentation(true, false);
+        assert!(!area.has_focus(), "metadata refresh must preserve editable focus");
+        widget.update_presentation(false, false);
+        widget.update_presentation(true, false);
+        assert!(area.has_focus(), "a newly selected terminal must receive focus");
+        window.destroy();
+    }
+
 }

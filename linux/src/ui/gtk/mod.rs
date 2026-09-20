@@ -22244,4 +22244,40 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
             "https://example.test"
         );
     }
+    #[gtk::test]
+    fn gtk_editable_keystrokes_never_reach_selected_terminal() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let window = gtk::ApplicationWindow::new(&gtk::Application::new(
+            Some("ai.manaflow.cmux.tests.editable-routing"),
+            gio::ApplicationFlags::NON_UNIQUE,
+        ));
+        let search = gtk::SearchEntry::new();
+        search.add_css_class("cmux-terminal-search");
+        window.set_child(Some(&search));
+        window.present();
+        search.grab_focus();
+        connect_terminal_keys(
+            &window,
+            &app_state,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+            "window-test",
+        );
+        let controllers = window.observe_controllers();
+        let capture = (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .filter_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .find(|controller| controller.propagation_phase() == gtk::PropagationPhase::Capture)
+            .expect("window capture controller");
+        for key in [gdk::Key::a, gdk::Key::BackSpace, gdk::Key::Left] {
+            assert!(
+                !capture.emit_by_name::<bool>("key-pressed", &[&key, &38_u32, &gdk::ModifierType::empty()]),
+                "search field must receive {key:?} even while a terminal is selected"
+            );
+        }
+        window.destroy();
+    }
+
 }

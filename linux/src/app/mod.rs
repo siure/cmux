@@ -66208,3 +66208,90 @@ fn supported_methods() -> Vec<&'static str> {
         "workspace.sidebar_selection",
     ]
 }
+
+#[cfg(test)]
+mod daily_workflow_tests {
+    use super::{AppState, GlobalWindowCommand, TerminalStartupMode};
+    use serde_json::json;
+
+    fn app() -> AppState {
+        AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned)
+            .expect("app state")
+    }
+
+    #[test]
+    fn daily_reads_and_terminal_input_do_not_write_session_snapshots() {
+        let mut app = app();
+        let initial = app.session_snapshot_persist_attempt_count_for_test();
+        for method in ["workspace.list", "workspace.current", "surface.list", "pane.list",
+            "surface.read_text", "browser.status", "settings.shortcuts", "sidebar.state"] {
+            app.handle(method, &json!({})).expect(method);
+            assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), initial, "{method}");
+        }
+        for (method, params) in [
+            ("surface.send_text", json!({"text": ""})),
+            ("surface.send_key", json!({"key": "enter"})),
+            ("debug.type", json!({"text": ""})),
+            ("debug.shortcut.simulate", json!({"combo": "enter"})),
+        ] {
+            app.handle(method, &params).expect(method);
+            assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), initial, "{method}");
+        }
+        app.handle("workspace.create", &json!({"title": "Saved workspace"})).unwrap();
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > initial);
+    }
+
+    #[test]
+    fn daily_workspace_close_preserves_process_until_confirmation() {
+        let mut app = app();
+        let target = app.current_workspace_id().unwrap();
+        let surface = app.current_surface_id().unwrap();
+        app.handle("workspace.create", &json!({"title": "Other"})).unwrap();
+        app.update_embedded_terminal_close_confirmation(&surface, true).unwrap();
+        let params = json!({"workspace_id": target, "source": "tab_button"});
+        let result = app.handle("workspace.close", &params).unwrap();
+        assert_eq!(result["confirmation_required"], true);
+        assert!(app.workspaces.contains_key(&target));
+        let id = result["confirmation"]["id"].clone();
+        app.handle("app.close_confirmation.reply", &json!({"id": id, "confirmed": false})).unwrap();
+        assert!(app.surfaces.contains_key(&surface));
+        let result = app.handle("workspace.close", &params).unwrap();
+        let before = app.session_snapshot_persist_attempt_count_for_test();
+        app.handle("app.close_confirmation.reply", &json!({"id": result["confirmation"]["id"], "confirmed": true})).unwrap();
+        assert!(!app.workspaces.contains_key(&target));
+        assert!(!app.surfaces.contains_key(&surface));
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > before);
+    }
+
+    #[test]
+    fn daily_workspace_shortcut_protects_pinned_workspace() {
+        let mut app = app();
+        let target = app.current_workspace_id().unwrap();
+        app.handle("workspace.create", &json!({"title": "Other"})).unwrap();
+        app.select_workspace_by_id(&target).unwrap();
+        app.workspaces.get_mut(&target).unwrap().pinned = true;
+        let result = app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+w"})).unwrap();
+        assert_eq!(result["confirmation_required"], true);
+        assert!(app.workspaces.contains_key(&target));
+    }
+
+    #[test]
+    fn daily_last_workspace_shortcut_closes_window() {
+        let mut app = app();
+        let result = app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+shift+w"})).unwrap();
+        assert_eq!(result["confirmation_required"], true);
+        app.handle("app.close_confirmation.reply", &json!({"id": result["confirmation"]["id"], "confirmed": true})).unwrap();
+        assert_eq!(app.drain_global_window_commands(), vec![GlobalWindowCommand::Quit]);
+    }
+
+    #[test]
+    fn daily_workspace_api_close_remains_noninteractive() {
+        let mut app = app();
+        let target = app.current_workspace_id().unwrap();
+        let surface = app.current_surface_id().unwrap();
+        app.handle("workspace.create", &json!({"title": "Other"})).unwrap();
+        app.update_embedded_terminal_close_confirmation(&surface, true).unwrap();
+        app.handle("workspace.close", &json!({"workspace_id": target})).unwrap();
+        assert!(!app.workspaces.contains_key(&target));
+    }
+}
