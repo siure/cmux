@@ -62703,6 +62703,79 @@ mod embedded_terminal_action_tests {
     }
 
     #[test]
+    fn recently_closed_terminal_restores_tab_and_fresh_shell_through_all_entrypoints() {
+        for entrypoint in ["api", "shortcut", "palette"] {
+            let (mut app, terminal_id, _, workspace_id) = app_with_current_surface();
+            let pane_id = app.surfaces[&terminal_id].pane_id.clone();
+            let created = app.handle("surface.create", &json!({
+                "workspace_id": workspace_id, "pane_id": pane_id, "type": "terminal"
+            })).expect("create terminal tab");
+            let closed_id = created["surface_id"].as_str().unwrap().to_string();
+            {
+                let surface = app.surfaces.get_mut(&closed_id).unwrap();
+                surface.title = "Build shell".to_string();
+                surface.custom_title = true;
+                surface.terminal_cwd = Some("/tmp".to_string());
+                surface.terminal_command = Some("never-run-this-old-command".to_string());
+                surface.terminal_initial_input = Some("never-submit-this-old-input\n".to_string());
+                surface.terminal_font_size = Some(17.0);
+            }
+            app.handle("surface.close", &json!({"surface_id": closed_id})).unwrap();
+            let reopened = match entrypoint {
+                "api" => app.handle("history.reopen_closed", &json!({})),
+                "shortcut" => app.execute_shortcut_name("reopen_closed_browser_panel"),
+                _ => app.command_palette_execute_command("palette.reopenClosedBrowserTab"),
+            }.expect("reopen closed terminal");
+            assert_eq!(reopened["handled"], true, "entrypoint {entrypoint}");
+            let restored_id = reopened["surface_id"].as_str().unwrap();
+            let restored = &app.surfaces[restored_id];
+            assert_eq!(restored.kind, SurfaceKind::Terminal);
+            assert_eq!(restored.title, "Build shell");
+            assert!(restored.custom_title);
+            assert_eq!(restored.terminal_cwd.as_deref(), Some("/tmp"));
+            assert_eq!(restored.terminal_font_size, Some(17.0));
+            assert!(restored.terminal_command.is_none());
+            assert!(restored.terminal_initial_input.is_none());
+            assert_eq!(app.panes[&pane_id].surfaces, vec![terminal_id, restored_id.to_string()]);
+            assert_eq!(app.current_surface_id().unwrap(), restored_id);
+        }
+    }
+
+    #[test]
+    fn recently_closed_workspace_restores_order_layout_and_older_panel_history() {
+        let (mut app, terminal_id, _, workspace_id) = app_with_current_surface();
+        app.handle("workspace.create", &json!({"title": "Keep open"})).unwrap();
+        let extra = app.handle("surface.create", &json!({"workspace_id": workspace_id})).unwrap();
+        let extra_id = extra["surface_id"].as_str().unwrap().to_string();
+        app.surfaces.get_mut(&extra_id).unwrap().title = "Older closed tab".to_string();
+        app.handle("surface.close", &json!({"surface_id": extra_id})).unwrap();
+        app.handle("surface.split", &json!({
+            "workspace_id": workspace_id, "surface_id": terminal_id, "direction": "down"
+        })).unwrap();
+        app.workspaces.get_mut(&workspace_id).unwrap().title = "Restore project".to_string();
+        let expected = app.session_workspace_snapshot(&app.workspaces[&workspace_id], false);
+        let window_id = app.workspaces[&workspace_id].window_id.clone();
+        let old_index = app.windows.iter().find(|window| window.id == window_id).unwrap()
+            .workspaces.iter().position(|id| id == &workspace_id).unwrap();
+        app.handle("workspace.close", &json!({"workspace_id": workspace_id})).unwrap();
+        let reopened = app.handle("history.reopen_closed", &json!({})).unwrap();
+        assert_eq!(reopened["handled"], true);
+        let restored_id = reopened["workspace_id"].as_str().unwrap().to_string();
+        let actual = app.session_workspace_snapshot(&app.workspaces[&restored_id], false);
+        assert_eq!(actual.title, expected.title);
+        assert_eq!(actual.panes.len(), 2);
+        for (actual, expected) in actual.panes.iter().zip(&expected.panes) {
+            assert_eq!((actual.col, actual.row, actual.col_span, actual.row_span),
+                (expected.col, expected.row, expected.col_span, expected.row_span));
+        }
+        assert_eq!(app.windows.iter().find(|window| window.id == window_id).unwrap().workspaces[old_index], restored_id);
+        let older = app.handle("history.reopen_closed", &json!({})).unwrap();
+        assert_eq!(older["handled"], true);
+        assert_eq!(older["workspace_id"], restored_id);
+        assert_eq!(app.surfaces[older["surface_id"].as_str().unwrap()].title, "Older closed tab");
+    }
+
+    #[test]
     fn recently_closed_browser_restores_same_pane_index_history_and_zoom() {
         let (mut app, terminal_id, _surface_ref, workspace_id) = app_with_current_surface();
         app.browser_enabled = true;
