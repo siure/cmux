@@ -18132,6 +18132,115 @@ mod tests {
         None
     }
 
+    #[gtk::test]
+    fn gtk_tab_selection_reveals_overflow_without_resetting_manual_scroll() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let mut snapshot = gtk_tab_test_snapshot("surface-a", "alpha");
+        snapshot["surface_views"][0]["tabs"] = json!((0..16)
+            .map(|index| json!({
+                "surface_id": format!("surface-{index}"),
+                "title": format!("Terminal tab {index}"),
+                "selected": index == 0
+            }))
+            .collect::<Vec<_>>());
+        let strip = pane_tab_strip(&snapshot["surface_views"][0], &app_state, None)
+            .expect("pane tab strip");
+        let window = gtk::Window::builder()
+            .default_width(500)
+            .default_height(100)
+            .child(&strip)
+            .build();
+        window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let (scroller, tab_row) = pane_tab_scroller(&strip);
+        let adjustment = scroller.hadjustment();
+        assert!(adjustment.upper() > adjustment.page_size() * 2.0);
+        adjustment.set_value(120.0);
+        snapshot["surface_views"][0]["tabs"][1]["title"] = json!("Renamed terminal");
+        populate_pane_tab_strip(&strip, &snapshot["surface_views"][0], &app_state, None);
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert!((adjustment.value() - 120.0).abs() < 1.0,
+            "title updates must preserve manual scrolling");
+
+        snapshot["surface_views"][0]["tabs"][0]["selected"] = json!(false);
+        snapshot["surface_views"][0]["tabs"][15]["selected"] = json!(true);
+        populate_pane_tab_strip(&strip, &snapshot["surface_views"][0], &app_state, None);
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let selected = tab_row.last_child().expect("last tab");
+        let bounds = selected.compute_bounds(&tab_row).expect("tab bounds");
+        assert!(f64::from(bounds.x()) >= adjustment.value() - 1.0,
+            "selected tab starts within viewport");
+        assert!(f64::from(bounds.x() + bounds.width()) <=
+            adjustment.value() + adjustment.page_size() + 1.0,
+            "keyboard-selected overflow tab must be fully visible");
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_workspace_refresh_preserves_scroll_and_reveals_selection() {
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.workspace-scroll")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application.register(None::<&gio::Cancellable>).expect("register app");
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let row = json!({"window_id": "window-a", "title": "Scroll test", "selected": true});
+        let mut snapshot = gtk_tab_test_snapshot("surface-a", "alpha");
+        snapshot["workspaces"] = json!((0..40)
+            .map(|index| json!({
+                "workspace_id": format!("workspace-{index}"),
+                "title": format!("Workspace {index}"),
+                "selected": index == 0
+            }))
+            .collect::<Vec<_>>());
+        let local_refresh = gtk_test_local_refresh(&application, &app_state);
+        let mut host = create_gtk_window_host(
+            &application, &app_state, GtkRendererMode::Gtk, GtkUiMode::Next,
+            "window-a", &row, &snapshot, &local_refresh,
+        );
+        host.window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let scroller = host.snapshot_view.left_slot.first_child().expect("sidebar frame")
+            .first_child().expect("sidebar scroller")
+            .downcast::<gtk::ScrolledWindow>().expect("scrolled window");
+        let adjustment = scroller.vadjustment();
+        assert!(adjustment.upper() > adjustment.page_size() * 2.0);
+        adjustment.set_value(220.0);
+        snapshot["workspaces"][1]["title"] = json!("Renamed workspace");
+        refresh_gtk_window_host(
+            &mut host, &app_state, GtkRendererMode::Gtk, GtkUiMode::Next,
+            &row, &snapshot, &local_refresh,
+        );
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let current_scroller = host.snapshot_view.left_slot.first_child().expect("sidebar frame")
+            .first_child().expect("sidebar scroller")
+            .downcast::<gtk::ScrolledWindow>().expect("scrolled window");
+        assert!((current_scroller.vadjustment().value() - 220.0).abs() < 1.0,
+            "workspace metadata updates must preserve manual scrolling");
+
+        snapshot["workspaces"][0]["selected"] = json!(false);
+        snapshot["workspaces"][39]["selected"] = json!(true);
+        refresh_gtk_window_host(
+            &mut host, &app_state, GtkRendererMode::Gtk, GtkUiMode::Next,
+            &row, &snapshot, &local_refresh,
+        );
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let sidebar = widget_descendant_with_css_class(
+            host.snapshot_view.left_slot.upcast_ref(), "cmux-sidebar").expect("sidebar");
+        let selected = widget_descendant_with_css_class(&sidebar, "cmux-workspace-selected")
+            .expect("selected workspace");
+        let bounds = selected.compute_bounds(&sidebar).expect("workspace bounds");
+        assert!(f64::from(bounds.y()) >= adjustment.value() - 1.0);
+        assert!(f64::from(bounds.y() + bounds.height()) <=
+            adjustment.value() + adjustment.page_size() + 1.0,
+            "keyboard-selected overflow workspace must be visible");
+        host.window.destroy();
+    }
+
     fn assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position() {
         let app_state = Arc::new(Mutex::new(
             AppState::with_paths(None, None).expect("app state"),
