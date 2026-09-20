@@ -15,6 +15,9 @@ thread_local! {
 
 pub(super) fn install() -> Result<()> {
     register_resources()?;
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_application_prefer_dark_theme(true);
+    }
     CSS_INSTALLED.with(|installed| {
         if installed.replace(true) {
             return Ok(());

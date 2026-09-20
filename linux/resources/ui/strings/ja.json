@@ -1,4 +1,12 @@
 {
+  "close.workspaces_title": "ワークスペースを閉じますか？",
+  "close.workspaces_message": "選択したワークスペースとその中のすべてのパネルを閉じます。",
+  "close.workspace_title": "ワークスペースを閉じますか？",
+  "close.workspace_message": "ワークスペースとその中のすべてのパネルを閉じます。",
+  "close.accept": "閉じる",
+  "close.cancel": "キャンセル",
+  "header.toggle_left_sidebar": "ワークスペースサイドバーを切り替え",
+  "header.settings": "設定",
   "header.new_workspace": "新しいワークスペース",
   "header.open_browser": "ブラウザを開く",
   "header.toggle_right_sidebar": "右サイドバーを切り替え",

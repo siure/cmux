@@ -123,7 +123,6 @@ const RTLD_NOW: i32 = 2;
 const GHOSTTY_TEXT_SYNC_INTERVAL: Duration = Duration::from_millis(250);
 const GHOSTTY_SCROLLBACK_SYNC_INTERVAL: Duration = Duration::from_secs(5);
 const GHOSTTY_SCROLLBACK_SYNC_MAX_BYTES: usize = 262_144;
-const GHOSTTY_RESIZE_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 const GHOSTTY_FOCUS_RETRY_ATTEMPTS: u8 = 8;
 const GHOSTTY_RENDERER_ACTIVE_STATUS: &str = "Ghostty renderer active";
 const GHOSTTY_SCROLL_MOD_PRECISION: c_int = 1;
@@ -289,11 +288,16 @@ impl GhosttySurfaceWidget {
     }
 
     pub fn update_presentation(&self, focused: bool, occluded: bool) {
-        self.model_focused.set(focused);
+        let selection_changed = self.model_focused.replace(focused) != focused;
         if let Some(host) = self.host.as_ref() {
             host.borrow_mut().update_presentation(focused, occluded);
         }
-        if focused && !self.area.has_focus() {
+        // Selection is model state; an entry or sidebar can own GTK focus while
+        // that same terminal stays selected through metadata refreshes.
+        if focused
+            && !self.area.has_focus()
+            && (selection_changed || !ghostty_area_has_foreign_focus(&self.area))
+        {
             request_ghostty_area_focus(&self.area, &self.model_focused, &self.focus_retry_active);
         }
     }
@@ -370,6 +374,15 @@ impl GhosttySurfaceWidget {
     }
 }
 
+fn ghostty_area_has_foreign_focus(area: &gtk::GLArea) -> bool {
+    area.root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok())
+        .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
+        .is_some_and(|focused| {
+            focused != area.clone().upcast::<gtk::Widget>() && !focused.is::<gtk::GLArea>()
+        })
+}
+
 fn request_ghostty_area_focus(
     area: &gtk::GLArea,
     model_focused: &Rc<Cell<bool>>,
@@ -390,7 +403,10 @@ fn request_ghostty_area_focus(
     let idle_area = area.clone();
     let idle_focused = Rc::clone(model_focused);
     glib::idle_add_local_once(move || {
-        if idle_focused.get() && !idle_area.has_focus() {
+        if idle_focused.get()
+            && !idle_area.has_focus()
+            && !ghostty_area_has_foreign_focus(&idle_area)
+        {
             idle_area.grab_focus();
         }
     });
@@ -400,7 +416,7 @@ fn request_ghostty_area_focus(
     let retry_active = Rc::clone(retry_active);
     let attempts = Rc::new(Cell::new(0_u8));
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        if !still_focused.get() || area.has_focus() {
+        if !still_focused.get() || area.has_focus() || ghostty_area_has_foreign_focus(&area) {
             retry_active.set(false);
             return glib::ControlFlow::Break;
         }
@@ -632,19 +648,19 @@ fn connect_ghostty_area(
 
     let resize_host = Rc::clone(&host);
     let resize_status = status.clone();
-    let resize_generation = Rc::new(Cell::new(0_u64));
+    let resize_pending = Rc::new(Cell::new(false));
     area.connect_resize(move |area, _, _| {
-        let generation = resize_generation.get().wrapping_add(1);
-        resize_generation.set(generation);
-
-        let pending_generation = Rc::clone(&resize_generation);
+        if resize_pending.replace(true) {
+            return;
+        }
+        let resize_pending = Rc::clone(&resize_pending);
         let resize_host = Rc::clone(&resize_host);
         let resize_status = resize_status.clone();
         let area = area.downgrade();
-        glib::timeout_add_local_once(GHOSTTY_RESIZE_SETTLE_INTERVAL, move || {
-            if pending_generation.get() != generation {
-                return;
-            }
+        // Coalesce one GTK layout turn, but keep updating during a continuous
+        // divider/window drag rather than waiting for the drag to stop.
+        glib::idle_add_local_once(move || {
+            resize_pending.set(false);
             let Some(area) = area.upgrade() else {
                 return;
             };
@@ -9530,11 +9546,18 @@ mod tests {
             host: None,
         };
         widget.update_presentation(true, false);
-        assert!(!area.has_focus(), "metadata refresh must preserve editable focus");
+        assert_ne!(
+            gtk::prelude::GtkWindowExt::focus(&window),
+            Some(area.clone().upcast()),
+            "metadata refresh must preserve editable focus"
+        );
         widget.update_presentation(false, false);
         widget.update_presentation(true, false);
-        assert!(area.has_focus(), "a newly selected terminal must receive focus");
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&window),
+            Some(area.clone().upcast()),
+            "a newly selected terminal must receive focus"
+        );
         window.destroy();
     }
-
 }

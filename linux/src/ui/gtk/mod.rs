@@ -1111,9 +1111,12 @@ fn refresh_gtk_window_host(
         fallback_output_generations != host.last_fallback_terminal_output_generations;
 
     if host.last_left_rebuild_key != rebuild_keys.left && !left_rebuild_suppressed {
-        replace_snapshot_slot_child(
+        refresh_workspace_sidebar(
             &host.snapshot_view.left_slot,
-            Some(workspace_sidebar(snapshot, app_state, ui_mode).upcast()),
+            &host.last_left_rebuild_key,
+            snapshot,
+            app_state,
+            ui_mode,
         );
         if ui_mode.is_next() {
             let compact = host
@@ -1363,6 +1366,24 @@ fn close_confirmation_prompts(snapshot: &Value) -> Vec<GtkCloseConfirmationPromp
         .into_iter()
         .flatten()
         .filter_map(|request| {
+            let kind = value_str(request, "kind", "");
+            if matches!(kind, "workspace" | "workspace-batch") {
+                return Some(GtkCloseConfirmationPrompt {
+                    id: value_string(request, "id")?,
+                    title: strings::text(if kind == "workspace" {
+                        "close.workspace_title"
+                    } else {
+                        "close.workspaces_title"
+                    }),
+                    message: strings::text(if kind == "workspace" {
+                        "close.workspace_message"
+                    } else {
+                        "close.workspaces_message"
+                    }),
+                    accept_label: strings::text("close.accept"),
+                    cancel_label: strings::text("close.cancel"),
+                });
+            }
             Some(GtkCloseConfirmationPrompt {
                 id: value_string(request, "id")?,
                 title: value_str(request, "title", "Confirm close").to_string(),
@@ -2480,6 +2501,22 @@ fn workspace_sidebar(
     } else {
         260
     };
+    let sidebar = workspace_sidebar_content(snapshot, app_state, ui_mode);
+    let frame = bounded_workspace_sidebar(sidebar.clone(), width);
+    let scroller = frame
+        .first_child()
+        .unwrap()
+        .downcast::<gtk::ScrolledWindow>()
+        .unwrap();
+    reveal_selected_workspace(&scroller, &sidebar);
+    frame
+}
+
+fn workspace_sidebar_content(
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    ui_mode: GtkUiMode,
+) -> gtk::Box {
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
     sidebar.add_css_class("cmux-sidebar");
     sidebar.set_hexpand(true);
@@ -2500,7 +2537,7 @@ fn workspace_sidebar(
         })
     {
         append_custom_sidebar(&sidebar, custom_sidebar, app_state);
-        return bounded_workspace_sidebar(sidebar, width);
+        return sidebar;
     }
 
     let drag_state = Rc::new(RefCell::new(GtkWorkspaceDragState::default()));
@@ -2528,7 +2565,114 @@ fn workspace_sidebar(
         }
     }
 
-    bounded_workspace_sidebar(sidebar, width)
+    sidebar
+}
+
+fn workspace_sidebar_navigation_key(
+    snapshot: &Value,
+) -> Vec<(GtkWorkspaceSidebarRowKind, String, bool)> {
+    workspace_sidebar_rows(snapshot)
+        .into_iter()
+        .map(|row| (row.kind, row.target, row.selected))
+        .collect()
+}
+
+fn refresh_workspace_sidebar(
+    slot: &gtk::Box,
+    previous_snapshot: &Value,
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    ui_mode: GtkUiMode,
+) {
+    let scroller = slot
+        .first_child()
+        .and_then(|frame| frame.first_child())
+        .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok());
+    let Some(scroller) = scroller else {
+        replace_snapshot_slot_child(
+            slot,
+            Some(workspace_sidebar(snapshot, app_state, ui_mode).upcast()),
+        );
+        return;
+    };
+    let scroll_position = scroller.vadjustment().value();
+    let sidebar = workspace_sidebar_content(snapshot, app_state, ui_mode);
+    if let Some(viewport) = scroller
+        .child()
+        .and_then(|child| child.downcast::<gtk::Viewport>().ok())
+    {
+        viewport.set_child(Some(&sidebar));
+    } else {
+        scroller.set_child(Some(&sidebar));
+    }
+    if workspace_sidebar_navigation_key(previous_snapshot)
+        != workspace_sidebar_navigation_key(snapshot)
+    {
+        reveal_selected_workspace(&scroller, &sidebar);
+    } else {
+        let adjustment = scroller.vadjustment().downgrade();
+        after_widget_layout(sidebar.upcast_ref(), move |_| {
+            if let Some(adjustment) = adjustment.upgrade() {
+                adjustment.set_value(scroll_position);
+            }
+        });
+    }
+}
+
+fn reveal_selected_workspace(scroller: &gtk::ScrolledWindow, sidebar: &gtk::Box) {
+    if let Some(selected) =
+        widget_descendant_with_css_class(sidebar.upcast_ref(), "cmux-workspace-selected")
+    {
+        reveal_scrolled_child(
+            scroller,
+            sidebar.upcast_ref(),
+            &selected,
+            gtk::Orientation::Vertical,
+        );
+    }
+}
+
+fn reveal_scrolled_child(
+    scroller: &gtk::ScrolledWindow,
+    content: &gtk::Widget,
+    child: &gtk::Widget,
+    orientation: gtk::Orientation,
+) {
+    let scroller = scroller.downgrade();
+    let child = child.downgrade();
+    after_widget_layout(content, move |content| {
+        if let (Some(scroller), Some(child)) = (scroller.upgrade(), child.upgrade()) {
+            if let Some(bounds) = child.compute_bounds(content) {
+                let (adjustment, start, size) = if orientation == gtk::Orientation::Horizontal {
+                    (scroller.hadjustment(), bounds.x(), bounds.width())
+                } else {
+                    (scroller.vadjustment(), bounds.y(), bounds.height())
+                };
+                let start = f64::from(start);
+                let end = start + f64::from(size);
+                let value = adjustment.value();
+                if start < value {
+                    adjustment.set_value(start);
+                } else if end > value + adjustment.page_size() {
+                    adjustment.set_value(start.min(end - adjustment.page_size()));
+                }
+            }
+        }
+    });
+}
+
+fn after_widget_layout(widget: &gtk::Widget, action: impl Fn(&gtk::Widget) + 'static) {
+    let waited_for_layout = Cell::new(false);
+    widget.add_tick_callback(move |widget, _| {
+        // Tick callbacks precede layout. The following frame has the new row allocation.
+        if !waited_for_layout.replace(true) {
+            return glib::ControlFlow::Continue;
+        }
+        if widget.width() > 0 && widget.height() > 0 {
+            action(widget);
+        }
+        glib::ControlFlow::Break
+    });
 }
 
 fn bounded_workspace_sidebar(sidebar: gtk::Box, width: i32) -> gtk::Box {
@@ -3813,7 +3957,7 @@ fn workspace_sidebar_row(
             call_app(
                 &app_state,
                 "workspace.close",
-                json!({"workspace_id": target}),
+                json!({"workspace_id": target, "source": "tab_button"}),
             );
         });
         row_container.append(&close);
@@ -6766,7 +6910,7 @@ fn surface_area(
         );
         main.append(&label(&title, "cmux-heading"));
         main.append(&toolbar(snapshot, app_state));
-        if let Some(palette) = command_palette_panel(snapshot) {
+        if let Some(palette) = command_palette_panel(snapshot, app_state) {
             main.append(&palette);
         }
         if let Some(shortcuts) = shortcut_help_panel(snapshot, None) {
@@ -8919,6 +9063,7 @@ fn app_chrome_sidebar(
     let chrome = gtk::Box::new(gtk::Orientation::Vertical, 10);
     chrome.add_css_class("cmux-chrome");
     chrome.set_focusable(true);
+    chrome.set_hexpand(false);
     let configured_width = config::sidebar_settings()
         .right_max_width
         .unwrap_or(if ui_mode.is_next() {
@@ -8950,7 +9095,7 @@ fn right_sidebar_visible(snapshot: &Value) -> bool {
         .get("right_sidebar")
         .and_then(|sidebar| sidebar.get("visible"))
         .and_then(Value::as_bool)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn left_sidebar_visible(snapshot: &Value) -> bool {
@@ -9381,7 +9526,7 @@ fn append_notification_section(
     }
 }
 
-fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
+fn command_palette_panel(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> Option<gtk::Box> {
     let palette = snapshot.get("command_palette")?;
     if !palette
         .get("visible")
@@ -9414,6 +9559,7 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
         .get("selected_index")
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
+    let mut selected_row = None;
     for (index, result) in palette
         .get("results")
         .and_then(Value::as_array)
@@ -9431,10 +9577,6 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
             },
             8,
         );
-        row.add_css_class("cmux-palette-row");
-        if index == selected {
-            row.add_css_class("cmux-palette-selected");
-        }
         let title = value_str(result, "title", "Command");
         let kind = value_str(result, "trailing_label", "");
         row.append(&label(
@@ -9474,18 +9616,48 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
             row.append(&label(&hint, "cmux-muted"));
         }
         row.set_hexpand(true);
-        rows.append(&row);
+        if !input_row {
+            let button = gtk::Button::builder().child(&row).build();
+            button.add_css_class("cmux-palette-row");
+            button.set_focus_on_click(false);
+            button.update_property(&[gtk::accessible::Property::Label(title)]);
+            if index == selected {
+                button.add_css_class("cmux-palette-selected");
+                selected_row = Some(button.clone().upcast::<gtk::Widget>());
+            }
+            let params = json!({
+                "window_id": snapshot.pointer("/window/window_id"),
+                "command_id": result.get("command_id")
+            });
+            let app_state = Arc::clone(app_state);
+            button.connect_clicked(move |_| {
+                call_app(&app_state, "debug.command_palette.activate", params.clone());
+            });
+            rows.append(&button);
+        } else {
+            row.add_css_class("cmux-palette-row");
+            rows.append(&row);
+        }
     }
     let scroll = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
         .min_content_height(120)
         .max_content_height(520)
+        .propagate_natural_height(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
         .child(&rows)
         .build();
     scroll.add_css_class("cmux-palette-scroll");
+    if let Some(selected_row) = selected_row {
+        reveal_scrolled_child(
+            &scroll,
+            rows.upcast_ref(),
+            &selected_row,
+            gtk::Orientation::Vertical,
+        );
+    }
     panel.append(&scroll);
 
     Some(panel)
@@ -9898,14 +10070,27 @@ fn populate_pane_tab_strip(
         .unwrap_or(false);
     let (scroller, tab_row) = pane_tab_scroller(root);
     let mut existing = HashMap::new();
+    let mut previous_navigation = Vec::new();
     let mut child = tab_row.first_child();
     while let Some(widget) = child {
         child = widget.next_sibling();
         if let Ok(tab_widget) = widget.downcast::<gtk::Box>() {
+            previous_navigation.push((
+                tab_widget.widget_name().to_string(),
+                tab_widget
+                    .first_child()
+                    .is_some_and(|button| button.has_css_class("cmux-pane-tab-selected")),
+            ));
             existing.insert(tab_widget.widget_name().to_string(), tab_widget);
         }
     }
+    let navigation_changed = previous_navigation
+        != tabs
+            .iter()
+            .map(|tab| (tab.surface_id.clone(), tab.selected))
+            .collect::<Vec<_>>();
     let mut previous = None;
+    let mut selected_widget = None;
     for tab in &tabs {
         let tab_widget = existing.remove(&tab.surface_id).unwrap_or_else(|| {
             let tab_widget = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -9960,10 +10145,23 @@ fn populate_pane_tab_strip(
             local_refresh,
         );
         tab_row.reorder_child_after(&tab_widget, previous.as_ref());
+        if tab.selected {
+            selected_widget = Some(tab_widget.clone());
+        }
         previous = Some(tab_widget);
     }
     for tab_widget in existing.into_values() {
         tab_row.remove(&tab_widget);
+    }
+    if navigation_changed {
+        if let Some(selected) = selected_widget {
+            reveal_scrolled_child(
+                &scroller,
+                tab_row.upcast_ref(),
+                selected.upcast_ref(),
+                gtk::Orientation::Horizontal,
+            );
+        }
     }
 
     let mut child = scroller.next_sibling();
@@ -15225,6 +15423,11 @@ fn connect_terminal_keys(
                 return glib::Propagation::Stop;
             }
         }
+        // Native editors and web content own their input even while the selected
+        // terminal is loading or GTK focus is transitioning between surfaces.
+        if focused_webkit_widget || editable_focused {
+            return glib::Propagation::Proceed;
+        }
         let ghostty_focus_in_transition = model_ghostty_surface_id.is_some()
             && model_ghostty_surface_id != focused_ghostty_surface_id;
         if ghostty_focus_in_transition
@@ -15242,7 +15445,7 @@ fn connect_terminal_keys(
                 glib::Propagation::Proceed
             };
         }
-        if focused_ghostty_widget.is_some() || focused_webkit_widget || editable_focused {
+        if focused_ghostty_widget.is_some() {
             return glib::Propagation::Proceed;
         }
         let Some(input) = terminal_input_for_key(keyval, modifiers) else {
@@ -16933,7 +17136,7 @@ fn workspace_action_params(workspace_id: &str, action: &str) -> Option<Value> {
     if workspace_id.trim().is_empty() {
         return None;
     }
-    Some(json!({"workspace_id": workspace_id, "action": action}))
+    Some(json!({"workspace_id": workspace_id, "action": action, "source": "context_menu"}))
 }
 
 fn workspace_context_action_specs(
@@ -18161,8 +18364,10 @@ mod tests {
         snapshot["surface_views"][0]["tabs"][1]["title"] = json!("Renamed terminal");
         populate_pane_tab_strip(&strip, &snapshot["surface_views"][0], &app_state, None);
         gtk_run_main_loop_for(Duration::from_millis(100));
-        assert!((adjustment.value() - 120.0).abs() < 1.0,
-            "title updates must preserve manual scrolling");
+        assert!(
+            (adjustment.value() - 120.0).abs() < 1.0,
+            "title updates must preserve manual scrolling"
+        );
 
         snapshot["surface_views"][0]["tabs"][0]["selected"] = json!(false);
         snapshot["surface_views"][0]["tabs"][15]["selected"] = json!(true);
@@ -18170,11 +18375,15 @@ mod tests {
         gtk_run_main_loop_for(Duration::from_millis(100));
         let selected = tab_row.last_child().expect("last tab");
         let bounds = selected.compute_bounds(&tab_row).expect("tab bounds");
-        assert!(f64::from(bounds.x()) >= adjustment.value() - 1.0,
-            "selected tab starts within viewport");
-        assert!(f64::from(bounds.x() + bounds.width()) <=
-            adjustment.value() + adjustment.page_size() + 1.0,
-            "keyboard-selected overflow tab must be fully visible");
+        assert!(
+            f64::from(bounds.x()) >= adjustment.value() - 1.0,
+            "selected tab starts within viewport"
+        );
+        assert!(
+            f64::from(bounds.x() + bounds.width())
+                <= adjustment.value() + adjustment.page_size() + 1.0,
+            "keyboard-selected overflow tab must be fully visible"
+        );
         window.destroy();
     }
 
@@ -18184,7 +18393,9 @@ mod tests {
             .application_id("ai.manaflow.cmux.tests.workspace-scroll")
             .flags(gio::ApplicationFlags::NON_UNIQUE)
             .build();
-        application.register(None::<&gio::Cancellable>).expect("register app");
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
         let app_state = Arc::new(Mutex::new(
             AppState::with_paths(None, None).expect("app state"),
         ));
@@ -18199,45 +18410,79 @@ mod tests {
             .collect::<Vec<_>>());
         let local_refresh = gtk_test_local_refresh(&application, &app_state);
         let mut host = create_gtk_window_host(
-            &application, &app_state, GtkRendererMode::Gtk, GtkUiMode::Next,
-            "window-a", &row, &snapshot, &local_refresh,
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            "window-a",
+            &row,
+            &snapshot,
+            &local_refresh,
         );
         host.window.present();
         gtk_run_main_loop_for(Duration::from_millis(100));
-        let scroller = host.snapshot_view.left_slot.first_child().expect("sidebar frame")
-            .first_child().expect("sidebar scroller")
-            .downcast::<gtk::ScrolledWindow>().expect("scrolled window");
+        let scroller = host
+            .snapshot_view
+            .left_slot
+            .first_child()
+            .expect("sidebar frame")
+            .first_child()
+            .expect("sidebar scroller")
+            .downcast::<gtk::ScrolledWindow>()
+            .expect("scrolled window");
         let adjustment = scroller.vadjustment();
         assert!(adjustment.upper() > adjustment.page_size() * 2.0);
         adjustment.set_value(220.0);
         snapshot["workspaces"][1]["title"] = json!("Renamed workspace");
         refresh_gtk_window_host(
-            &mut host, &app_state, GtkRendererMode::Gtk, GtkUiMode::Next,
-            &row, &snapshot, &local_refresh,
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &snapshot,
+            &local_refresh,
         );
         gtk_run_main_loop_for(Duration::from_millis(100));
-        let current_scroller = host.snapshot_view.left_slot.first_child().expect("sidebar frame")
-            .first_child().expect("sidebar scroller")
-            .downcast::<gtk::ScrolledWindow>().expect("scrolled window");
-        assert!((current_scroller.vadjustment().value() - 220.0).abs() < 1.0,
-            "workspace metadata updates must preserve manual scrolling");
+        let current_scroller = host
+            .snapshot_view
+            .left_slot
+            .first_child()
+            .expect("sidebar frame")
+            .first_child()
+            .expect("sidebar scroller")
+            .downcast::<gtk::ScrolledWindow>()
+            .expect("scrolled window");
+        assert!(
+            (current_scroller.vadjustment().value() - 220.0).abs() < 1.0,
+            "workspace metadata updates must preserve manual scrolling"
+        );
 
         snapshot["workspaces"][0]["selected"] = json!(false);
         snapshot["workspaces"][39]["selected"] = json!(true);
         refresh_gtk_window_host(
-            &mut host, &app_state, GtkRendererMode::Gtk, GtkUiMode::Next,
-            &row, &snapshot, &local_refresh,
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &snapshot,
+            &local_refresh,
         );
         gtk_run_main_loop_for(Duration::from_millis(100));
         let sidebar = widget_descendant_with_css_class(
-            host.snapshot_view.left_slot.upcast_ref(), "cmux-sidebar").expect("sidebar");
+            host.snapshot_view.left_slot.upcast_ref(),
+            "cmux-sidebar",
+        )
+        .expect("sidebar");
         let selected = widget_descendant_with_css_class(&sidebar, "cmux-workspace-selected")
             .expect("selected workspace");
         let bounds = selected.compute_bounds(&sidebar).expect("workspace bounds");
         assert!(f64::from(bounds.y()) >= adjustment.value() - 1.0);
         assert!(f64::from(bounds.y() + bounds.height()) <=
             adjustment.value() + adjustment.page_size() + 1.0,
-            "keyboard-selected overflow workspace must be visible");
+            "keyboard-selected overflow workspace must be visible: bounds={bounds:?}, value={}, page={}, upper={}",
+            adjustment.value(), adjustment.page_size(), adjustment.upper());
         host.window.destroy();
     }
 
@@ -18649,7 +18894,7 @@ mod tests {
 
     #[test]
     fn gtk_right_sidebar_state_maps_visibility_and_vault_alias() {
-        assert!(right_sidebar_visible(&json!({})));
+        assert!(!right_sidebar_visible(&json!({})));
         assert_eq!(right_sidebar_mode(&json!({})), "files");
         let snapshot = json!({
             "right_sidebar": {"visible": false, "mode": "vault"}
@@ -19848,6 +20093,7 @@ mod tests {
             workspace_action_params(&workspace_id, "mark-read").expect("workspace action params");
         assert_eq!(action_params["workspace_id"], "workspace:2");
         assert_eq!(action_params["action"], "mark-read");
+        assert_eq!(action_params["source"], "context_menu");
         assert!(workspace_action_params("   ", "pin").is_none());
         let new_group_params = workspace_new_group_params(&workspace_id).expect("new group params");
         assert_eq!(
@@ -21481,7 +21727,6 @@ mod tests {
     fn assert_gtk_external_model_mutations_refresh_before_safety_sync(
         renderer_mode: GtkRendererMode,
     ) {
-
         let renderer_name = match renderer_mode {
             GtkRendererMode::Gtk => "fallback",
             GtkRendererMode::Ghostty => "ghostty",
@@ -21592,7 +21837,6 @@ mod tests {
 
     #[gtk::test]
     fn gtk_model_mutation_suppressed_by_browser_focus_retries_when_focus_clears() {
-
         let application = gtk::Application::builder()
             .application_id("ai.manaflow.cmux.tests.browser-focus-model-retry")
             .flags(gio::ApplicationFlags::NON_UNIQUE)
@@ -21634,9 +21878,6 @@ mod tests {
             &presented_model_window,
             &global_visibility,
         );
-        let activity_refresh_source = local_refresh
-            .install_render_activity_refresh()
-            .expect("model activity refresh source");
         let row = model_window_rows(&app_state)
             .into_iter()
             .next()
@@ -21684,14 +21925,20 @@ mod tests {
             .snapshot_view
             .main_slot
             .append(&location);
+        // Initial focus notifications also schedule reconciliation. Focus the entry's
+        // GtkText child before dispatching them so the synthetic tree stays mounted.
+        assert!(location.grab_focus());
         window.present();
         gtk_run_main_loop_for(Duration::from_millis(100));
-        gtk::prelude::GtkWindowExt::set_focus(&window, Some(&location));
-        gtk_run_main_loop_for(Duration::from_millis(50));
         assert!(widget_or_ancestor_has_css_class(
             gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
             "cmux-browser-location"
         ));
+
+        // Start observing only once the synthetic browser entry owns focus.
+        let activity_refresh_source = local_refresh
+            .install_render_activity_refresh()
+            .expect("model activity refresh source");
 
         app_state
             .lock()
@@ -22123,9 +22370,28 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
             "selected_index": 0,
             "results": [{"title": "New Workspace", "command_id": "palette.newWorkspace"}]
         }});
-        let panel = command_palette_panel(&snapshot).unwrap();
-        let rows = widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-results").unwrap();
-        assert!(rows.first_child().unwrap().is::<gtk::Button>(), "palette rows must accept pointer activation");
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        assert!(call_app(
+            &app_state,
+            "debug.command_palette.toggle",
+            json!({})
+        ));
+        let before = call_app_value(&app_state, "workspace.list", json!({})).unwrap();
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        let rows =
+            widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-results").unwrap();
+        let button = rows
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .expect("palette rows must accept pointer activation");
+        button.emit_clicked();
+        let after = call_app_value(&app_state, "workspace.list", json!({})).unwrap();
+        assert_eq!(
+            after["workspaces"].as_array().unwrap().len(),
+            before["workspaces"].as_array().unwrap().len() + 1
+        );
+        assert!(!palette_visible(&app_state));
     }
 
     #[test]
@@ -22348,6 +22614,7 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
             "https://example.test"
         );
     }
+
     #[gtk::test]
     fn gtk_editable_keystrokes_never_reach_selected_terminal() {
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
@@ -22379,13 +22646,15 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
             .expect("window capture controller");
         for key in [gdk::Key::a, gdk::Key::BackSpace, gdk::Key::Left] {
             assert!(
-                !capture.emit_by_name::<bool>("key-pressed", &[&key, &38_u32, &gdk::ModifierType::empty()]),
+                !capture.emit_by_name::<bool>(
+                    "key-pressed",
+                    &[&key, &38_u32, &gdk::ModifierType::empty()]
+                ),
                 "search field must receive {key:?} even while a terminal is selected"
             );
         }
         window.destroy();
     }
-
 }
 
 #[cfg(test)]
@@ -22395,14 +22664,19 @@ mod daily_layout_tests {
     #[gtk::test]
     fn right_sidebar_does_not_take_spare_terminal_width() {
         let app = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
-        let snapshot = json!({"right_sidebar": {"visible": true, "mode": "files"}, "sidebar": {"cwd": ""}});
+        let snapshot =
+            json!({"right_sidebar": {"visible": true, "mode": "files"}, "sidebar": {"cwd": ""}});
         let chrome = app_chrome_sidebar(&snapshot, &app, GtkUiMode::Next);
         let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
         main.set_hexpand(true);
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&main);
         body.append(&chrome);
-        let window = gtk::Window::builder().default_width(1180).default_height(700).child(&body).build();
+        let window = gtk::Window::builder()
+            .default_width(1180)
+            .default_height(700)
+            .child(&body)
+            .build();
         window.present();
         let deadline = Instant::now() + Duration::from_millis(200);
         while Instant::now() < deadline {
@@ -22411,8 +22685,11 @@ mod daily_layout_tests {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert!(chrome.width() <= metrics::RIGHT_SIDEBAR_WIDTH + 20,
-            "right sidebar must retain its requested width, got {}", chrome.width());
+        assert!(
+            chrome.width() <= metrics::RIGHT_SIDEBAR_WIDTH + 20,
+            "right sidebar must retain its requested width, got {}",
+            chrome.width()
+        );
         window.destroy();
     }
 }

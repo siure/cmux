@@ -170,7 +170,9 @@ pub(super) fn header_rebuild_key(snapshot: &Value) -> Value {
         .find(|entry| entry.get("key").and_then(Value::as_str) == Some("branch"))
         .and_then(|entry| entry.get("value"));
     json!({
+        "window_id": snapshot.pointer("/window/window_id"),
         "workspace": selected.map(|workspace| json!({
+            "workspace_id": workspace.get("workspace_id"),
             "title": workspace.get("title"),
             "git_branch": workspace.get("git_branch"),
             "cwd": workspace.get("cwd"),
@@ -285,11 +287,26 @@ pub(super) fn refresh_overlay(
     while let Some(child) = slot.first_child() {
         slot.remove(&child);
     }
-    if let Some(palette) = command_palette_panel(snapshot) {
+    if let Some(palette) = command_palette_panel(snapshot, app_state) {
         palette.add_css_class("cmux-shell-overlay-panel");
         palette.set_halign(gtk::Align::Center);
         palette.set_valign(gtk::Align::Start);
-        slot.append(&palette);
+        let backdrop = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        backdrop.set_hexpand(true);
+        backdrop.set_vexpand(true);
+        let click = gtk::GestureClick::new();
+        let palette_state = Arc::clone(app_state);
+        let palette_window = window_id.to_string();
+        click.connect_pressed(move |_, _, _, _| {
+            dismiss_command_palette(&palette_state, &palette_window);
+        });
+        backdrop.add_controller(click);
+        let overlay = gtk::Overlay::new();
+        overlay.set_hexpand(true);
+        overlay.set_vexpand(true);
+        overlay.set_child(Some(&backdrop));
+        overlay.add_overlay(&palette);
+        slot.append(&overlay);
     }
     if let Some(shortcuts) = shortcut_help_panel(snapshot, Some((app_state, window_id))) {
         shortcuts.add_css_class("cmux-shell-overlay-panel");
@@ -322,12 +339,34 @@ pub(super) fn refresh_overlay(
     slot.set_visible(slot.first_child().is_some());
 }
 
+fn dismiss_command_palette(app_state: &Arc<Mutex<AppState>>, window_id: &str) {
+    let Ok(mut app) = app_state.lock() else {
+        return;
+    };
+    let params = json!({"window_id": window_id});
+    let visible = app
+        .handle("debug.command_palette.visible", &params)
+        .ok()
+        .and_then(|state| state.get("visible").and_then(Value::as_bool))
+        .unwrap_or(false);
+    if visible {
+        let _ = app.handle("debug.command_palette.toggle", &params);
+    }
+}
+
 fn append_header_actions(
     start_actions: &gtk::Box,
     end_actions: &gtk::Box,
     snapshot: &Value,
     app_state: &Arc<Mutex<AppState>>,
 ) {
+    start_actions.append(&header_icon_button(
+        "sidebar-show-symbolic",
+        &strings::text("header.toggle_left_sidebar"),
+        app_state,
+        "sidebar.left",
+        json!({"action": "toggle", "window_id": snapshot.pointer("/window/window_id")}),
+    ));
     let (new_workspace_method, new_workspace_params) = new_workspace_request_for_snapshot(snapshot);
     start_actions.append(&header_icon_button(
         "list-add-symbolic",
@@ -341,14 +380,14 @@ fn append_header_actions(
         &strings::text("header.command_palette"),
         app_state,
         "debug.command_palette.toggle",
-        json!({}),
+        json!({"window_id": snapshot.pointer("/window/window_id")}),
     ));
     end_actions.append(&header_icon_button(
         "sidebar-show-right-symbolic",
         &strings::text("header.toggle_right_sidebar"),
         app_state,
         "sidebar.right",
-        json!({"action": "toggle", "no_focus": true}),
+        json!({"action": "toggle", "no_focus": true, "window_id": snapshot.pointer("/window/window_id")}),
     ));
     end_actions.append(&overflow_button(snapshot, app_state));
 }
@@ -365,6 +404,8 @@ fn header_icon_button(
     button.add_css_class("cmux-header-action");
     button.set_focusable(true);
     button.set_tooltip_text(Some(tooltip));
+    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
+    button.set_focus_on_click(false);
     let app_state = Arc::clone(app_state);
     button.connect_clicked(move |_| {
         call_app(&app_state, method, params.clone());
@@ -394,7 +435,9 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
     let button = gtk::MenuButton::new();
     button.set_icon_name("view-more-symbolic");
     button.add_css_class("cmux-header-action");
-    button.set_tooltip_text(Some(&strings::text("header.more_actions")));
+    let more_actions = strings::text("header.more_actions");
+    button.set_tooltip_text(Some(&more_actions));
+    button.update_property(&[gtk::accessible::Property::Label(&more_actions)]);
     button.set_focusable(true);
 
     let popover = gtk::Popover::new();
@@ -422,6 +465,14 @@ fn overflow_button(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> gtk::M
             json!({"direction": "down"}),
         ),
         ("header.shortcut_help", "help.shortcuts.toggle", json!({})),
+        (
+            "header.settings",
+            "settings.open",
+            json!({
+                "window_id": snapshot.pointer("/window/window_id"),
+                "workspace_id": selected_workspace(snapshot).and_then(|workspace| workspace.get("workspace_id"))
+            }),
+        ),
     ] {
         menu.append(&overflow_action_button(
             &strings::text(key),
@@ -537,30 +588,82 @@ fn workspace_context(workspace: Option<&Value>) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn palette_backdrop_dismisses_without_reopening_closed_palette() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let windows = call_app_value(&app_state, "window.list", json!({})).unwrap();
+        let window_id = windows["windows"][0]["id"]
+            .as_str()
+            .or_else(|| windows["windows"][0]["window_id"].as_str())
+            .unwrap();
+        assert!(call_app(
+            &app_state,
+            "debug.command_palette.toggle",
+            json!({"window_id": window_id})
+        ));
+        dismiss_command_palette(&app_state, window_id);
+        assert!(!palette_visible(&app_state));
+        dismiss_command_palette(&app_state, window_id);
+        assert!(!palette_visible(&app_state));
+    }
+
     #[gtk::test]
     fn shell_header_exposes_workspace_sidebar_toggle() {
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let windows = call_app_value(&app_state, "window.list", json!({})).unwrap();
+        let first_window = windows["windows"][0]["id"].as_str().unwrap();
+        let second_window = call_app_value(&app_state, "window.create", json!({})).unwrap();
         let start = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let end = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        append_header_actions(&start, &end, &json!({}), &app_state);
+        append_header_actions(
+            &start,
+            &end,
+            &json!({"window": {"window_id": first_window}}),
+            &app_state,
+        );
         let mut child = start.first_child();
         let mut toggle = None;
         while let Some(widget) = child {
             child = widget.next_sibling();
-            if widget.tooltip_text().as_deref() == Some(strings::text("header.toggle_left_sidebar").as_str()) {
+            if widget.tooltip_text().as_deref()
+                == Some(strings::text("header.toggle_left_sidebar").as_str())
+            {
                 toggle = widget.downcast::<gtk::Button>().ok();
                 break;
             }
         }
-        toggle.expect("workspace sidebar toggle in titlebar").emit_clicked();
-        let state = call_app_value(&app_state, "sidebar.left", json!({})).unwrap();
+        toggle
+            .expect("workspace sidebar toggle in titlebar")
+            .emit_clicked();
+        let state = call_app_value(
+            &app_state,
+            "sidebar.left",
+            json!({"window_id": first_window}),
+        )
+        .unwrap();
         assert_eq!(state["visible"], false);
+        let other = call_app_value(
+            &app_state,
+            "sidebar.left",
+            json!({"window_id": second_window["window_id"]}),
+        )
+        .unwrap();
+        assert_eq!(other["visible"], true);
     }
 
     #[gtk::test]
     fn shell_overflow_exposes_settings_action() {
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
-        let overflow = overflow_button(&json!({}), &app_state);
+        let windows = call_app_value(&app_state, "window.list", json!({})).unwrap();
+        let first_window = windows["windows"][0]["id"].as_str().unwrap();
+        let workspaces = call_app_value(&app_state, "workspace.list", json!({})).unwrap();
+        let workspace_id = workspaces["workspaces"][0]["id"].as_str().unwrap();
+        let snapshot = json!({
+            "window": {"window_id": first_window},
+            "workspaces": [{"workspace_id": workspace_id, "selected": true}]
+        });
+        let overflow = overflow_button(&snapshot, &app_state);
+        call_app_value(&app_state, "window.create", json!({})).unwrap();
         let menu = overflow.popover().unwrap().child().unwrap();
         let mut child = menu.first_child();
         let mut settings = None;
@@ -573,7 +676,20 @@ mod tests {
                 }
             }
         }
-        assert!(settings.is_some(), "Settings must be reachable through the main menu");
+        settings
+            .expect("Settings must be reachable through the main menu")
+            .emit_clicked();
+        let surfaces = call_app_value(
+            &app_state,
+            "surface.list",
+            json!({"workspace_id": workspace_id}),
+        )
+        .unwrap();
+        assert!(surfaces["surfaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|surface| surface["type"] == "settings"));
     }
 
     #[test]

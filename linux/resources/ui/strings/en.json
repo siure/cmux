@@ -1,4 +1,12 @@
 {
+  "close.workspaces_title": "Close workspaces?",
+  "close.workspaces_message": "This will close the selected workspaces and all of their panels.",
+  "close.workspace_title": "Close workspace?",
+  "close.workspace_message": "This will close the workspace and all of its panels.",
+  "close.accept": "Close",
+  "close.cancel": "Cancel",
+  "header.toggle_left_sidebar": "Toggle Workspace Sidebar",
+  "header.settings": "Settings",
   "header.new_workspace": "New Workspace",
   "header.open_browser": "Open Browser",
   "header.toggle_right_sidebar": "Toggle Right Sidebar",
