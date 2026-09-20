@@ -18541,6 +18541,108 @@ mod tests {
         main_loop.run();
     }
 
+    #[gtk::test]
+    fn gtk_settings_shortcuts_scroll_inside_a_short_pane() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("settings app state"),
+        ));
+        let settings = settings_surface_view(
+            &json!({
+                "surface_id": "settings-test",
+                "settings": {
+                    "target": "keyboardShortcuts",
+                    "title": "Keyboard Shortcuts",
+                    "targets": [{"key": "keyboardShortcuts", "title": "Keyboard Shortcuts"}]
+                }
+            }),
+            &app_state,
+        )
+        .expect("settings view");
+        let (minimum_height, _, _, _) = settings.measure(gtk::Orientation::Vertical, 900);
+        assert!(minimum_height <= 300, "settings demand {minimum_height}px in a short pane");
+        let window = gtk::Window::new();
+        window.set_default_size(900, 300);
+        window.set_child(Some(&settings));
+        window.present();
+        gtk_run_main_loop_for(Duration::from_millis(50));
+
+        let scroller = settings
+            .last_child()
+            .and_downcast::<gtk::ScrolledWindow>()
+            .expect("settings content scroller");
+        let adjustment = scroller.vadjustment();
+        assert!(adjustment.upper() > adjustment.page_size());
+        adjustment.set_value(adjustment.upper() - adjustment.page_size());
+        gtk_run_main_loop_for(Duration::from_millis(20));
+        assert!(adjustment.value() > 0.0, "last shortcut rows must be reachable");
+        assert!(window.height() <= 300, "settings must fit the requested pane height");
+        window.close();
+    }
+
+    #[gtk::test]
+    fn gtk_settings_search_finds_controls_in_other_sections_without_losing_focus() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("settings app state"),
+        ));
+        let settings = settings_surface_view(
+            &json!({
+                "surface_id": "settings-test",
+                "settings": {
+                    "target": "general",
+                    "title": "General",
+                    "targets": [
+                        {"key": "general", "title": "General"},
+                        {"key": "terminal", "title": "Terminal"}
+                    ]
+                }
+            }),
+            &app_state,
+        )
+        .expect("settings view");
+        let search = widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-search")
+            .and_then(|widget| widget.downcast::<gtk::SearchEntry>().ok())
+            .expect("settings search");
+        let window = gtk::Window::new();
+        window.set_default_size(900, 300);
+        window.set_child(Some(&settings));
+        window.present();
+        search.grab_focus();
+        search.set_text("COPY selection");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        let results = widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-search-results")
+            .expect("search results");
+        let matching_section = results.first_child().expect("general section").next_sibling().expect("terminal section");
+        assert!(matching_section.is_visible());
+        assert!(!results.first_child().unwrap().is_visible());
+        let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("search focus");
+        assert!(focus == search || focus.is_ancestor(&search));
+
+        search.set_text("no-such-setting-9384");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        assert!(results.last_child().expect("empty message").is_visible());
+        search.set_text("");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        assert!(widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-search-results").is_none());
+        assert!(widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-content").is_some());
+        window.close();
+    }
+
+    #[gtk::test]
+    fn gtk_settings_json_opens_the_json_configuration() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("settings app state"),
+        ));
+        let content = settings_content("settingsJSON", "cmux.json", &app_state);
+        let button = widget_descendant_with_css_class(content.upcast_ref(), "cmux-settings-open-config")
+            .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+            .expect("open config action");
+        assert_eq!(
+            button.tooltip_text().as_deref(),
+            Some(config::primary_cmux_json_path_live().to_string_lossy().as_ref())
+        );
+        assert!(widget_descendant_with_css_class(content.upcast_ref(), "cmux-settings-config-docs").is_some());
+    }
+
     fn gtk_test_local_refresh(
         application: &gtk::Application,
         app_state: &Arc<Mutex<AppState>>,
@@ -22552,6 +22654,55 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
         assert!(!browser_surface_requires_recreation("work", 7, &state));
         assert!(browser_surface_requires_recreation("personal", 7, &state));
         assert!(browser_surface_requires_recreation("work", 8, &state));
+    }
+
+    #[gtk::test]
+    fn gtk_browser_omnibar_preserves_native_draft_and_selection_on_refresh() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": "browser-omnibar-refresh-test",
+            "browser": {"profile_id": "default", "url": "about:blank"}
+        }))
+        .unwrap();
+        let cache = Rc::new(RefCell::new(HashMap::new()));
+        let terminals = Rc::new(RefCell::new(HashMap::new()));
+        let controls = ensure_browser_surface_controls(&state, None, &app_state, &cache, &terminals);
+        let window = gtk::Window::builder()
+            .default_width(700)
+            .child(&controls.root)
+            .build();
+        window.present();
+        assert!(controls.location.grab_focus());
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(widget_contains_focus(&controls.location));
+        controls.location.set_text("https://draft.example/path");
+        controls.location.select_region(8, 13);
+        ensure_browser_surface_controls(&state, None, &app_state, &cache, &terminals);
+        assert_eq!(controls.location.text().as_str(), "https://draft.example/path");
+        assert_eq!(controls.location.selection_bounds(), Some((8, 13)));
+        assert!(controls.browser_chrome_focused.get());
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_browser_forward_is_available_in_navigation_toolbar() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": "browser-forward-toolbar-test",
+            "browser": {"profile_id": "default", "url": "about:blank"}
+        }))
+        .unwrap();
+        let controls = ensure_browser_surface_controls(
+            &state,
+            None,
+            &app_state,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+        );
+        assert_eq!(controls.forward.parent(), Some(controls.root.clone().upcast()));
+        assert_eq!(controls.back.next_sibling(), Some(controls.forward.clone().upcast()));
     }
 
     #[test]
