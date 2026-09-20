@@ -438,11 +438,9 @@ fn install_sidebar_resizers(
         let drag = gtk::GestureDrag::new();
         drag.set_button(1);
         let start = Rc::clone(&start_width);
-        let weak_frame = frame.downgrade();
+        let preferred_width = Rc::clone(width);
         drag.connect_drag_begin(move |gesture, _, _| {
-            if let Some(frame) = weak_frame.upgrade() {
-                start.set(frame.width());
-            }
+            start.set(preferred_width.get());
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
         let state = Arc::clone(app_state);
@@ -454,23 +452,46 @@ fn install_sidebar_resizers(
         let weak_left = view.left_slot.downgrade();
         let weak_right = view.right_slot.downgrade();
         drag.connect_drag_update(move |_, offset, _| {
-            let (Some(root), Some(left_slot), Some(right_slot)) = (weak_root.upgrade(), weak_left.upgrade(), weak_right.upgrade()) else { return; };
-            let candidate = start_width.get() + (if right { -offset } else { offset }).round() as i32;
-            let (left, right_size) = metrics::sidebar_widths(
-                if right { left_width.get() } else { candidate },
-                if right { candidate } else { right_width.get() },
-                widget_window_width(&root), left_slot.get_visible(), compact.get(),
-            );
-            let method = if right { "sidebar.right" } else { "sidebar.left" };
-            if let Some(result) = call_app_value(&state, method, json!({"action": "resize", "window_id": window_id, "width": if right { right_size } else { left }})) {
+            let (Some(root), Some(left_slot), Some(right_slot)) = (
+                weak_root.upgrade(),
+                weak_left.upgrade(),
+                weak_right.upgrade(),
+            ) else {
+                return;
+            };
+            let candidate =
+                start_width.get() + (if right { -offset } else { offset }).round() as i32;
+            let method = if right {
+                "sidebar.right"
+            } else {
+                "sidebar.left"
+            };
+            if let Some(result) = call_app_value(
+                &state,
+                method,
+                json!({"action": "resize", "window_id": window_id, "width": candidate}),
+            ) {
                 if let Some(width) = result["width"].as_i64() {
                     if right {
                         right_width.set(width as i32);
-                        set_sidebar_slot_width(&right_slot, width as i32);
                     } else {
                         left_width.set(width as i32);
-                        set_sidebar_slot_width(&left_slot, width as i32);
                     }
+                    let right_max = config::sidebar_settings()
+                        .right_max_width
+                        .unwrap_or(1200.0)
+                        .round() as i32;
+                    let (left, right_size) = metrics::sidebar_widths(
+                        left_width.get(),
+                        right_width
+                            .get()
+                            .min(right_max.max(metrics::MIN_RIGHT_SIDEBAR_WIDTH)),
+                        widget_window_width(&root),
+                        left_slot.get_visible(),
+                        compact.get(),
+                    );
+                    set_sidebar_slot_width(&left_slot, left);
+                    set_sidebar_slot_width(&right_slot, right_size);
                 }
             }
         });
@@ -1059,11 +1080,15 @@ mod tests {
                 &app_state,
                 "sidebar.left",
                 json!({"action": "mode", "window_id": window_id}),
-            ).unwrap()["width"],
+            )
+            .unwrap()["width"],
             410,
             "compact drag adjusts the preference, not its temporary display clamp",
         );
-        assert_eq!(view.left_slot.first_child().unwrap().width_request(), compact_width / 3);
+        assert_eq!(
+            view.left_slot.first_child().unwrap().width_request(),
+            compact_width / 3
+        );
         window.set_default_size(1600, 500);
         settle();
         assert!(!view.compact.get());
