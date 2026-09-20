@@ -292,12 +292,29 @@ jobs:
         run: cargo test --locked
 
       - name: Test GTK Linux app
-        run: cargo test --locked --features gtk
+        run: |
+          test_root="$(mktemp -d)"
+          trap 'rm -rf "$test_root"' EXIT
+          export XDG_CONFIG_HOME="$test_root/config"
+          export XDG_STATE_HOME="$test_root/state"
+          export XDG_DATA_HOME="$test_root/data"
+          export XDG_CACHE_HOME="$test_root/cache"
+          export CMUX_BROWSER_WEBKIT_DATA_DIR="$test_root/data/cmux/browser-profiles"
+          export CMUX_BROWSER_WEBKIT_CACHE_DIR="$test_root/cache/cmux/browser-profiles"
+          xvfb-run -a dbus-run-session -- cargo test --locked --features gtk
 
       - name: Smoke native WebKit runtime
         run: |
-          timeout 30s dbus-run-session -- xvfb-run -a cargo run --locked --features gtk --example webkit-cookie-smoke
-          timeout 30s dbus-run-session -- xvfb-run -a cargo run --locked --features gtk --example webkit-runtime-smoke
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          export XDG_CONFIG_HOME="$smoke_root/config"
+          export XDG_STATE_HOME="$smoke_root/state"
+          export XDG_DATA_HOME="$smoke_root/data"
+          export XDG_CACHE_HOME="$smoke_root/cache"
+          export CMUX_BROWSER_WEBKIT_DATA_DIR="$smoke_root/data/cmux/browser-profiles"
+          export CMUX_BROWSER_WEBKIT_CACHE_DIR="$smoke_root/cache/cmux/browser-profiles"
+          timeout 30s xvfb-run -a dbus-run-session -- cargo run --locked --features gtk --example webkit-cookie-smoke
+          timeout 30s xvfb-run -a dbus-run-session -- cargo run --locked --features gtk --example webkit-runtime-smoke
 
       - name: Smoke GTK app lifecycle
         run: |

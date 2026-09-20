@@ -54,7 +54,7 @@ Newer Rust toolchains may work, but 1.92.0 is the reproducible baseline.
 version under the XDG cache when the current `zig` does not match. Set
 `CMUX_ZIG=/absolute/path/to/zig` to use an existing exact version instead.
 
-Install these additional packages only for Xvfb smoke tests:
+Install these additional packages for the GTK test suite and Xvfb smoke tests:
 
 ```bash
 sudo apt install --no-install-recommends dbus-x11 xauth xvfb
@@ -130,7 +130,8 @@ cargo test --locked --manifest-path linux/Cargo.toml
 When GTK-gated code or a module boundary used by GTK changes, also run:
 
 ```bash
-cargo test --locked --manifest-path linux/Cargo.toml --features gtk
+xvfb-run -a dbus-run-session -- \
+  cargo test --locked --manifest-path linux/Cargo.toml --features gtk
 cargo build --locked --manifest-path linux/Cargo.toml --features gtk
 ```
 
@@ -138,16 +139,18 @@ The native suite requires the GTK and WebKitGTK development files. A passing
 display-free suite does not validate the embedded terminal, clipboard, IME,
 GL, or compositor behavior.
 
-The 2026-08-20 ownership audit found a pre-existing test-harness limitation:
-the complete GTK feature test binary can initialize process-global GTK from
-different test threads or query the icon theme without a display. On the audit
-host this makes the full command above nondeterministic and can end in a
-headless SIGSEGV. The headless serial SIGSEGV independently reproduces at the
-pre-cleanup integration commit. On the ownership branch, each reported GTK
-test passes alone and the live Xvfb app smoke passes. Focused tests are useful
-for diagnosis, but they do not make the full GTK release gate green. Fix the
-harness to run display-backed GTK tests on one owned GTK thread or in isolated
-test processes before treating that gate as reliable.
+Tests that construct GTK widgets use `#[gtk::test]`, which runs them on one
+owned GTK thread. Use this attribute for new widget tests; `#[test]` remains
+appropriate for pure model and key-mapping tests. The GTK suite requires a
+display and must not silently skip widget assertions when initialization
+fails. Xvfb supplies that display on headless hosts. Start Xvfb before the
+D-Bus session so services activated on that bus inherit `DISPLAY`.
+
+The visual harness (`./linux/scripts/test-gtk-next-visual.sh`) uses temporary
+configuration, state, browser storage, and a deterministic Bash prompt. Failed
+captures retain their state directory and copy the application log beside the
+screenshot output. Set `CMUX_VISUAL_SMOKE_ONLY=1` to run the live assertions
+without comparing pixels against the checked-in goldens.
 
 ## Renderer diagnostics
 
@@ -174,7 +177,7 @@ XDG_CONFIG_HOME="$smoke_root/config" \
 XDG_STATE_HOME="$smoke_root/state" \
 CMUX_LINUX_SOCKET_PATH="$socket_path" \
 GDK_BACKEND=x11 \
-timeout 600s dbus-run-session -- xvfb-run -a sh -ceu '
+timeout 600s xvfb-run -a dbus-run-session -- sh -ceu '
   launcher=$1
   client=$2
   socket=$3
