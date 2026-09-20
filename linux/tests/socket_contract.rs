@@ -34260,11 +34260,18 @@ fn surface_send_key_ctrl_d_reaches_running_program_without_closing_split() {
     let wait_for = |marker: &str| {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let text = rpc(&server.socket, "surface.read_text", json!({"surface_id": right_surface}));
+            let text = rpc(
+                &server.socket,
+                "surface.read_text",
+                json!({"surface_id": right_surface}),
+            );
             if text["text"].as_str().unwrap_or_default().contains(marker) {
                 break;
             }
-            assert!(Instant::now() < deadline, "terminal did not produce {marker}: {text}");
+            assert!(
+                Instant::now() < deadline,
+                "terminal did not produce {marker}: {text}"
+            );
             thread::sleep(Duration::from_millis(20));
         }
     };

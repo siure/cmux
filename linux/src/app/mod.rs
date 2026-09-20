@@ -1,3 +1,4 @@
+mod closed_history;
 mod session_persistence;
 
 use crate::{
@@ -61,7 +62,6 @@ const MAX_NATIVE_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 const MOBILE_REPLAY_SCROLLBACK_LINE_BUDGET: usize = 240;
 const MOBILE_SCROLL_PREFETCH_SCROLLBACK_LINE_BUDGET: usize = 600;
 const DEFAULT_WORKSPACE_GROUP_ICON: &str = "folder.fill";
-const MAX_RECENTLY_CLOSED_BROWSER_PANELS: usize = 100;
 const MAX_BROWSER_RUNTIME_ACTIONS: usize = 256;
 const MAX_BROWSER_INIT_SCRIPTS: usize = 256;
 const REMOTE_TMUX_CONNECTION_ENV: &str = "CMUX_REMOTE_TMUX_CONNECTION_KEY";
@@ -777,6 +777,8 @@ struct LinuxSessionSnapshot {
     saved_at: f64,
     current_window_index: usize,
     windows: Vec<SessionWindowSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed_history: Option<closed_history::HistorySnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -789,6 +791,10 @@ struct SessionWindowSnapshot {
     sidebar_visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     right_sidebar_visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    left_sidebar_width: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    right_sidebar_width: Option<i32>,
     sidebar_mode: String,
     workspaces: Vec<SessionWorkspaceSnapshot>,
     workspace_groups: Vec<SessionWorkspaceGroupSnapshot>,
@@ -1915,21 +1921,6 @@ struct BrowserRuntimeUploadAction {
     files: Vec<String>,
 }
 
-struct ClosedBrowserPanelSnapshot {
-    workspace_id: String,
-    original_pane_id: String,
-    original_tab_index: usize,
-    fallback_anchor_pane_id: Option<String>,
-    fallback_split_direction: Option<String>,
-    url: String,
-    title: String,
-    custom_title: bool,
-    profile_id: String,
-    history: Vec<String>,
-    history_index: usize,
-    page_zoom: f64,
-}
-
 #[derive(Clone)]
 struct BrowserProfileState {
     id: String,
@@ -3025,6 +3016,8 @@ pub struct AppState {
     focus_history_recording_suppression_depth: usize,
     left_sidebar_visible_by_window: HashMap<String, bool>,
     right_sidebar_visible_by_window: HashMap<String, bool>,
+    left_sidebar_width_by_window: HashMap<String, i32>,
+    right_sidebar_width_by_window: HashMap<String, i32>,
     sidebar_mode_by_window: HashMap<String, String>,
     custom_sidebar_selection_path: PathBuf,
     custom_sidebar_state_path: PathBuf,
@@ -3059,6 +3052,8 @@ pub struct AppState {
     remote_tcp_bridge_port: Option<u16>,
     current_window: String,
     reopen_session_snapshot: Option<LinuxSessionSnapshot>,
+    session_persistence: OnceLock<AppResult<session_persistence::SessionPersistence>>,
+    async_session_autosave: bool,
     config_reload_generation: u64,
     app_workspace_settings: config::AppWorkspaceSettings,
     terminal_interaction_settings: config::TerminalInteractionSettings,
@@ -3089,7 +3084,7 @@ pub struct AppState {
     current_browser_profile_id: String,
     browser_profiles_path: PathBuf,
     browser_profiles_dirty: bool,
-    recently_closed_browser_panels: VecDeque<ClosedBrowserPanelSnapshot>,
+    recently_closed_items: closed_history::HistoryRecords,
     app_focus_override: Option<bool>,
     mobile_dev_stack_auth_token: Option<String>,
     mobile_event_subscriptions: HashMap<String, Vec<String>>,
@@ -3337,6 +3332,8 @@ impl AppState {
             focus_history_recording_suppression_depth: 0,
             left_sidebar_visible_by_window: HashMap::new(),
             right_sidebar_visible_by_window: HashMap::new(),
+            left_sidebar_width_by_window: HashMap::new(),
+            right_sidebar_width_by_window: HashMap::new(),
             sidebar_mode_by_window: HashMap::new(),
             custom_sidebar_selection_path,
             custom_sidebar_state_path,
@@ -3374,6 +3371,8 @@ impl AppState {
             remote_tcp_bridge_port: None,
             current_window: String::new(),
             reopen_session_snapshot,
+            session_persistence: OnceLock::new(),
+            async_session_autosave: false,
             config_reload_generation: 0,
             app_workspace_settings,
             terminal_interaction_settings,
@@ -3409,7 +3408,7 @@ impl AppState {
             current_browser_profile_id,
             browser_profiles_path,
             browser_profiles_dirty: false,
-            recently_closed_browser_panels: VecDeque::new(),
+            recently_closed_items: VecDeque::new(),
             app_focus_override: None,
             mobile_dev_stack_auth_token: None,
             mobile_event_subscriptions: HashMap::new(),
@@ -3486,6 +3485,7 @@ impl AppState {
             return Err(AppError::invalid_state("session snapshot has no windows"));
         }
 
+        let closed_history = snapshot.closed_history;
         if replace_existing {
             for runtime in self.remote_tmux_runtimes.values() {
                 runtime.stop();
@@ -3504,6 +3504,8 @@ impl AppState {
             self.focus_history_recording_suppression_depth = 0;
             self.left_sidebar_visible_by_window.clear();
             self.right_sidebar_visible_by_window.clear();
+            self.left_sidebar_width_by_window.clear();
+            self.right_sidebar_width_by_window.clear();
             self.sidebar_mode_by_window.clear();
             self.right_sidebar_focus_generation_by_window.clear();
             self.shortcut_help_visible_by_window.clear();
@@ -3544,185 +3546,21 @@ impl AppState {
                 .insert(window_id.clone(), left_sidebar_visible);
             self.right_sidebar_visible_by_window
                 .insert(window_id.clone(), right_sidebar_visible);
+            if let Some(width) = window_snapshot.left_sidebar_width {
+                self.left_sidebar_width_by_window
+                    .insert(window_id.clone(), width.clamp(240, 4096));
+            }
+            if let Some(width) = window_snapshot.right_sidebar_width {
+                self.right_sidebar_width_by_window
+                    .insert(window_id.clone(), width.clamp(276, 4096));
+            }
             self.sidebar_mode_by_window
                 .insert(window_id.clone(), window_snapshot.sidebar_mode.clone());
 
             let mut restored_workspace_ids = Vec::new();
             for workspace_snapshot in window_snapshot.workspaces {
-                let canvas_snapshot = workspace_snapshot.canvas.clone();
-                let workspace_id = new_id();
-                let restored_at_ms = current_unix_millis();
-                let created_at_ms = if workspace_snapshot.created_at_ms == 0 {
-                    restored_at_ms
-                } else {
-                    workspace_snapshot.created_at_ms
-                };
-                let last_activity_at_ms = workspace_snapshot.last_activity_at_ms.max(created_at_ms);
-                let workspace = Workspace {
-                    id: workspace_id.clone(),
-                    window_id: window_id.clone(),
-                    title: workspace_snapshot.title,
-                    terminal_title: None,
-                    custom_title: workspace_snapshot.custom_title,
-                    auto_title: workspace_snapshot.auto_title,
-                    custom_description: workspace_snapshot.custom_description,
-                    custom_color: workspace_snapshot.custom_color,
-                    pinned: workspace_snapshot.pinned,
-                    unread: workspace_snapshot.unread,
-                    created_at_ms,
-                    last_activity_at_ms,
-                    workspace_env: workspace_snapshot.workspace_env,
-                    cwd: workspace_snapshot.cwd.clone(),
-                    preferred_browser_profile_id: workspace_snapshot
-                        .preferred_browser_profile_id
-                        .filter(|profile_id| self.browser_profiles.contains_key(profile_id)),
-                    group_id: None,
-                    latest_conversation_message: None,
-                    latest_submitted_message: None,
-                    latest_submitted_at: None,
-                    remote: None,
-                    panes: Vec::new(),
-                    selected_pane: None,
-                    zoomed_pane: None,
-                    debug_column_sizes: Vec::new(),
-                    debug_row_sizes: Vec::new(),
-                    status_entries: Vec::new(),
-                    metadata_blocks: Vec::new(),
-                    progress: None,
-                    log_entries: Vec::new(),
-                };
-                self.workspaces.insert(workspace_id.clone(), workspace);
-                if let Some(window) = self
-                    .windows
-                    .iter_mut()
-                    .find(|window| window.id == window_id)
-                {
-                    window.workspaces.push(workspace_id.clone());
-                }
-                restored_workspace_ids.push(workspace_id.clone());
-
-                let mut restored_pane_ids = Vec::new();
-                let mut legacy_col_spans = HashSet::new();
-                let mut legacy_row_spans = HashSet::new();
-                for pane_snapshot in workspace_snapshot.panes {
-                    let col_span = pane_snapshot.col_span;
-                    let row_span = pane_snapshot.row_span;
-                    let pane_id =
-                        self.create_pane_at(&workspace_id, pane_snapshot.col, pane_snapshot.row);
-                    if let Some(pane) = self.panes.get_mut(&pane_id) {
-                        pane.col_span = col_span.unwrap_or(1).max(1);
-                        pane.row_span = row_span.unwrap_or(1).max(1);
-                        pane.debug_width_delta = pane_snapshot.debug_width_delta;
-                        pane.debug_height_delta = pane_snapshot.debug_height_delta;
-                        pane.canvas_frame = pane_snapshot.canvas_frame.map(|frame| DebugFrame {
-                            x: frame.x,
-                            y: frame.y,
-                            width: frame.width,
-                            height: frame.height,
-                        });
-                    }
-                    if col_span.is_none() {
-                        legacy_col_spans.insert(pane_id.clone());
-                    }
-                    if row_span.is_none() {
-                        legacy_row_spans.insert(pane_id.clone());
-                    }
-                    restored_pane_ids.push(pane_id.clone());
-
-                    let mut restored_surface_ids = Vec::new();
-                    for mut surface_snapshot in pane_snapshot.surfaces {
-                        let was_hibernated = surface_snapshot.agent_hibernation.is_some();
-                        let restored_launch = self.restored_terminal_launch(&mut surface_snapshot);
-                        let spec = SurfaceSpec {
-                            kind: SurfaceKind::from_str(&surface_snapshot.kind),
-                            title: Some(surface_snapshot.title.clone()),
-                            custom_title: surface_snapshot.custom_title,
-                            url: surface_snapshot.url.clone(),
-                            browser_profile_id: surface_snapshot
-                                .browser
-                                .as_ref()
-                                .map(|browser| browser.profile_id.clone()),
-                            cwd: restored_launch.cwd.clone(),
-                            command: restored_launch.command.clone(),
-                            initial_input: restored_launch.initial_input.clone(),
-                            font_size: surface_snapshot.terminal_font_size,
-                            wait_after_command: surface_snapshot.terminal_wait_after_command,
-                            env: restored_launch.environment.clone(),
-                            remote_session_active: surface_snapshot.remote_session_active,
-                            ssh_session_id: surface_snapshot.ssh_session_id.clone(),
-                        };
-                        let start_terminal = !was_hibernated
-                            && self.should_start_terminal_immediately(&workspace_id, &spec);
-                        let surface_id = self.create_surface_with_cwd(
-                            &workspace_id,
-                            &pane_id,
-                            spec,
-                            restored_launch
-                                .cwd
-                                .clone()
-                                .or_else(|| workspace_snapshot.cwd.clone()),
-                            start_terminal,
-                        )?;
-                        self.restore_surface_snapshot_fields(
-                            &surface_id,
-                            surface_snapshot,
-                            restored_launch.restore_state,
-                        )?;
-                        restored_surface_ids.push(surface_id);
-                    }
-                    if let Some(selected_surface_id) =
-                        restored_surface_ids.get(pane_snapshot.selected_surface_index)
-                    {
-                        if let Some(pane) = self.panes.get_mut(&pane_id) {
-                            pane.selected_surface = Some(selected_surface_id.clone());
-                        }
-                    }
-                }
-                self.restore_legacy_pane_spans(
-                    &restored_pane_ids,
-                    &legacy_col_spans,
-                    &legacy_row_spans,
-                );
-                if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
-                    workspace.debug_column_sizes = workspace_snapshot.debug_column_sizes;
-                    workspace.debug_row_sizes = workspace_snapshot.debug_row_sizes;
-                }
-                if let Some(canvas) = canvas_snapshot {
-                    self.canvas_states.insert(
-                        workspace_id.clone(),
-                        CanvasWorkspaceState {
-                            mode: if canvas.mode == "canvas" {
-                                CanvasMode::Canvas
-                            } else {
-                                CanvasMode::Splits
-                            },
-                            magnification: canvas.magnification.clamp(0.1, 8.0),
-                            center_x: canvas.center_x,
-                            center_y: canvas.center_y,
-                            overview_active: canvas.overview_active,
-                            overview_restore: canvas.overview_restore.map(|restore| {
-                                CanvasViewportState {
-                                    magnification: restore.magnification.clamp(0.1, 8.0),
-                                    center_x: restore.center_x,
-                                    center_y: restore.center_y,
-                                }
-                            }),
-                            z_order: canvas
-                                .z_order
-                                .iter()
-                                .filter_map(|index| restored_pane_ids.get(*index).cloned())
-                                .collect(),
-                        },
-                    );
-                }
-
-                if let Some(selected_pane_id) =
-                    restored_pane_ids.get(workspace_snapshot.selected_pane_index)
-                {
-                    if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
-                        workspace.selected_pane = Some(selected_pane_id.clone());
-                    }
-                }
+                restored_workspace_ids
+                    .push(self.restore_workspace_snapshot(&window_id, workspace_snapshot)?);
             }
 
             self.restore_window_workspace_groups(
@@ -3744,6 +3582,9 @@ impl AppState {
             }
         }
 
+        if replace_existing {
+            self.restore_closed_history_snapshot(closed_history, &restored_window_ids);
+        }
         let selected_window_index = snapshot
             .current_window_index
             .min(restored_window_ids.len().saturating_sub(1));
@@ -3757,6 +3598,180 @@ impl AppState {
         }
         self.normalize_beta_feature_runtime_state();
         Ok(())
+    }
+
+    fn restore_workspace_snapshot(
+        &mut self,
+        window_id: &str,
+        workspace_snapshot: SessionWorkspaceSnapshot,
+    ) -> AppResult<String> {
+        let canvas_snapshot = workspace_snapshot.canvas.clone();
+        let workspace_id = new_id();
+        let restored_at_ms = current_unix_millis();
+        let created_at_ms = if workspace_snapshot.created_at_ms == 0 {
+            restored_at_ms
+        } else {
+            workspace_snapshot.created_at_ms
+        };
+        let last_activity_at_ms = workspace_snapshot.last_activity_at_ms.max(created_at_ms);
+        let workspace = Workspace {
+            id: workspace_id.clone(),
+            window_id: window_id.to_string(),
+            title: workspace_snapshot.title,
+            terminal_title: None,
+            custom_title: workspace_snapshot.custom_title,
+            auto_title: workspace_snapshot.auto_title,
+            custom_description: workspace_snapshot.custom_description,
+            custom_color: workspace_snapshot.custom_color,
+            pinned: workspace_snapshot.pinned,
+            unread: workspace_snapshot.unread,
+            created_at_ms,
+            last_activity_at_ms,
+            workspace_env: workspace_snapshot.workspace_env,
+            cwd: workspace_snapshot.cwd.clone(),
+            preferred_browser_profile_id: workspace_snapshot
+                .preferred_browser_profile_id
+                .filter(|profile_id| self.browser_profiles.contains_key(profile_id)),
+            group_id: None,
+            latest_conversation_message: None,
+            latest_submitted_message: None,
+            latest_submitted_at: None,
+            remote: None,
+            panes: Vec::new(),
+            selected_pane: None,
+            zoomed_pane: None,
+            debug_column_sizes: Vec::new(),
+            debug_row_sizes: Vec::new(),
+            status_entries: Vec::new(),
+            metadata_blocks: Vec::new(),
+            progress: None,
+            log_entries: Vec::new(),
+        };
+        self.workspaces.insert(workspace_id.clone(), workspace);
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.id == window_id)
+        {
+            window.workspaces.push(workspace_id.clone());
+        }
+
+        let mut restored_pane_ids = Vec::new();
+        let mut legacy_col_spans = HashSet::new();
+        let mut legacy_row_spans = HashSet::new();
+        for pane_snapshot in workspace_snapshot.panes {
+            let col_span = pane_snapshot.col_span;
+            let row_span = pane_snapshot.row_span;
+            let pane_id = self.create_pane_at(&workspace_id, pane_snapshot.col, pane_snapshot.row);
+            if let Some(pane) = self.panes.get_mut(&pane_id) {
+                pane.col_span = col_span.unwrap_or(1).max(1);
+                pane.row_span = row_span.unwrap_or(1).max(1);
+                pane.debug_width_delta = pane_snapshot.debug_width_delta;
+                pane.debug_height_delta = pane_snapshot.debug_height_delta;
+                pane.canvas_frame = pane_snapshot.canvas_frame.map(|frame| DebugFrame {
+                    x: frame.x,
+                    y: frame.y,
+                    width: frame.width,
+                    height: frame.height,
+                });
+            }
+            if col_span.is_none() {
+                legacy_col_spans.insert(pane_id.clone());
+            }
+            if row_span.is_none() {
+                legacy_row_spans.insert(pane_id.clone());
+            }
+            restored_pane_ids.push(pane_id.clone());
+
+            let mut restored_surface_ids = Vec::new();
+            for mut surface_snapshot in pane_snapshot.surfaces {
+                let was_hibernated = surface_snapshot.agent_hibernation.is_some();
+                let restored_launch = self.restored_terminal_launch(&mut surface_snapshot);
+                let spec = SurfaceSpec {
+                    kind: SurfaceKind::from_str(&surface_snapshot.kind),
+                    title: Some(surface_snapshot.title.clone()),
+                    custom_title: surface_snapshot.custom_title,
+                    url: surface_snapshot.url.clone(),
+                    browser_profile_id: surface_snapshot
+                        .browser
+                        .as_ref()
+                        .map(|browser| browser.profile_id.clone()),
+                    cwd: restored_launch.cwd.clone(),
+                    command: restored_launch.command.clone(),
+                    initial_input: restored_launch.initial_input.clone(),
+                    font_size: surface_snapshot.terminal_font_size,
+                    wait_after_command: surface_snapshot.terminal_wait_after_command,
+                    env: restored_launch.environment.clone(),
+                    remote_session_active: surface_snapshot.remote_session_active,
+                    ssh_session_id: surface_snapshot.ssh_session_id.clone(),
+                };
+                let start_terminal =
+                    !was_hibernated && self.should_start_terminal_immediately(&workspace_id, &spec);
+                let surface_id = self.create_surface_with_cwd(
+                    &workspace_id,
+                    &pane_id,
+                    spec,
+                    restored_launch
+                        .cwd
+                        .clone()
+                        .or_else(|| workspace_snapshot.cwd.clone()),
+                    start_terminal,
+                )?;
+                self.restore_surface_snapshot_fields(
+                    &surface_id,
+                    surface_snapshot,
+                    restored_launch.restore_state,
+                )?;
+                restored_surface_ids.push(surface_id);
+            }
+            if let Some(selected_surface_id) =
+                restored_surface_ids.get(pane_snapshot.selected_surface_index)
+            {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.selected_surface = Some(selected_surface_id.clone());
+                }
+            }
+        }
+        self.restore_legacy_pane_spans(&restored_pane_ids, &legacy_col_spans, &legacy_row_spans);
+        if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
+            workspace.debug_column_sizes = workspace_snapshot.debug_column_sizes;
+            workspace.debug_row_sizes = workspace_snapshot.debug_row_sizes;
+        }
+        if let Some(canvas) = canvas_snapshot {
+            self.canvas_states.insert(
+                workspace_id.clone(),
+                CanvasWorkspaceState {
+                    mode: if canvas.mode == "canvas" {
+                        CanvasMode::Canvas
+                    } else {
+                        CanvasMode::Splits
+                    },
+                    magnification: canvas.magnification.clamp(0.1, 8.0),
+                    center_x: canvas.center_x,
+                    center_y: canvas.center_y,
+                    overview_active: canvas.overview_active,
+                    overview_restore: canvas.overview_restore.map(|restore| CanvasViewportState {
+                        magnification: restore.magnification.clamp(0.1, 8.0),
+                        center_x: restore.center_x,
+                        center_y: restore.center_y,
+                    }),
+                    z_order: canvas
+                        .z_order
+                        .iter()
+                        .filter_map(|index| restored_pane_ids.get(*index).cloned())
+                        .collect(),
+                },
+            );
+        }
+
+        if let Some(selected_pane_id) =
+            restored_pane_ids.get(workspace_snapshot.selected_pane_index)
+        {
+            if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
+                workspace.selected_pane = Some(selected_pane_id.clone());
+            }
+        }
+        Ok(workspace_id)
     }
 
     fn restore_window_workspace_groups(
@@ -3872,7 +3887,10 @@ impl AppState {
                     && surface.agent_hibernation.is_none()
                 {
                     surface.terminal_restore_output = Some(terminal_replay_output(&scrollback));
-                    surface.terminal_scrollback_snapshot = Some(scrollback.clone());
+                    surface.terminal_scrollback_snapshot = Some(bounded_text_tail(
+                        &scrollback,
+                        SESSION_SNAPSHOT_SCROLLBACK_CHAR_LIMIT,
+                    ));
                 }
                 if let Ok(mut buffer) = surface.buffer.lock() {
                     *buffer = scrollback;
@@ -4037,6 +4055,7 @@ impl AppState {
         LinuxSessionSnapshot {
             version: SESSION_SNAPSHOT_VERSION,
             saved_at: unix_timestamp_seconds(),
+            closed_history: self.closed_history_snapshot(),
             current_window_index: self
                 .windows
                 .iter()
@@ -4074,6 +4093,8 @@ impl AppState {
                     .copied()
                     .unwrap_or(false),
             ),
+            left_sidebar_width: self.left_sidebar_width_by_window.get(&window.id).copied(),
+            right_sidebar_width: self.right_sidebar_width_by_window.get(&window.id).copied(),
             sidebar_mode: self.right_sidebar_mode(&window.id),
             workspaces: window
                 .workspaces
@@ -4260,11 +4281,55 @@ impl AppState {
         }
     }
 
-    fn persist_session_snapshot(&self, include_scrollback: bool) -> AppResult<(PathBuf, usize)> {
+    fn session_persistence(&self) -> AppResult<&session_persistence::SessionPersistence> {
+        self.session_persistence
+            .get_or_init(session_persistence::SessionPersistence::new)
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    fn persist_captured_session_snapshot(
+        &self,
+        snapshot: LinuxSessionSnapshot,
+    ) -> AppResult<(PathBuf, usize)> {
         let path = session_snapshot_path();
-        let snapshot = self.session_snapshot(include_scrollback);
-        let bytes = write_session_snapshot(&path, &snapshot)?;
+        let bytes = match self.session_persistence() {
+            Ok(writer) => {
+                writer.enqueue(path.clone(), snapshot);
+                writer.flush()?
+            }
+            Err(error) => {
+                eprintln!(
+                    "session writer unavailable; saving synchronously: {}",
+                    error.message
+                );
+                write_session_snapshot(&path, &snapshot)?
+            }
+        };
         Ok((path, bytes))
+    }
+
+    fn persist_session_snapshot(&self, include_scrollback: bool) -> AppResult<(PathBuf, usize)> {
+        self.persist_captured_session_snapshot(self.session_snapshot(include_scrollback))
+    }
+
+    fn enqueue_session_snapshot(&self) -> AppResult<()> {
+        match self.session_persistence() {
+            Ok(writer) => {
+                writer.enqueue(session_snapshot_path(), self.session_snapshot(true));
+                Ok(())
+            }
+            Err(_) => self.persist_session_snapshot(true).map(|_| ()),
+        }
+    }
+
+    fn autosave_session_snapshot(&self) -> AppResult<()> {
+        if self.async_session_autosave {
+            self.enqueue_session_snapshot()
+        } else {
+            // Socket mutation replies retain their existing durable-save boundary.
+            self.persist_session_snapshot(true).map(|_| ())
+        }
     }
 
     #[cfg_attr(not(feature = "gtk"), allow(dead_code))]
@@ -4282,7 +4347,10 @@ impl AppState {
         if !terminal_scrollback_persist_due(self.terminal_scrollback_snapshot_dirty_at_ms, now_ms) {
             return Ok(false);
         }
-        self.persist_embedded_terminal_session_snapshot()?;
+        if session_snapshot_save_enabled() {
+            self.enqueue_session_snapshot()?;
+        }
+        self.terminal_scrollback_snapshot_dirty_at_ms = None;
         Ok(true)
     }
 
@@ -4296,7 +4364,7 @@ impl AppState {
         if !method_persists_session_snapshot(method) || !session_snapshot_save_enabled() {
             return;
         }
-        match self.persist_session_snapshot(true) {
+        match self.autosave_session_snapshot() {
             Ok(_) => self.terminal_scrollback_snapshot_dirty_at_ms = None,
             Err(err) => {
                 self.append_debug_log(&format!(
@@ -5357,6 +5425,23 @@ impl AppState {
             }
         }
         Ok(payload)
+    }
+
+    fn settings_reset(&mut self, params: &Value) -> AppResult<Value> {
+        if params.get("confirmed").and_then(Value::as_bool) != Some(true) {
+            return Err(AppError::invalid_params(
+                "Reset settings requires confirmed=true",
+            ));
+        }
+        let paths = config::reset_app_settings().map_err(AppError::invalid_params)?;
+        let reload = self.request_config_reload();
+        self.refresh_agent_hibernation_settings();
+        self.apply_agent_hibernation_settings(self.agent_hibernation_settings);
+        Ok(json!({
+            "reset": true,
+            "paths": paths,
+            "reload_generation": reload["reload_generation"],
+        }))
     }
 
     fn settings_open(&mut self, params: &Value) -> AppResult<Value> {
@@ -6644,6 +6729,9 @@ impl AppState {
     }
 
     fn session_restore_persisted_snapshot(&mut self) -> AppResult<Value> {
+        if let Some(Ok(writer)) = self.session_persistence.get() {
+            writer.flush()?;
+        }
         let path = session_snapshot_path();
         if !path.exists() {
             return Err(AppError::not_found(
@@ -7128,6 +7216,11 @@ impl AppState {
                     AppError::internal(format!("failed to save agent hibernation settings: {err}"))
                 })?;
         }
+        self.apply_agent_hibernation_settings(settings);
+        Ok(self.agent_hibernation_status())
+    }
+
+    fn apply_agent_hibernation_settings(&mut self, settings: agent_hibernation_settings::Settings) {
         self.agent_hibernation_settings = settings;
         if !settings.enabled {
             self.agent_hibernation_confirmations.clear();
@@ -7141,7 +7234,6 @@ impl AppState {
                 let _ = self.resume_agent_hibernated_surface(&surface_id);
             }
         }
-        Ok(self.agent_hibernation_status())
     }
 
     fn maybe_evaluate_agent_hibernation(&mut self) {
@@ -7291,7 +7383,7 @@ impl AppState {
         }
 
         if hibernated > 0 && session_snapshot_save_enabled() {
-            let _ = self.persist_session_snapshot(true);
+            let _ = self.autosave_session_snapshot();
         }
         hibernated
     }
@@ -7424,7 +7516,7 @@ impl AppState {
             self.ensure_surface_terminal_started(surface_id)?;
         }
         if session_snapshot_save_enabled() {
-            let _ = self.persist_session_snapshot(true);
+            let _ = self.autosave_session_snapshot();
         }
         Ok(true)
     }
@@ -7524,6 +7616,16 @@ impl AppState {
         }
     }
 
+    /// UI actions enqueue autosaves; explicit saves and socket calls still wait
+    /// for persistence. Keep this scope around nested shared model actions too.
+    #[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+    pub(crate) fn handle_ui(&mut self, method: &str, params: &Value) -> AppResult<Value> {
+        let previous = std::mem::replace(&mut self.async_session_autosave, true);
+        let result = self.handle(method, params);
+        self.async_session_autosave = previous;
+        result
+    }
+
     pub fn handle(&mut self, method: &str, params: &Value) -> AppResult<Value> {
         self.prepare_for_request()?;
         self.handle_prepared(method, params, true)
@@ -7540,7 +7642,10 @@ impl AppState {
     }
 
     pub(crate) fn prepare_renderer_snapshot(&mut self) -> AppResult<()> {
-        self.prepare_for_request()
+        let previous = std::mem::replace(&mut self.async_session_autosave, true);
+        let result = self.prepare_for_request();
+        self.async_session_autosave = previous;
+        result
     }
 
     pub(crate) fn render_activity(&self) -> RenderActivity {
@@ -7635,6 +7740,7 @@ impl AppState {
             "agent_session.output_delta" => self.agent_session_output_delta(params),
             "session.restore_previous" => self.session_restore_previous(),
             "settings.open" => self.settings_open(params),
+            "settings.reset" => self.settings_reset(params),
             "settings.set_target" => self.settings_set_target(params),
             "settings.app.status" => Ok(self.app_workspace_settings_value()),
             "settings.app.set" => self.set_app_workspace_setting(params),
@@ -8047,6 +8153,13 @@ impl AppState {
             }
             "surface.close" => self.surface_close(params),
             "history.reopen_closed" => self.reopen_closed_browser_panel(),
+            "history.list" => Ok(self.closed_history_list()),
+            "history.clear" => Ok(self.clear_closed_history()),
+            "history.reopen" => {
+                let id = string_param(params, "id")
+                    .ok_or_else(|| AppError::invalid_params("id is required"))?;
+                self.reopen_closed_history_id(&id)
+            }
             "surface.move" => self.surface_move(params),
             "surface.pipe_pane" => self.surface_pipe_pane(params),
             "surface.reorder" => self.surface_reorder(params),
@@ -8177,6 +8290,14 @@ impl AppState {
                 self.browser_handle(browser_method, params)
             }
             palette_method if palette_method.starts_with("debug.command_palette.") => {
+                debug_shortcut_was_palette_input = palette_method
+                    == "debug.command_palette.input.key"
+                    && params.get("key").and_then(Value::as_str) != Some("enter")
+                    && params
+                        .get("combo")
+                        .and_then(Value::as_str)
+                        .and_then(global_search_result_digit)
+                        .is_none();
                 self.command_palette_handle(palette_method, params)
             }
             "debug.layout" => Ok(json!({"layout": self.layout_debug()?})),
@@ -8464,7 +8585,9 @@ impl AppState {
                 self.render_activity.record_model_mutation();
                 let transient_shortcut = matches!(
                     method,
-                    "debug.shortcut.simulate" | "debug.command_palette.activate"
+                    "debug.shortcut.simulate"
+                        | "debug.command_palette.activate"
+                        | "debug.command_palette.input.key"
                 ) && (debug_shortcut_was_palette_input
                     || result.as_ref().is_ok_and(shortcut_result_is_transient));
                 if !transient_shortcut {
@@ -14009,9 +14132,14 @@ impl AppState {
             .iter()
             .position(|w| w.id == id)
             .ok_or_else(|| AppError::not_found("window not found"))?;
+        if bool_param(params, "record_history").unwrap_or(true) {
+            self.capture_closed_window(index);
+        }
         let window = self.windows.remove(index);
         self.left_sidebar_visible_by_window.remove(&id);
         self.right_sidebar_visible_by_window.remove(&id);
+        self.left_sidebar_width_by_window.remove(&id);
+        self.right_sidebar_width_by_window.remove(&id);
         self.sidebar_mode_by_window.remove(&id);
         self.right_sidebar_focus_generation_by_window.remove(&id);
         self.shortcut_help_visible_by_window.remove(&id);
@@ -14243,6 +14371,9 @@ impl AppState {
             .position(|workspace_id| workspace_id == &id)
             .ok_or_else(|| AppError::not_found("workspace not found"))?;
         let was_selected = window.selected_workspace.as_deref() == Some(&id);
+        if bool_param(params, "record_history").unwrap_or(true) {
+            self.capture_closed_workspace(&id, closed_index);
+        }
         self.remove_workspace(&id);
         let fallback = self
             .windows
@@ -15727,7 +15858,7 @@ impl AppState {
     }
 
     fn surface_create(&mut self, params: &Value) -> AppResult<Value> {
-        let spec = surface_spec_from_value(params);
+        let mut spec = surface_spec_from_value(params);
         let is_agent_session = spec.kind == SurfaceKind::AgentSession;
         if is_agent_session {
             normalize_agent_session_provider(
@@ -15786,7 +15917,12 @@ impl AppState {
                 "routed_to_remote_tmux": true
             }));
         }
-        let surface_id = self.create_surface(&workspace_id, &pane_id, spec)?;
+        let source_surface_id = self
+            .panes
+            .get(&pane_id)
+            .and_then(|pane| pane.selected_surface.as_deref());
+        self.inherit_terminal_surface_options(&mut spec, source_surface_id, params);
+        let surface_id = self.create_surface_for_request(&workspace_id, &pane_id, spec, params)?;
         if is_agent_session {
             self.configure_agent_session_surface(&surface_id, params)?;
             let auto_start = bool_param(params, "auto_start").unwrap_or_else(|| {
@@ -17839,7 +17975,7 @@ impl AppState {
                     .or_else(|| params.get("workspace")),
             )?
             .unwrap_or(self.current_workspace_id()?);
-        let spec = surface_spec_from_value(params);
+        let mut spec = surface_spec_from_value(params);
         self.ensure_surface_spec_allowed(&spec)?;
         let target_surface_id = self
             .resolve_surface_optional(
@@ -17876,6 +18012,7 @@ impl AppState {
                 }));
             }
         }
+        self.inherit_terminal_surface_options(&mut spec, target_surface_id.as_deref(), params);
         let pane_id = if let Some(target_pane_id) = target_surface_id
             .as_deref()
             .and_then(|surface_id| self.surfaces.get(surface_id))
@@ -17885,7 +18022,7 @@ impl AppState {
         } else {
             self.create_pane_at(&workspace_id, 0, 0)
         };
-        let surface_id = self.create_surface(&workspace_id, &pane_id, spec)?;
+        let surface_id = self.create_surface_for_request(&workspace_id, &pane_id, spec, params)?;
         self.apply_workspace_terminal_sizes(&workspace_id)?;
         if bool_param(params, "focus").unwrap_or(!has_workspace_target) {
             self.focus_surface(&surface_id)?;
@@ -18043,155 +18180,6 @@ impl AppState {
         (None, None)
     }
 
-    fn capture_closed_browser_panel(
-        &mut self,
-        surface_id: &str,
-        workspace_id: &str,
-        pane_id: &str,
-    ) {
-        let Some(surface) = self.surfaces.get(surface_id) else {
-            return;
-        };
-        if surface.kind != SurfaceKind::Browser {
-            return;
-        }
-        let original_tab_index = self
-            .panes
-            .get(pane_id)
-            .and_then(|pane| pane.surfaces.iter().position(|id| id == surface_id))
-            .unwrap_or(0);
-        let (fallback_anchor_pane_id, fallback_split_direction) =
-            self.closed_browser_fallback_split(workspace_id, pane_id);
-        let snapshot = ClosedBrowserPanelSnapshot {
-            workspace_id: workspace_id.to_string(),
-            original_pane_id: pane_id.to_string(),
-            original_tab_index,
-            fallback_anchor_pane_id,
-            fallback_split_direction,
-            url: surface
-                .url
-                .clone()
-                .unwrap_or_else(|| "about:blank".to_string()),
-            title: surface.title.clone(),
-            custom_title: surface.custom_title,
-            profile_id: surface.browser.profile_id.clone(),
-            history: surface.browser.history.clone(),
-            history_index: surface.browser.history_index,
-            page_zoom: surface.browser.page_zoom,
-        };
-        while self.recently_closed_browser_panels.len() >= MAX_RECENTLY_CLOSED_BROWSER_PANELS {
-            self.recently_closed_browser_panels.pop_front();
-        }
-        self.recently_closed_browser_panels.push_back(snapshot);
-    }
-
-    fn reopen_closed_browser_panel(&mut self) -> AppResult<Value> {
-        if !self.browser_enabled {
-            return Ok(json!({
-                "handled": false,
-                "action": "reopenClosedBrowserPanel",
-                "reason": "browser_disabled"
-            }));
-        }
-        while let Some(snapshot) = self.recently_closed_browser_panels.pop_back() {
-            if !self.workspaces.contains_key(&snapshot.workspace_id) {
-                continue;
-            }
-            let workspace_id = snapshot.workspace_id.clone();
-            let original_pane_is_live = self
-                .panes
-                .get(&snapshot.original_pane_id)
-                .is_some_and(|pane| pane.workspace_id == workspace_id);
-            let pane_id = if original_pane_is_live {
-                snapshot.original_pane_id.clone()
-            } else if let (Some(anchor_id), Some(direction)) = (
-                snapshot.fallback_anchor_pane_id.as_deref(),
-                snapshot.fallback_split_direction.as_deref(),
-            ) {
-                if self
-                    .panes
-                    .get(anchor_id)
-                    .is_some_and(|pane| pane.workspace_id == workspace_id)
-                {
-                    self.create_split_pane(&workspace_id, anchor_id, direction)?
-                } else {
-                    self.workspaces
-                        .get(&workspace_id)
-                        .and_then(|workspace| {
-                            workspace
-                                .selected_pane
-                                .clone()
-                                .or_else(|| workspace.panes.first().cloned())
-                        })
-                        .unwrap_or_else(|| self.create_pane(&workspace_id))
-                }
-            } else {
-                self.workspaces
-                    .get(&workspace_id)
-                    .and_then(|workspace| {
-                        workspace
-                            .selected_pane
-                            .clone()
-                            .or_else(|| workspace.panes.first().cloned())
-                    })
-                    .unwrap_or_else(|| self.create_pane(&workspace_id))
-            };
-
-            let mut spec = SurfaceSpec::browser();
-            spec.url = Some(snapshot.url.clone());
-            spec.title = Some(snapshot.title.clone());
-            spec.custom_title = snapshot.custom_title;
-            spec.browser_profile_id = Some(snapshot.profile_id.clone());
-            let surface_id = self.create_surface(&workspace_id, &pane_id, spec)?;
-            self.load_browser_url(&surface_id, &snapshot.url)?;
-            if let Some(surface) = self.surfaces.get_mut(&surface_id) {
-                surface.title = snapshot.title;
-                surface.custom_title = snapshot.custom_title;
-                if !snapshot.history.is_empty() {
-                    surface.browser.history = snapshot.history;
-                    surface.browser.history_index = snapshot
-                        .history_index
-                        .min(surface.browser.history.len().saturating_sub(1));
-                }
-                surface.browser.page_zoom = snapshot.page_zoom;
-            }
-            if let Some(pane) = self.panes.get_mut(&pane_id) {
-                pane.surfaces.retain(|id| id != &surface_id);
-                pane.surfaces.insert(
-                    snapshot.original_tab_index.min(pane.surfaces.len()),
-                    surface_id.clone(),
-                );
-                pane.selected_surface = Some(surface_id.clone());
-            }
-            self.focus_surface(&surface_id)?;
-            self.apply_workspace_terminal_sizes(&workspace_id)?;
-            let window_id = self
-                .workspaces
-                .get(&workspace_id)
-                .map(|workspace| workspace.window_id.clone())
-                .ok_or_else(|| AppError::not_found("workspace not found"))?;
-            return Ok(json!({
-                "handled": true,
-                "action": "reopenClosedBrowserPanel",
-                "window_id": window_id,
-                "window_ref": self.window_ref(&window_id),
-                "workspace_id": workspace_id,
-                "workspace_ref": self.workspace_ref(&workspace_id),
-                "pane_id": pane_id,
-                "pane_ref": self.pane_ref(&pane_id),
-                "surface_id": surface_id,
-                "surface_ref": self.surface_ref(&surface_id),
-                "url": snapshot.url,
-                "restored_original_pane": original_pane_is_live
-            }));
-        }
-        Ok(json!({
-            "handled": false,
-            "action": "reopenClosedBrowserPanel",
-            "reason": "history_empty"
-        }))
-    }
-
     fn close_workspace_for_last_surface(
         &mut self,
         workspace_id: &str,
@@ -18199,6 +18187,7 @@ impl AppState {
         surface_ref: &str,
         source: SurfaceCloseSource,
         close_confirmed: bool,
+        record_history: bool,
     ) -> AppResult<Value> {
         let workspace_ref = self.workspace_ref(workspace_id);
         let window_id = self
@@ -18215,7 +18204,9 @@ impl AppState {
             .ok_or_else(|| AppError::not_found("window not found"))?;
 
         if workspace_count > 1 {
-            self.close_workspace(&json!({"workspace_id": workspace_id}))?;
+            self.close_workspace(
+                &json!({"workspace_id": workspace_id, "record_history": record_history}),
+            )?;
             return Ok(json!({
                 "surface_id": surface_id,
                 "surface_ref": surface_ref,
@@ -18232,7 +18223,7 @@ impl AppState {
         }
 
         if self.windows.len() > 1 {
-            self.close_window(&json!({"window_id": window_id}))?;
+            self.close_window(&json!({"window_id": window_id, "record_history": record_history}))?;
             return Ok(json!({
                 "surface_id": surface_id,
                 "surface_ref": surface_ref,
@@ -18406,21 +18397,19 @@ impl AppState {
                 return Err(AppError::invalid_state("Cannot close the last surface"));
             }
             if closes_workspace {
-                if bool_param(params, "record_history").unwrap_or(true) {
-                    self.capture_closed_browser_panel(&surface_id, &workspace_id, &pane_id);
-                }
                 return self.close_workspace_for_last_surface(
                     &workspace_id,
                     &surface_id,
                     &surface_ref,
                     close_source,
                     confirmed,
+                    bool_param(params, "record_history").unwrap_or(true),
                 );
             }
         }
         let debug_surface = debug_surface_token(&surface_id);
         if bool_param(params, "record_history").unwrap_or(true) {
-            self.capture_closed_browser_panel(&surface_id, &workspace_id, &pane_id);
+            self.capture_closed_panel(&surface_id, &workspace_id, &pane_id);
         }
         self.append_debug_log(&format!(
             "surface.close.childExited reason=client surface={debug_surface}"
@@ -19644,22 +19633,6 @@ impl AppState {
                 surface.present_count += 1;
             }
             return Ok(json!({}));
-        }
-        if is_ctrl_d(&key) {
-            let pane_id = self
-                .surfaces
-                .get(&surface_id)
-                .map(|surface| surface.pane_id.clone())
-                .ok_or_else(|| AppError::not_found("surface not found"))?;
-            let workspace_pane_count = self
-                .panes
-                .get(&pane_id)
-                .and_then(|pane| self.workspaces.get(&pane.workspace_id))
-                .map(|workspace| workspace.panes.len())
-                .unwrap_or(1);
-            if workspace_pane_count > 1 {
-                return self.surface_close(&json!({"surface_id": surface_id}));
-            }
         }
         if let Some(surface) = self.surfaces.get_mut(&surface_id) {
             surface.present_count += 1;
@@ -21819,7 +21792,7 @@ impl AppState {
         let (_, _, window_id) = self.embedded_terminal_surface_context(surface_selector)?;
         match action {
             "new_window" => self
-                .handle("window.create", &json!({"title": "cmux Linux"}))
+                .handle_ui("window.create", &json!({"title": "cmux Linux"}))
                 .map(Some),
             "close_window" => {
                 let result = self.window_close_request(&json!({
@@ -22435,7 +22408,7 @@ impl AppState {
                     &mut params,
                     inherited_options.as_ref(),
                 );
-                self.handle("surface.create", &params).map(Some)
+                self.handle_ui("surface.create", &params).map(Some)
             }
             "new_split" => {
                 let direction = direction
@@ -22452,7 +22425,7 @@ impl AppState {
                     &mut params,
                     inherited_options.as_ref(),
                 );
-                self.handle("surface.split", &params).map(Some)
+                self.handle_ui("surface.split", &params).map(Some)
             }
             "close_tab" => {
                 let mode = direction
@@ -22512,7 +22485,7 @@ impl AppState {
                 }
                 match mode {
                     "this" => {
-                        let mut result = self.handle(
+                        let mut result = self.handle_ui(
                             "surface.close",
                             &json!({
                                 "workspace_id": workspace_id,
@@ -22575,7 +22548,7 @@ impl AppState {
                 let direction = direction
                     .and_then(normalize_resize_split_direction)
                     .ok_or_else(|| AppError::invalid_params("resize_split requires a direction"))?;
-                self.handle(
+                self.handle_ui(
                     "pane.resize",
                     &json!({
                         "pane_id": pane_id,
@@ -22652,7 +22625,7 @@ impl AppState {
             .collect())
     }
 
-    fn apply_embedded_terminal_inherited_options(
+    pub(crate) fn apply_embedded_terminal_inherited_options(
         params: &mut Value,
         inherited_options: Option<&EmbeddedTerminalInheritedOptions>,
     ) {
@@ -22662,22 +22635,22 @@ impl AppState {
         let Some(object) = params.as_object_mut() else {
             return;
         };
-        if let Some(working_directory) = inherited_options
-            .working_directory
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            object.insert("cwd".to_string(), json!(working_directory));
-        }
-        if let Some(font_size) = inherited_options
-            .font_size
-            .filter(|font_size| font_size.is_finite() && *font_size > 0.0)
-        {
-            object.insert(
-                "terminal_font_size".to_string(),
-                json!(font_size.clamp(1.0, 255.0)),
-            );
-        }
+        // Null means Ghostty resolved this option to its configured default.
+        // An absent runtime result still allows the model to inherit source values.
+        object.insert(
+            "cwd".to_string(),
+            json!(inherited_options
+                .working_directory
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())),
+        );
+        object.insert(
+            "terminal_font_size".to_string(),
+            json!(inherited_options
+                .font_size
+                .filter(|size| size.is_finite() && *size > 0.0)
+                .map(|size| size.clamp(1.0, 255.0))),
+        );
     }
 
     fn toggle_embedded_terminal_split_zoom(
@@ -23386,6 +23359,15 @@ impl AppState {
                     .insert(window_id.clone(), true);
                 focused = !bool_param(params, "no_focus").unwrap_or(false);
             }
+            "resize" => {
+                let maximum = config::sidebar_settings()
+                    .right_max_width
+                    .unwrap_or(1200.0)
+                    .round() as i32;
+                let width = Self::requested_sidebar_width(params, 276, maximum.max(276))?;
+                self.right_sidebar_width_by_window
+                    .insert(window_id.clone(), width);
+            }
             "mode" => {}
             other => {
                 return Err(AppError::invalid_params(format!(
@@ -23444,6 +23426,7 @@ impl AppState {
             "window_id": window_id,
             "window_ref": self.window_ref(window_id),
             "visible": self.right_sidebar_visible_by_window.get(window_id).copied().unwrap_or(false),
+            "width": self.right_sidebar_width_by_window.get(window_id).copied().unwrap_or(288),
             "mode": self.right_sidebar_mode(window_id),
             "available_modes": self.available_right_sidebar_modes(),
             "focus_generation": self.right_sidebar_focus_generation_by_window.get(window_id).copied().unwrap_or(0),
@@ -23453,9 +23436,7 @@ impl AppState {
     }
 
     fn left_sidebar_control(&mut self, params: &Value) -> AppResult<Value> {
-        let window_id = self
-            .resolve_window_optional(params.get("window_id").or_else(|| params.get("window")))?
-            .unwrap_or_else(|| self.current_window.clone());
+        let window_id = self.right_sidebar_target_window(params)?;
         let action = string_param(params, "action")
             .unwrap_or_else(|| "mode".to_string())
             .trim()
@@ -23471,11 +23452,26 @@ impl AppState {
             }
             "show" => Ok(self.set_left_sidebar_visible(&window_id, true)),
             "hide" => Ok(self.set_left_sidebar_visible(&window_id, false)),
+            "resize" => {
+                let width = Self::requested_sidebar_width(params, 240, 4096)?;
+                self.left_sidebar_width_by_window
+                    .insert(window_id.clone(), width);
+                Ok(self.left_sidebar_state_value(&window_id))
+            }
             "mode" => Ok(self.left_sidebar_state_value(&window_id)),
             other => Err(AppError::invalid_params(format!(
                 "unknown left-sidebar action: {other}"
             ))),
         }
+    }
+
+    fn requested_sidebar_width(params: &Value, minimum: i32, maximum: i32) -> AppResult<i32> {
+        let width = params
+            .get("width")
+            .and_then(Value::as_u64)
+            .filter(|width| *width > 0)
+            .ok_or_else(|| AppError::invalid_params("sidebar width must be a positive integer"))?;
+        Ok(width.clamp(minimum as u64, maximum as u64) as i32)
     }
 
     fn set_left_sidebar_visible(&mut self, window_id: &str, visible: bool) -> Value {
@@ -23488,7 +23484,8 @@ impl AppState {
         json!({
             "window_id": window_id,
             "window_ref": self.window_ref(window_id),
-            "visible": self.left_sidebar_visible_by_window.get(window_id).copied().unwrap_or(true)
+            "visible": self.left_sidebar_visible_by_window.get(window_id).copied().unwrap_or(true),
+            "width": self.left_sidebar_width_by_window.get(window_id).copied().unwrap_or(240)
         })
     }
 
@@ -26400,12 +26397,13 @@ impl AppState {
             .or_else(|| bool_param(params, "scrollback"))
             .unwrap_or(false);
         let persist = bool_param(params, "persist").unwrap_or(true);
-        let build_start = Instant::now();
         let shape = self.debug_session_snapshot_shape(include_scrollback);
+        let build_start = Instant::now();
+        let snapshot = self.session_snapshot(include_scrollback);
         let build_ms = debug_elapsed_ms(build_start);
         let persist_start = Instant::now();
         let persisted = if persist {
-            Some(self.persist_session_snapshot(include_scrollback)?)
+            Some(self.persist_captured_session_snapshot(snapshot)?)
         } else {
             None
         };
@@ -30949,6 +30947,89 @@ impl AppState {
 
     fn command_palette_handle(&mut self, method: &str, params: &Value) -> AppResult<Value> {
         match method {
+            "debug.command_palette.input.set" => {
+                let window_id = self.command_palette_window_id(params)?;
+                let text = string_param(params, "text")
+                    .ok_or_else(|| AppError::invalid_params("text is required"))?;
+                let state = self.command_palette_state_mut(&window_id);
+                if !state.visible
+                    || params.get("mode").and_then(Value::as_str) != Some(state.mode.as_str())
+                {
+                    return Ok(json!({"updated": false}));
+                }
+                match state.mode {
+                    CommandPaletteMode::RenameInput => state.rename_text = text,
+                    CommandPaletteMode::WorkspaceDescriptionInput => {
+                        state.workspace_description_text = text
+                    }
+                    _ => {
+                        state.query = text;
+                        state.selected_index = 0;
+                    }
+                }
+                state.select_all_active = false;
+                Ok(json!({"updated": true}))
+            }
+            "debug.command_palette.input.key" => {
+                let window_id = self.command_palette_window_id(params)?;
+                if !self.command_palette_state(&window_id).visible {
+                    return Ok(json!({}));
+                }
+                self.current_window = window_id.clone();
+                match params.get("key").and_then(Value::as_str) {
+                    Some("escape") => {
+                        let state = self.command_palette_state_mut(&window_id);
+                        state.visible = false;
+                        state.input_focused = false;
+                        Ok(json!({}))
+                    }
+                    Some("enter") => self.command_palette_accept_current(),
+                    Some("backspace") => self.command_palette_delete_backward(&window_id),
+                    Some("shortcut") => {
+                        let combo = normalize_shortcut_combo(
+                            params
+                                .get("combo")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                        );
+                        let mode = self.command_palette_state(&window_id).mode;
+                        if mode == CommandPaletteMode::GlobalSearch {
+                            if let Some(index) = global_search_result_digit(&combo) {
+                                if index <= self.command_palette_rows(&window_id).len() {
+                                    self.command_palette_state_mut(&window_id).selected_index =
+                                        index - 1;
+                                    return self.command_palette_accept_current();
+                                }
+                            }
+                        }
+                        let name = [
+                            "command_palette_commands",
+                            "global_search",
+                            "command_palette_next",
+                            "command_palette_previous",
+                        ]
+                        .into_iter()
+                        .find(|name| self.shortcut_matches(name, &combo));
+                        match name {
+                            Some("command_palette_next" | "command_palette_previous")
+                                if matches!(
+                                    mode,
+                                    CommandPaletteMode::RenameInput
+                                        | CommandPaletteMode::WorkspaceDescriptionInput
+                                ) =>
+                            {
+                                Ok(json!({"handled": false}))
+                            }
+                            Some(name) => self.execute_shortcut_name(name),
+                            None => Ok(json!({"handled": false})),
+                        }
+                    }
+                    Some(key @ ("up" | "down" | "pageup" | "pagedown")) => {
+                        self.command_palette_move_selection(key)
+                    }
+                    _ => Err(AppError::invalid_params("unsupported palette key")),
+                }
+            }
             "debug.command_palette.visible" => {
                 let window_id = self.command_palette_window_id(params)?;
                 Ok(json!({"visible": self.command_palette_state(&window_id).visible}))
@@ -31477,6 +31558,7 @@ impl AppState {
             "visible": state.visible,
             "mode": state.mode.as_str(),
             "query": state.query,
+            "select_all_active": state.select_all_active,
             "input_text": match state.mode {
                 CommandPaletteMode::RenameInput => state.rename_text.clone(),
                 CommandPaletteMode::WorkspaceDescriptionInput => state.workspace_description_text.clone(),
@@ -31932,6 +32014,7 @@ impl AppState {
                 "notification.clear",
             ),
         ];
+        rows.extend(self.closed_history_command_rows());
         rows.extend(self.command_palette_context_rows());
         rows.extend(supported_methods().into_iter().filter_map(|method| {
             if method.starts_with("debug.command_palette.") {
@@ -31964,7 +32047,11 @@ impl AppState {
     }
 
     fn command_palette_execute_command(&mut self, command_id: &str) -> AppResult<Value> {
+        if let Some(id) = command_id.strip_prefix("palette.reopenClosedItem.") {
+            return self.reopen_closed_history_id(id);
+        }
         match command_id {
+            "palette.clearClosedHistory" => Ok(self.clear_closed_history()),
             "palette.newWindow" => self.handle("window.create", &json!({"title": "cmux Linux"})),
             "palette.closeWindow" => {
                 let window_id = self.current_window.clone();
@@ -32169,14 +32256,13 @@ impl AppState {
             "palette.markdownZoomIn" => self.markdown_zoom_shortcut("markdownZoomIn", 1),
             "palette.markdownZoomOut" => self.markdown_zoom_shortcut("markdownZoomOut", -1),
             "palette.markdownZoomReset" => self.markdown_zoom_shortcut("markdownZoomReset", 0),
-            "palette.terminalOpenDirectory" => self.handle(
-                "workspace.create",
-                &json!({
-                    "window_id": self.current_window.clone(),
-                    "title": "Open Directory",
-                    "focus": true
-                }),
-            ),
+            "palette.terminalOpenDirectory" => Ok(json!({
+                "handled": true,
+                "action": "openDirectory",
+                "native_action": "open_directory",
+                "window_id": self.current_window,
+                "cwd": self.selected_workspace_cwd(&self.current_window)
+            })),
             "palette.toggleSidebar" => self.toggle_sidebar_current_window(),
             "palette.clearNotifications" => self.handle("notification.clear", &json!({})),
             api_command if api_command.starts_with("palette.api.") => {
@@ -36719,6 +36805,49 @@ impl AppState {
             })
             .min_by_key(|(col, _)| *col)
             .map(|(_, id)| id))
+    }
+
+    fn inherit_terminal_surface_options(
+        &self,
+        spec: &mut SurfaceSpec,
+        source_id: Option<&str>,
+        params: &Value,
+    ) {
+        if spec.kind != SurfaceKind::Terminal {
+            return;
+        }
+        let Some(source) = source_id
+            .and_then(|id| self.surfaces.get(id))
+            .filter(|surface| surface.kind == SurfaceKind::Terminal)
+        else {
+            return;
+        };
+        if spec.cwd.is_none() && !params.get("cwd").is_some_and(Value::is_null) {
+            spec.cwd = source.terminal_cwd.clone();
+        }
+        if spec.font_size.is_none()
+            && !["terminal_font_size", "font_size"]
+                .iter()
+                .any(|key| params.get(*key).is_some_and(Value::is_null))
+        {
+            spec.font_size = source.terminal_font_size;
+        }
+    }
+
+    fn create_surface_for_request(
+        &mut self,
+        workspace_id: &str,
+        pane_id: &str,
+        spec: SurfaceSpec,
+        params: &Value,
+    ) -> AppResult<String> {
+        // Native inheritance can explicitly request the configured default cwd.
+        if params.get("cwd").is_some_and(Value::is_null) {
+            let start_terminal = self.should_start_terminal_immediately(workspace_id, &spec);
+            self.create_surface_with_cwd(workspace_id, pane_id, spec, None, start_terminal)
+        } else {
+            self.create_surface(workspace_id, pane_id, spec)
+        }
     }
 
     fn create_surface(
@@ -47751,7 +47880,7 @@ fn shortcut_dispatch_names() -> &'static [&'static str] {
     ]
 }
 
-fn shortcut_name_for_config_id(config_id: &str) -> Option<&'static str> {
+pub(crate) fn shortcut_name_for_config_id(config_id: &str) -> Option<&'static str> {
     [
         "new_window",
         "close_window",
@@ -53984,6 +54113,7 @@ mod session_snapshot_policy_tests {
             saved_at: 0.0,
             current_window_index: 0,
             windows: Vec::new(),
+            closed_history: None,
         };
 
         assert!(write_session_snapshot(&path, &snapshot).expect("write snapshot") > 0);
@@ -54088,25 +54218,31 @@ fn session_terminal_env(env: &HashMap<String, String>) -> HashMap<String, String
 }
 
 fn bounded_surface_scrollback(surface: &Surface) -> Option<String> {
-    if let Some(scrollback) = surface.terminal_scrollback_snapshot.as_deref() {
-        return Some(bounded_text_tail(
-            scrollback,
-            SESSION_SNAPSHOT_SCROLLBACK_CHAR_LIMIT,
-        ));
+    if let Some(scrollback) = &surface.terminal_scrollback_snapshot {
+        // Renderer snapshots are bounded when captured and restored. Rewalking
+        // their Unicode text for every topology mutation stalls the UI.
+        return Some(scrollback.clone());
     }
     let buffer = surface.buffer.lock().ok()?;
     if buffer.is_empty() {
         return None;
     }
-    let char_count = buffer.chars().count();
-    let skip = char_count.saturating_sub(SESSION_SNAPSHOT_SCROLLBACK_CHAR_LIMIT);
-    Some(buffer.chars().skip(skip).collect())
+    Some(bounded_text_tail(
+        &buffer,
+        SESSION_SNAPSHOT_SCROLLBACK_CHAR_LIMIT,
+    ))
 }
 
 fn bounded_text_tail(text: &str, limit: usize) -> String {
-    let char_count = text.chars().count();
-    let skip = char_count.saturating_sub(limit);
-    text.chars().skip(skip).collect()
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(limit)
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    text[start..].to_string()
 }
 
 fn terminal_scrollback_persist_due(changed_at_ms: Option<u64>, now_ms: u64) -> bool {
@@ -54399,9 +54535,12 @@ fn method_persists_session_snapshot(method: &str) -> bool {
         "session.restore_previous"
             | "app.close_confirmation.reply"
             | "history.reopen_closed"
+            | "history.reopen"
+            | "history.clear"
             | "tab.action"
             | "debug.shortcut.simulate"
             | "debug.command_palette.activate"
+            | "debug.command_palette.input.key"
             | "open.targets"
             | "settings.open"
             | "settings.set_target"
@@ -54452,6 +54591,7 @@ fn shortcut_result_is_transient(result: &Value) -> bool {
                     | "findPrevious"
                     | "hideFind"
                     | "useSelectionForFind"
+                    | "openDirectory"
                     | "commandPaletteNext"
                     | "commandPalettePrevious"
             )
@@ -54494,7 +54634,10 @@ fn method_changes_presented_model(
     if method == "auth.sign_out" {
         return result.get("already_signed_out").and_then(Value::as_bool) != Some(true);
     }
-    if method == "history.reopen_closed" {
+    if method == "history.clear" {
+        return result.get("cleared").and_then(Value::as_u64).unwrap_or(0) > 0;
+    }
+    if matches!(method, "history.reopen_closed" | "history.reopen") {
         return result.get("handled").and_then(Value::as_bool) == Some(true);
     }
     if method == "app.close_confirmation.reply" {
@@ -54602,6 +54745,7 @@ fn method_changes_presented_model(
             "agent.hibernation.set"
                 | "config.reload"
                 | "debug.command_palette.toggle"
+                | "debug.command_palette.input.set"
                 | "debug.command_palette.delete_backward"
                 | "debug.command_palette.rename_tab.open"
                 | "debug.command_palette.rename_input.select_all"
@@ -54773,7 +54917,8 @@ mod render_activity_tests {
         app.handle(
             "surface.send_key",
             &json!({"surface_id": split_surface, "key": "ctrl+d"}),
-        ).expect("send EOT through direct key input");
+        )
+        .expect("send EOT through direct key input");
         assert_eq!(app.workspaces[&split_workspace].panes.len(), 2);
         assert_eq!(activity.model_mutation_generation(), before_input);
         assert_eq!(
@@ -57811,17 +57956,6 @@ fn debug_pane_frame(index: usize, count: usize) -> DebugFrame {
     }
 }
 
-fn is_ctrl_d(key: &str) -> bool {
-    let normalized = key
-        .trim()
-        .to_ascii_lowercase()
-        .replace('+', "-")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-");
-    matches!(normalized.as_str(), "ctrl-d" | "control-d" | "c-d")
-}
-
 fn debug_surface_token(surface_id: &str) -> String {
     let token = surface_id
         .chars()
@@ -58938,20 +59072,6 @@ mod agent_session_attachment_tests {
 }
 
 #[cfg(test)]
-mod terminal_input_tests {
-    use super::is_ctrl_d;
-
-    #[test]
-    fn ctrl_d_detection_matches_terminal_key_aliases() {
-        assert!(is_ctrl_d("ctrl-d"));
-        assert!(is_ctrl_d("ctrl+d"));
-        assert!(is_ctrl_d("control d"));
-        assert!(is_ctrl_d("C-d"));
-        assert!(!is_ctrl_d("ctrl-c"));
-    }
-}
-
-#[cfg(test)]
 mod remote_ssh_command_tests {
     use super::{
         build_remote_bootstrap, build_ssh_command, build_ssh_terminal_command,
@@ -59192,30 +59312,77 @@ mod embedded_terminal_action_tests {
     fn sidebar_widths_are_window_specific_and_survive_session_restore() {
         let mut app = AppState::with_paths(None, None).expect("app state");
         let first_window = app.current_window.clone();
-        app.handle("window.create", &json!({})).expect("second window");
+        app.handle("window.create", &json!({}))
+            .expect("second window");
         for (method, width, default) in [("sidebar.left", 340, 240), ("sidebar.right", 410, 288)] {
-            let result = app.handle(method, &json!({"action": "resize", "window_id": first_window, "width": width})).expect("resize sidebar");
+            let result = app
+                .handle(
+                    method,
+                    &json!({"action": "resize", "window_id": first_window, "width": width}),
+                )
+                .expect("resize sidebar");
             assert_eq!(result["width"], width);
-            assert_eq!(app.handle(method, &json!({"action": "mode"})).unwrap()["width"], default);
-            app.handle(method, &json!({"action": "hide", "window_id": first_window})).unwrap();
-            app.handle(method, &json!({"action": "show", "window_id": first_window})).unwrap();
-            assert_eq!(app.handle(method, &json!({"action": "mode", "window_id": first_window})).unwrap()["width"], width);
+            assert_eq!(
+                app.handle(method, &json!({"action": "mode"})).unwrap()["width"],
+                default
+            );
+            app.handle(
+                method,
+                &json!({"action": "hide", "window_id": first_window}),
+            )
+            .unwrap();
+            app.handle(
+                method,
+                &json!({"action": "show", "window_id": first_window}),
+            )
+            .unwrap();
+            assert_eq!(
+                app.handle(
+                    method,
+                    &json!({"action": "mode", "window_id": first_window})
+                )
+                .unwrap()["width"],
+                width
+            );
         }
         let snapshot = app.session_snapshot(false);
         let mut restored = AppState::with_paths(None, None).expect("restored app");
         restored.restore_session_snapshot(snapshot.clone()).unwrap();
         let restored_first = restored.windows[0].id.clone();
         for (method, width) in [("sidebar.left", 340), ("sidebar.right", 410)] {
-            assert_eq!(restored.handle(method, &json!({"action": "mode", "window_id": restored_first})).unwrap()["width"], width);
+            assert_eq!(
+                restored
+                    .handle(
+                        method,
+                        &json!({"action": "mode", "window_id": restored_first})
+                    )
+                    .unwrap()["width"],
+                width
+            );
         }
         let mut legacy = serde_json::to_value(snapshot).unwrap();
         for window in legacy["windows"].as_array_mut().unwrap() {
             window.as_object_mut().unwrap().remove("left_sidebar_width");
-            window.as_object_mut().unwrap().remove("right_sidebar_width");
+            window
+                .as_object_mut()
+                .unwrap()
+                .remove("right_sidebar_width");
         }
-        restored.restore_session_snapshot(serde_json::from_value(legacy).unwrap()).unwrap();
-        assert_eq!(restored.handle("sidebar.left", &json!({"action": "mode"})).unwrap()["width"], 240);
-        assert_eq!(restored.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["width"], 288);
+        restored
+            .restore_session_snapshot(serde_json::from_value(legacy).unwrap())
+            .unwrap();
+        assert_eq!(
+            restored
+                .handle("sidebar.left", &json!({"action": "mode"}))
+                .unwrap()["width"],
+            240
+        );
+        assert_eq!(
+            restored
+                .handle("sidebar.right", &json!({"action": "mode"}))
+                .unwrap()["width"],
+            288
+        );
     }
 
     #[test]
@@ -59223,12 +59390,20 @@ mod embedded_terminal_action_tests {
         let mut app = AppState::with_paths(None, None).unwrap();
         for (method, minimum) in [("sidebar.left", 240), ("sidebar.right", 276)] {
             app.handle(method, &json!({"action": "hide"})).unwrap();
-            let resized = app.handle(method, &json!({"action": "resize", "width": 1})).unwrap();
+            let resized = app
+                .handle(method, &json!({"action": "resize", "width": 1}))
+                .unwrap();
             assert_eq!(resized["width"], minimum);
             assert_eq!(resized["visible"], false);
-            assert_eq!(app.handle(method, &json!({"action": "resize", "width": 9000})).unwrap()["width"], 4096);
+            assert_eq!(
+                app.handle(method, &json!({"action": "resize", "width": 9000}))
+                    .unwrap()["width"],
+                if method == "sidebar.left" { 4096 } else { 1200 }
+            );
             for width in [json!(null), json!("300"), json!(-1), json!(300.5)] {
-                assert!(app.handle(method, &json!({"action": "resize", "width": width})).is_err());
+                assert!(app
+                    .handle(method, &json!({"action": "resize", "width": width}))
+                    .is_err());
             }
         }
     }
@@ -62750,9 +62925,14 @@ mod embedded_terminal_action_tests {
         for entrypoint in ["api", "shortcut", "palette"] {
             let (mut app, terminal_id, _, workspace_id) = app_with_current_surface();
             let pane_id = app.surfaces[&terminal_id].pane_id.clone();
-            let created = app.handle("surface.create", &json!({
-                "workspace_id": workspace_id, "pane_id": pane_id, "type": "terminal"
-            })).expect("create terminal tab");
+            let created = app
+                .handle(
+                    "surface.create",
+                    &json!({
+                        "workspace_id": workspace_id, "pane_id": pane_id, "type": "terminal"
+                    }),
+                )
+                .expect("create terminal tab");
             let closed_id = created["surface_id"].as_str().unwrap().to_string();
             {
                 let surface = app.surfaces.get_mut(&closed_id).unwrap();
@@ -62763,12 +62943,14 @@ mod embedded_terminal_action_tests {
                 surface.terminal_initial_input = Some("never-submit-this-old-input\n".to_string());
                 surface.terminal_font_size = Some(17.0);
             }
-            app.handle("surface.close", &json!({"surface_id": closed_id})).unwrap();
+            app.handle("surface.close", &json!({"surface_id": closed_id}))
+                .unwrap();
             let reopened = match entrypoint {
                 "api" => app.handle("history.reopen_closed", &json!({})),
                 "shortcut" => app.execute_shortcut_name("reopen_closed_browser_panel"),
                 _ => app.command_palette_execute_command("palette.reopenClosedBrowserTab"),
-            }.expect("reopen closed terminal");
+            }
+            .expect("reopen closed terminal");
             assert_eq!(reopened["handled"], true, "entrypoint {entrypoint}");
             let restored_id = reopened["surface_id"].as_str().unwrap();
             let restored = &app.surfaces[restored_id];
@@ -62779,7 +62961,10 @@ mod embedded_terminal_action_tests {
             assert_eq!(restored.terminal_font_size, Some(17.0));
             assert!(restored.terminal_command.is_none());
             assert!(restored.terminal_initial_input.is_none());
-            assert_eq!(app.panes[&pane_id].surfaces, vec![terminal_id, restored_id.to_string()]);
+            assert_eq!(
+                app.panes[&pane_id].surfaces,
+                vec![terminal_id, restored_id.to_string()]
+            );
             assert_eq!(app.current_surface_id().unwrap(), restored_id);
         }
     }
@@ -62787,20 +62972,36 @@ mod embedded_terminal_action_tests {
     #[test]
     fn recently_closed_workspace_restores_order_layout_and_older_panel_history() {
         let (mut app, terminal_id, _, workspace_id) = app_with_current_surface();
-        app.handle("workspace.create", &json!({"title": "Keep open"})).unwrap();
-        let extra = app.handle("surface.create", &json!({"workspace_id": workspace_id})).unwrap();
+        app.handle("workspace.create", &json!({"title": "Keep open"}))
+            .unwrap();
+        let extra = app
+            .handle("surface.create", &json!({"workspace_id": workspace_id}))
+            .unwrap();
         let extra_id = extra["surface_id"].as_str().unwrap().to_string();
         app.surfaces.get_mut(&extra_id).unwrap().title = "Older closed tab".to_string();
-        app.handle("surface.close", &json!({"surface_id": extra_id})).unwrap();
-        app.handle("surface.split", &json!({
-            "workspace_id": workspace_id, "surface_id": terminal_id, "direction": "down"
-        })).unwrap();
+        app.handle("surface.close", &json!({"surface_id": extra_id}))
+            .unwrap();
+        app.handle(
+            "surface.split",
+            &json!({
+                "workspace_id": workspace_id, "surface_id": terminal_id, "direction": "down"
+            }),
+        )
+        .unwrap();
         app.workspaces.get_mut(&workspace_id).unwrap().title = "Restore project".to_string();
         let expected = app.session_workspace_snapshot(&app.workspaces[&workspace_id], false);
         let window_id = app.workspaces[&workspace_id].window_id.clone();
-        let old_index = app.windows.iter().find(|window| window.id == window_id).unwrap()
-            .workspaces.iter().position(|id| id == &workspace_id).unwrap();
-        app.handle("workspace.close", &json!({"workspace_id": workspace_id})).unwrap();
+        let old_index = app
+            .windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .unwrap()
+            .workspaces
+            .iter()
+            .position(|id| id == &workspace_id)
+            .unwrap();
+        app.handle("workspace.close", &json!({"workspace_id": workspace_id}))
+            .unwrap();
         let reopened = app.handle("history.reopen_closed", &json!({})).unwrap();
         assert_eq!(reopened["handled"], true);
         let restored_id = reopened["workspace_id"].as_str().unwrap().to_string();
@@ -62808,24 +63009,51 @@ mod embedded_terminal_action_tests {
         assert_eq!(actual.title, expected.title);
         assert_eq!(actual.panes.len(), 2);
         for (actual, expected) in actual.panes.iter().zip(&expected.panes) {
-            assert_eq!((actual.col, actual.row, actual.col_span, actual.row_span),
-                (expected.col, expected.row, expected.col_span, expected.row_span));
+            assert_eq!(
+                (actual.col, actual.row, actual.col_span, actual.row_span),
+                (
+                    expected.col,
+                    expected.row,
+                    expected.col_span,
+                    expected.row_span
+                )
+            );
         }
-        assert_eq!(app.windows.iter().find(|window| window.id == window_id).unwrap().workspaces[old_index], restored_id);
+        assert_eq!(
+            app.windows
+                .iter()
+                .find(|window| window.id == window_id)
+                .unwrap()
+                .workspaces[old_index],
+            restored_id
+        );
         let older = app.handle("history.reopen_closed", &json!({})).unwrap();
         assert_eq!(older["handled"], true);
         assert_eq!(older["workspace_id"], restored_id);
-        assert_eq!(app.surfaces[older["surface_id"].as_str().unwrap()].title, "Older closed tab");
+        assert_eq!(
+            app.surfaces[older["surface_id"].as_str().unwrap()].title,
+            "Older closed tab"
+        );
     }
 
     #[test]
     fn recently_closed_window_restores_workspaces_and_pending_history() {
         let (mut app, _, _, workspace_id) = app_with_current_surface();
         let original_window = app.current_window.clone();
-        let extra = app.handle("workspace.create", &json!({"title": "Closed before window"})).unwrap();
-        app.handle("workspace.close", &json!({"workspace_id": extra["workspace_id"]})).unwrap();
+        let extra = app
+            .handle(
+                "workspace.create",
+                &json!({"title": "Closed before window"}),
+            )
+            .unwrap();
+        app.handle(
+            "workspace.close",
+            &json!({"workspace_id": extra["workspace_id"]}),
+        )
+        .unwrap();
         app.handle("window.create", &json!({})).unwrap();
-        app.handle("window.close", &json!({"window_id": original_window})).unwrap();
+        app.handle("window.close", &json!({"window_id": original_window}))
+            .unwrap();
         let reopened = app.handle("history.reopen_closed", &json!({})).unwrap();
         assert_eq!(reopened["handled"], true);
         let restored_window = reopened["window_id"].as_str().unwrap();
@@ -62836,79 +63064,154 @@ mod embedded_terminal_action_tests {
         let older = app.handle("history.reopen_closed", &json!({})).unwrap();
         assert_eq!(older["handled"], true);
         assert_eq!(older["window_id"], reopened["window_id"]);
-        assert_eq!(app.workspaces[older["workspace_id"].as_str().unwrap()].title, "Closed before window");
+        assert_eq!(
+            app.workspaces[older["workspace_id"].as_str().unwrap()].title,
+            "Closed before window"
+        );
     }
 
     #[test]
     fn recently_closed_history_survives_session_restore_with_live_identity_remapping() {
         let (mut app, terminal_id, _, workspace_id) = app_with_current_surface();
         let pane_id = app.surfaces[&terminal_id].pane_id.clone();
-        let extra = app.handle("surface.create", &json!({"workspace_id": workspace_id, "pane_id": pane_id})).unwrap();
-        app.surfaces.get_mut(extra["surface_id"].as_str().unwrap()).unwrap().title = "Before restart".to_string();
-        app.handle("surface.close", &json!({"surface_id": extra["surface_id"]})).unwrap();
+        let extra = app
+            .handle(
+                "surface.create",
+                &json!({"workspace_id": workspace_id, "pane_id": pane_id}),
+            )
+            .unwrap();
+        app.surfaces
+            .get_mut(extra["surface_id"].as_str().unwrap())
+            .unwrap()
+            .title = "Before restart".to_string();
+        app.handle("surface.close", &json!({"surface_id": extra["surface_id"]}))
+            .unwrap();
         let encoded = serde_json::to_vec(&app.session_snapshot(false)).unwrap();
         let mut restored = AppState::with_paths(None, None).unwrap();
-        restored.restore_session_snapshot(serde_json::from_slice(&encoded).unwrap()).unwrap();
-        let reopened = restored.handle("history.reopen_closed", &json!({})).unwrap();
+        restored
+            .restore_session_snapshot(serde_json::from_slice(&encoded).unwrap())
+            .unwrap();
+        let reopened = restored
+            .handle("history.reopen_closed", &json!({}))
+            .unwrap();
         assert_eq!(reopened["handled"], true);
         assert_eq!(reopened["restored_original_pane"], true);
         assert_ne!(reopened["workspace_id"], workspace_id);
-        assert_eq!(restored.surfaces[reopened["surface_id"].as_str().unwrap()].title, "Before restart");
+        assert_eq!(
+            restored.surfaces[reopened["surface_id"].as_str().unwrap()].title,
+            "Before restart"
+        );
     }
 
     #[test]
     fn recently_closed_history_can_reopen_selected_entry_and_clear() {
         let (mut app, _, _, workspace_id) = app_with_current_surface();
         for title in ["Older item", "Newer item"] {
-            let extra = app.handle("surface.create", &json!({"workspace_id": workspace_id})).unwrap();
-            app.surfaces.get_mut(extra["surface_id"].as_str().unwrap()).unwrap().title = title.to_string();
-            app.handle("surface.close", &json!({"surface_id": extra["surface_id"]})).unwrap();
+            let extra = app
+                .handle("surface.create", &json!({"workspace_id": workspace_id}))
+                .unwrap();
+            app.surfaces
+                .get_mut(extra["surface_id"].as_str().unwrap())
+                .unwrap()
+                .title = title.to_string();
+            app.handle("surface.close", &json!({"surface_id": extra["surface_id"]}))
+                .unwrap();
         }
         let entries = app.handle("history.list", &json!({})).unwrap();
         assert_eq!(entries["entries"][0]["title"], "Newer item");
         assert_eq!(entries["entries"][1]["title"], "Older item");
-        let reopened = app.handle("history.reopen", &json!({"id": entries["entries"][1]["id"]})).unwrap();
+        let reopened = app
+            .handle(
+                "history.reopen",
+                &json!({"id": entries["entries"][1]["id"]}),
+            )
+            .unwrap();
         assert_eq!(reopened["handled"], true);
-        assert_eq!(app.surfaces[reopened["surface_id"].as_str().unwrap()].title, "Older item");
+        assert_eq!(
+            app.surfaces[reopened["surface_id"].as_str().unwrap()].title,
+            "Older item"
+        );
         app.handle("history.clear", &json!({})).unwrap();
-        assert_eq!(app.handle("history.list", &json!({})).unwrap()["entries"], json!([]));
-        assert_eq!(app.handle("history.reopen_closed", &json!({})).unwrap()["handled"], false);
+        assert_eq!(
+            app.handle("history.list", &json!({})).unwrap()["entries"],
+            json!([])
+        );
+        assert_eq!(
+            app.handle("history.reopen_closed", &json!({})).unwrap()["handled"],
+            false
+        );
     }
 
     #[test]
     fn recently_closed_history_skips_disabled_browser_container_without_partial_restore() {
         for close_window in [false, true] {
             let (mut app, _, _, workspace_id) = app_with_current_surface();
-            let older = app.handle("surface.create", &json!({"workspace_id": workspace_id})).unwrap();
-            app.handle("surface.close", &json!({"surface_id": older["surface_id"]})).unwrap();
+            let older = app
+                .handle("surface.create", &json!({"workspace_id": workspace_id}))
+                .unwrap();
+            app.handle("surface.close", &json!({"surface_id": older["surface_id"]}))
+                .unwrap();
             let container = if close_window {
                 app.handle("window.create", &json!({})).unwrap()
             } else {
                 app.handle("workspace.create", &json!({})).unwrap()
             };
-            let target_workspace = if close_window { app.current_workspace_id().unwrap() }
-                else { container["workspace_id"].as_str().unwrap().to_string() };
-            let browser = app.handle("surface.create", &json!({"workspace_id": target_workspace})).unwrap();
-            app.surfaces.get_mut(browser["surface_id"].as_str().unwrap()).unwrap().kind = SurfaceKind::Browser;
-            if close_window { app.handle("window.close", &json!({"window_id": container["window_id"]})).unwrap(); }
-            else { app.handle("workspace.close", &json!({"workspace_id": target_workspace})).unwrap(); }
+            let target_workspace = if close_window {
+                app.current_workspace_id().unwrap()
+            } else {
+                container["workspace_id"].as_str().unwrap().to_string()
+            };
+            let browser = app
+                .handle("surface.create", &json!({"workspace_id": target_workspace}))
+                .unwrap();
+            app.surfaces
+                .get_mut(browser["surface_id"].as_str().unwrap())
+                .unwrap()
+                .kind = SurfaceKind::Browser;
+            if close_window {
+                app.handle(
+                    "window.close",
+                    &json!({"window_id": container["window_id"]}),
+                )
+                .unwrap();
+            } else {
+                app.handle(
+                    "workspace.close",
+                    &json!({"workspace_id": target_workspace}),
+                )
+                .unwrap();
+            }
             app.browser_enabled = false;
             let shape = (app.windows.len(), app.workspaces.len(), app.panes.len());
             let reopened = app.handle("history.reopen_closed", &json!({})).unwrap();
             assert_eq!(reopened["handled"], true);
             assert_eq!(reopened["workspace_id"], workspace_id);
-            assert_eq!((app.windows.len(), app.workspaces.len(), app.panes.len()), shape);
+            assert_eq!(
+                (app.windows.len(), app.workspaces.len(), app.panes.len()),
+                shape
+            );
         }
     }
 
     #[test]
     fn recently_closed_history_remaps_consecutively_closed_split_anchors() {
         let (mut app, first, _, workspace_id) = app_with_current_surface();
-        let second = app.handle("surface.split", &json!({"surface_id": first, "direction": "right"})).unwrap();
+        let second = app
+            .handle(
+                "surface.split",
+                &json!({"surface_id": first, "direction": "right"}),
+            )
+            .unwrap();
         let second_id = second["surface_id"].as_str().unwrap().to_string();
-        app.handle("surface.split", &json!({"surface_id": second_id, "direction": "right"})).unwrap();
-        app.handle("surface.close", &json!({"surface_id": first})).unwrap();
-        app.handle("surface.close", &json!({"surface_id": second_id})).unwrap();
+        app.handle(
+            "surface.split",
+            &json!({"surface_id": second_id, "direction": "right"}),
+        )
+        .unwrap();
+        app.handle("surface.close", &json!({"surface_id": first}))
+            .unwrap();
+        app.handle("surface.close", &json!({"surface_id": second_id}))
+            .unwrap();
         app.handle("history.reopen_closed", &json!({})).unwrap();
         app.handle("history.reopen_closed", &json!({})).unwrap();
         assert_eq!(app.workspaces[&workspace_id].panes.len(), 3);
@@ -62920,13 +63223,22 @@ mod embedded_terminal_action_tests {
     #[test]
     fn recently_closed_history_restores_group_membership_after_session_restart() {
         let (mut app, _, _, workspace_id) = app_with_current_surface();
-        app.handle("workspace.group.create", &json!({"child_workspace_ids": [workspace_id]})).unwrap();
-        app.handle("workspace.close", &json!({"workspace_id": workspace_id})).unwrap();
+        app.handle(
+            "workspace.group.create",
+            &json!({"child_workspace_ids": [workspace_id]}),
+        )
+        .unwrap();
+        app.handle("workspace.close", &json!({"workspace_id": workspace_id}))
+            .unwrap();
         let encoded = serde_json::to_vec(&app.session_snapshot(false)).unwrap();
         let mut restored = AppState::with_paths(None, None).unwrap();
-        restored.restore_session_snapshot(serde_json::from_slice(&encoded).unwrap()).unwrap();
+        restored
+            .restore_session_snapshot(serde_json::from_slice(&encoded).unwrap())
+            .unwrap();
         let group_id = restored.workspace_groups.keys().next().unwrap().clone();
-        let reopened = restored.handle("history.reopen_closed", &json!({})).unwrap();
+        let reopened = restored
+            .handle("history.reopen_closed", &json!({}))
+            .unwrap();
         assert_eq!(reopened["handled"], true);
         let workspace = &restored.workspaces[reopened["workspace_id"].as_str().unwrap()];
         assert_eq!(workspace.group_id.as_deref(), Some(group_id.as_str()));
@@ -66343,6 +66655,8 @@ fn supported_methods() -> Vec<&'static str> {
         "debug.browser.address_bar_focused",
         "debug.browser.favicon",
         "debug.command_palette.delete_backward",
+        "debug.command_palette.input.set",
+        "debug.command_palette.input.key",
         "debug.command_palette.results",
         "debug.command_palette.rename_input.delete_backward",
         "debug.command_palette.rename_input.interact",
@@ -66516,6 +66830,7 @@ fn supported_methods() -> Vec<&'static str> {
         "renderer.snapshot",
         "session.restore_previous",
         "settings.open",
+        "settings.reset",
         "settings.app.set",
         "settings.app.status",
         "settings.browser.set",
@@ -66557,6 +66872,9 @@ fn supported_methods() -> Vec<&'static str> {
         "surface.clear_history",
         "surface.close",
         "history.reopen_closed",
+        "history.list",
+        "history.reopen",
+        "history.clear",
         "surface.create",
         "surface.current",
         "surface.drag_to_split",
@@ -66804,25 +67122,47 @@ mod palette_pointer_activation_tests {
 
     #[test]
     fn open_directory_requests_picker_without_creating_a_workspace() {
-        let mut app = AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned).unwrap();
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .unwrap();
         let count = app.workspaces.len();
         let before = app.session_snapshot_persist_attempt_count_for_test();
-        let result = app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+o"})).unwrap();
+        let result = app
+            .handle(
+                "debug.shortcut.simulate",
+                &json!({"combo": "ctrl+o", "context": {"terminalFocus": false}}),
+            )
+            .unwrap();
         assert_eq!(result["native_action"], "open_directory");
         assert_eq!(result["window_id"], app.current_window);
         assert_eq!(app.workspaces.len(), count);
-        assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), before);
-        app.command_palette_toggle_current(CommandPaletteMode::Commands).unwrap();
-        let result = app.handle("debug.command_palette.activate", &json!({"command_id": "palette.terminalOpenDirectory"})).unwrap();
+        assert_eq!(
+            app.session_snapshot_persist_attempt_count_for_test(),
+            before
+        );
+        app.command_palette_toggle_current(CommandPaletteMode::Commands)
+            .unwrap();
+        let result = app
+            .handle(
+                "debug.command_palette.activate",
+                &json!({"command_id": "palette.terminalOpenDirectory"}),
+            )
+            .unwrap();
         assert_eq!(result["native_action"], "open_directory");
         assert_eq!(app.workspaces.len(), count);
     }
 
     #[test]
     fn native_palette_edits_are_scoped_and_transient_but_acceptance_is_saved() {
-        let mut app =
-            AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned)
-                .unwrap();
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .unwrap();
         let first = app.current_window.clone();
         app.command_palette_toggle(&first, CommandPaletteMode::Commands)
             .unwrap();
@@ -67200,27 +67540,50 @@ mod native_inheritance_defaults_tests {
     fn native_default_options_do_not_reinherit_source_values() {
         for method in ["surface.create", "surface.split"] {
             let mut app = AppState::with_paths_and_terminal_startup(
-                None, None, TerminalStartupMode::RendererOwned,
-            ).unwrap();
+                None,
+                None,
+                TerminalStartupMode::RendererOwned,
+            )
+            .unwrap();
             let source = app.current_surface_id().unwrap();
             let pane = app.surfaces[&source].pane_id.clone();
             app.surfaces.get_mut(&source).unwrap().terminal_font_size = Some(23.0);
-            app.apply_embedded_terminal_pwd(&source, "/tmp/inherited-source").unwrap();
+            app.apply_embedded_terminal_pwd(&source, "/tmp/inherited-source")
+                .unwrap();
             let mut params = json!({"surface_id": source, "pane_id": pane, "direction": "right"});
-            AppState::apply_embedded_terminal_inherited_options(&mut params, Some(&EmbeddedTerminalInheritedOptions {
-                working_directory: None,
-                font_size: None,
-            }));
-            let created = app.handle(method, &params).unwrap()["surface_id"].as_str().unwrap().to_string();
+            AppState::apply_embedded_terminal_inherited_options(
+                &mut params,
+                Some(&EmbeddedTerminalInheritedOptions {
+                    working_directory: None,
+                    font_size: None,
+                }),
+            );
+            let created = app.handle(method, &params).unwrap()["surface_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
             assert_eq!(app.surfaces[&created].terminal_font_size, None, "{method}");
             assert_eq!(app.surfaces[&created].terminal_cwd, None, "{method}");
 
-            app.handle("surface.focus", &json!({"surface_id": source})).unwrap();
-            let mut unavailable = json!({"surface_id": source, "pane_id": pane, "direction": "down"});
+            app.handle("surface.focus", &json!({"surface_id": source}))
+                .unwrap();
+            let mut unavailable =
+                json!({"surface_id": source, "pane_id": pane, "direction": "down"});
             AppState::apply_embedded_terminal_inherited_options(&mut unavailable, None);
-            let created = app.handle(method, &unavailable).unwrap()["surface_id"].as_str().unwrap().to_string();
-            assert_eq!(app.surfaces[&created].terminal_font_size, Some(23.0), "{method}");
-            assert_eq!(app.surfaces[&created].terminal_cwd.as_deref(), Some("/tmp/inherited-source"), "{method}");
+            let created = app.handle(method, &unavailable).unwrap()["surface_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                app.surfaces[&created].terminal_font_size,
+                Some(23.0),
+                "{method}"
+            );
+            assert_eq!(
+                app.surfaces[&created].terminal_cwd.as_deref(),
+                Some("/tmp/inherited-source"),
+                "{method}"
+            );
         }
     }
 }

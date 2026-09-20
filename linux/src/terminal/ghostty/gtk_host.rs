@@ -149,6 +149,33 @@ pub(crate) fn take_ghostty_service_dispatched_surface_ids_for_test() -> Vec<Stri
     std::mem::take(&mut *surface_ids)
 }
 
+pub(crate) fn inherited_terminal_options(
+    surface_id: &str,
+    split: bool,
+) -> Option<EmbeddedTerminalInheritedOptions> {
+    let host = GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+        hosts
+            .borrow()
+            .values()
+            .find(|entry| entry.surface_id.as_deref() == Some(surface_id))
+            .and_then(|entry| entry.host.upgrade())
+    })?;
+    let host = host.try_borrow().ok()?;
+    let surface = host.surface.as_ref()?;
+    let context = if split {
+        GHOSTTY_SURFACE_CONTEXT_SPLIT
+    } else {
+        GHOSTTY_SURFACE_CONTEXT_TAB
+    };
+    let mut config = surface.inherited_config(context);
+    let options = EmbeddedTerminalInheritedOptions {
+        working_directory: config.working_directory(),
+        font_size: config.font_size(),
+    };
+    surface.free_inherited_config(&mut config);
+    Some(options)
+}
+
 pub(crate) fn request_ghostty_service(surface_id: &str) {
     pending_ghostty_service_surface_ids()
         .lock()
@@ -608,13 +635,13 @@ fn focus_embedded_terminal_surface(app_state: &Arc<Mutex<AppState>>, surface_id:
         return false;
     };
     if app
-        .handle("surface.focus", &json!({"surface_id": surface_id}))
+        .handle_ui("surface.focus", &json!({"surface_id": surface_id}))
         .is_err()
     {
         return false;
     }
     let _ = app.set_embedded_terminal_widget_focused(surface_id, true);
-    let _ = app.handle(
+    let _ = app.handle_ui(
         "terminal.textbox.set_focus",
         &json!({"surface_id": surface_id, "focus": "terminal"}),
     );
@@ -3387,7 +3414,7 @@ fn gtk_ghostty_close_surface_on_main(callbacks: usize, token: u64, process_alive
         );
         return;
     }
-    let _ = app.handle(
+    let _ = app.handle_ui(
         "surface.close",
         &json!({
             "surface_id": surface_id,
@@ -3786,7 +3813,7 @@ fn gtk_ghostty_inherited_options(
     unsafe {
         inherited_config_free(surface, &mut config);
     }
-    (options.working_directory.is_some() || options.font_size.is_some()).then_some(options)
+    Some(options)
 }
 
 unsafe extern "C" fn gtk_ghostty_action(
@@ -3868,7 +3895,7 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
                         app.update_embedded_terminal_close_confirmation(surface_id, needs_confirm);
                     let _ = app.record_embedded_terminal_app_action(surface_id, action);
                     let result = app
-                        .handle(
+                        .handle_ui(
                             "app.quit.request",
                             &json!({"source": "ghostty", "surface_id": surface_id}),
                         )

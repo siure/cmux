@@ -236,7 +236,11 @@ install -m 0755 "$linux_dir/dist/install-bundle.sh" "$bundle_root/install.sh"
 install -m 0755 "$ghostty_library" \
     "$bundle_root/share/cmux/ghostty/lib/libghostty-internal.so"
 cp -a "$ghostty_root/include/." "$bundle_root/share/cmux/ghostty/include/"
-cp -a "$ghostty_root/share/ghostty" "$bundle_root/share/cmux/ghostty/share/"
+for resource in ghostty terminfo site-terminfo locale; do
+    if [[ -d "$ghostty_root/share/$resource" ]]; then
+        cp -a "$ghostty_root/share/$resource" "$bundle_root/share/cmux/ghostty/share/"
+    fi
+done
 
 shopt -s nullglob
 ghostty_vt_libraries=("$ghostty_root"/lib/libghostty-vt.so*)
@@ -293,10 +297,18 @@ fi
 
 if [[ "$validate_bundle" != "0" ]]; then
     bundled_diagnostics="$work_dir/bundle-diagnostics.json"
-    mkdir -p "$work_dir/home" "$work_dir/data" "$work_dir/state"
+    mkdir -p "$work_dir/home" "$work_dir/config" "$work_dir/data" "$work_dir/state" "$work_dir/cache"
     HOME="$work_dir/home" \
+    XDG_CONFIG_HOME="$work_dir/config" \
     XDG_DATA_HOME="$work_dir/data" \
     XDG_STATE_HOME="$work_dir/state" \
+    XDG_CACHE_HOME="$work_dir/cache" \
+    CMUX_BIN="$bundle_root/bin/cmux" \
+    CMUX_LINUX_APP_CONFIG="$bundle_root/share/cmux/linux-app.env" \
+    CMUX_GHOSTTY_LIBRARY="$bundle_root/share/cmux/ghostty/lib/libghostty-internal.so" \
+    CMUX_GHOSTTY_ROOT="$bundle_root/share/cmux/ghostty" \
+    GHOSTTY_RESOURCES_DIR="$bundle_root/share/cmux/ghostty/share/ghostty" \
+    CMUX_SOCKET_PATH="$work_dir/cmux.sock" \
     "$bundle_root/bin/cmux-linux-app" \
         --script $'renderer diagnostics --backend ghostty\nquit' \
         > "$bundled_diagnostics" \
@@ -306,6 +318,8 @@ if [[ "$validate_bundle" != "0" ]]; then
         }
     grep -Eq '"embedding_status"[[:space:]]*:[[:space:]]*"available"' \
         "$bundled_diagnostics" || fail "relocated bundle could not discover libghostty"
+    grep -Eq '"runtime_resources_present"[[:space:]]*:[[:space:]]*true' \
+        "$bundled_diagnostics" || fail "relocated bundle has incomplete Ghostty runtime resources"
 fi
 
 archive_tmp="$work_dir/$bundle_name.tar.gz"

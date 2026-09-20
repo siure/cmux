@@ -253,3 +253,12 @@
 .cmux-ui-next .cmux-custom-sidebar-input:focus {
   border-color: @cmux_focus;
 }
+
+.cmux-sidebar-resizer {
+  background: transparent;
+}
+
+.cmux-sidebar-resizer:hover,
+.cmux-sidebar-resizer:active {
+  background: alpha(@cmux_focus, 0.35);
+}

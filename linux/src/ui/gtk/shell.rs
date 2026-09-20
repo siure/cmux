@@ -12,6 +12,11 @@ pub(super) struct GtkSnapshotView {
     pub(super) titlebar: Option<gtk::HeaderBar>,
     shell_body: Option<gtk::Box>,
     right_drawer: Option<gtk::Box>,
+    left_drawer: gtk::Box,
+    left_frame: gtk::Overlay,
+    right_frame: gtk::Overlay,
+    left_width: Rc<Cell<i32>>,
+    right_width: Rc<Cell<i32>>,
     compact: Rc<Cell<bool>>,
     title: Option<gtk::Label>,
     start_actions: Option<gtk::Box>,
@@ -70,34 +75,59 @@ pub(super) fn build_snapshot_view(
     }
     right_slot.set_visible(right_sidebar_visible(snapshot));
 
+    let left_frame = gtk::Overlay::new();
+    left_frame.set_child(Some(&left_slot));
+    let right_frame = gtk::Overlay::new();
+    right_frame.set_child(Some(&right_slot));
+    let left_drawer = sidebar_drawer(gtk::Align::Start);
+    let left_width = Rc::new(Cell::new(snapshot_sidebar_width(snapshot, false)));
+    let right_width = Rc::new(Cell::new(snapshot_sidebar_width(snapshot, true)));
+
     if !ui_mode.is_next() {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         root.add_css_class("cmux-root");
         root.add_css_class(ui_mode.root_css_class());
-        root.append(&left_slot);
+        root.append(&left_frame);
         root.append(&main_slot);
-        root.append(&right_slot);
-        return GtkSnapshotView {
-            root: root.upcast(),
+        root.append(&right_frame);
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&root));
+        let right_drawer = sidebar_drawer(gtk::Align::End);
+        overlay.add_overlay(&left_drawer);
+        overlay.add_overlay(&right_drawer);
+        let overlay_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        overlay_slot.set_hexpand(true);
+        overlay_slot.set_vexpand(true);
+        overlay.add_overlay(&overlay_slot);
+        let view = GtkSnapshotView {
+            root: overlay.upcast(),
             left_slot,
             main_slot,
             right_slot,
-            overlay_slot: None,
+            overlay_slot: Some(overlay_slot),
             titlebar: None,
-            shell_body: None,
-            right_drawer: None,
+            shell_body: Some(root),
+            right_drawer: Some(right_drawer),
+            left_drawer,
+            left_frame,
+            right_frame,
+            left_width,
+            right_width,
             compact: Rc::new(Cell::new(false)),
             title: None,
             start_actions: None,
             end_actions: None,
         };
+        install_sidebar_resizers(&view, app_state, window_id);
+        refresh_overlay(&view, snapshot, app_state, window_id);
+        return view;
     }
 
     let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     body.add_css_class("cmux-shell-body");
-    body.append(&left_slot);
+    body.append(&left_frame);
     body.append(&main_slot);
-    body.append(&right_slot);
+    body.append(&right_frame);
 
     let overlay = gtk::Overlay::new();
     overlay.add_css_class("cmux-root");
@@ -110,6 +140,7 @@ pub(super) fn build_snapshot_view(
     right_drawer.set_valign(gtk::Align::Fill);
     right_drawer.set_vexpand(true);
     right_drawer.set_visible(false);
+    overlay.add_overlay(&left_drawer);
     overlay.add_overlay(&right_drawer);
 
     let overlay_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -150,11 +181,17 @@ pub(super) fn build_snapshot_view(
         titlebar: Some(titlebar),
         shell_body: Some(body),
         right_drawer: Some(right_drawer),
+        left_drawer,
+        left_frame,
+        right_frame,
+        left_width,
+        right_width,
         compact: Rc::new(Cell::new(false)),
         title: Some(title),
         start_actions: Some(start_actions),
         end_actions: Some(end_actions),
     };
+    install_sidebar_resizers(&view, app_state, window_id);
     refresh_header(&view, snapshot, app_state);
     refresh_overlay(&view, snapshot, app_state, window_id);
     view
@@ -226,19 +263,65 @@ pub(super) fn refresh_header(
     append_header_actions(start_actions, end_actions, snapshot, app_state);
 }
 
-pub(super) fn set_compact_layout(view: &GtkSnapshotView, compact: bool) {
-    let changed = view.compact.replace(compact) != compact;
-    let (Some(body), Some(drawer)) = (view.shell_body.as_ref(), view.right_drawer.as_ref()) else {
-        return;
+fn sidebar_drawer(alignment: gtk::Align) -> gtk::Box {
+    let drawer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    drawer.set_halign(alignment);
+    drawer.set_valign(gtk::Align::Fill);
+    drawer.set_vexpand(true);
+    drawer.set_visible(false);
+    drawer
+}
+
+fn snapshot_sidebar_width(snapshot: &Value, right: bool) -> i32 {
+    let (path, fallback, minimum) = if right {
+        (
+            "/right_sidebar/width",
+            metrics::RIGHT_SIDEBAR_WIDTH,
+            metrics::MIN_RIGHT_SIDEBAR_WIDTH,
+        )
+    } else {
+        (
+            "/left_sidebar/width",
+            metrics::SIDEBAR_WIDTH,
+            metrics::SIDEBAR_WIDTH,
+        )
     };
-    if let Some(sidebar) = view.left_slot.first_child() {
-        let width = if compact {
-            super::metrics::COMPACT_SIDEBAR_WIDTH
-        } else {
-            super::metrics::SIDEBAR_WIDTH
-        };
-        sidebar.set_width_request(width);
-        if let Some(viewport) = sidebar
+    snapshot
+        .pointer(path)
+        .and_then(Value::as_i64)
+        .map(|width| width.clamp(i64::from(minimum), 4096) as i32)
+        .unwrap_or(fallback)
+}
+
+pub(super) fn refresh_sidebar_widths(view: &GtkSnapshotView, snapshot: &Value) {
+    view.left_width.set(snapshot_sidebar_width(snapshot, false));
+    view.right_width.set(snapshot_sidebar_width(snapshot, true));
+    apply_sidebar_widths(view);
+}
+
+fn widget_window_width(root: &gtk::Widget) -> i32 {
+    root.native()
+        .and_then(|native| native.surface())
+        .map(|surface| surface.width())
+        .unwrap_or_else(|| {
+            // Bound restored sizes before the first allocation so they cannot
+            // raise the native window minimum beyond its requested size.
+            if root.width() > 0 {
+                root.width()
+            } else {
+                GTK_APP_DEFAULT_WIDTH
+            }
+        })
+}
+
+fn window_width(view: &GtkSnapshotView) -> i32 {
+    widget_window_width(&view.root)
+}
+
+fn set_sidebar_slot_width(slot: &gtk::Box, width: i32) {
+    if let Some(frame) = slot.first_child() {
+        frame.set_width_request(width);
+        if let Some(viewport) = frame
             .first_child()
             .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok())
         {
@@ -247,32 +330,156 @@ pub(super) fn set_compact_layout(view: &GtkSnapshotView, compact: bool) {
             viewport.set_max_content_width(width);
         }
     }
-    if changed {
-        if let Some(parent) = view.right_slot.parent() {
-            if let Ok(parent) = parent.downcast::<gtk::Box>() {
-                parent.remove(&view.right_slot);
-            }
-        }
-        if compact {
-            view.root.add_css_class("cmux-layout-compact");
-            drawer.append(&view.right_slot);
-        } else {
-            view.root.remove_css_class("cmux-layout-compact");
-            body.append(&view.right_slot);
-        }
+}
+
+fn apply_sidebar_widths(view: &GtkSnapshotView) {
+    let right_max = config::sidebar_settings()
+        .right_max_width
+        .unwrap_or(1200.0)
+        .round() as i32;
+    let (left, right) = metrics::sidebar_widths(
+        view.left_width.get(),
+        view.right_width
+            .get()
+            .min(right_max.max(metrics::MIN_RIGHT_SIDEBAR_WIDTH)),
+        window_width(view),
+        view.left_slot.get_visible(),
+        view.compact.get(),
+    );
+    for (slot, width) in [(&view.left_slot, left), (&view.right_slot, right)] {
+        set_sidebar_slot_width(slot, width);
     }
-    drawer.set_visible(compact && view.right_slot.is_visible());
+}
+
+fn move_sidebar(frame: &gtk::Overlay, target: &gtk::Box, prepend: bool) {
+    if frame.parent().as_ref() == Some(target.upcast_ref()) {
+        return;
+    }
+    if let Some(parent) = frame
+        .parent()
+        .and_then(|parent| parent.downcast::<gtk::Box>().ok())
+    {
+        parent.remove(frame);
+    }
+    if prepend {
+        target.prepend(frame);
+    } else {
+        target.append(frame);
+    }
+}
+
+pub(super) fn set_compact_layout(view: &GtkSnapshotView, compact: bool) {
+    view.compact.set(compact);
+    let (Some(body), Some(drawer)) = (view.shell_body.as_ref(), view.right_drawer.as_ref()) else {
+        return;
+    };
+    let narrow = window_width(view) > 0
+        && window_width(view) < metrics::SIDEBAR_WIDTH + metrics::MIN_TERMINAL_WIDTH;
+    move_sidebar(
+        &view.left_frame,
+        if narrow { &view.left_drawer } else { body },
+        true,
+    );
+    move_sidebar(
+        &view.right_frame,
+        if compact { drawer } else { body },
+        false,
+    );
+    if compact {
+        view.root.add_css_class("cmux-layout-compact");
+    } else {
+        view.root.remove_css_class("cmux-layout-compact");
+    }
+    // Use each slot's requested visibility. Effective visibility includes its
+    // hidden drawer ancestor and would prevent a closed drawer from opening.
+    view.left_drawer
+        .set_visible(narrow && view.left_slot.get_visible());
+    drawer.set_visible(compact && view.right_slot.get_visible());
+    apply_sidebar_widths(view);
 }
 
 pub(super) fn set_right_sidebar_visible(view: &GtkSnapshotView, visible: bool) {
     view.right_slot.set_visible(visible);
-    if let Some(drawer) = view.right_drawer.as_ref() {
-        drawer.set_visible(view.compact.get() && visible);
-    }
+    view.right_frame.set_visible(visible);
+    set_compact_layout(view, view.compact.get());
 }
 
 pub(super) fn set_left_sidebar_visible(view: &GtkSnapshotView, visible: bool) {
     view.left_slot.set_visible(visible);
+    view.left_frame.set_visible(visible);
+    set_compact_layout(view, view.compact.get());
+}
+
+fn install_sidebar_resizers(
+    view: &GtkSnapshotView,
+    app_state: &Arc<Mutex<AppState>>,
+    window_id: &str,
+) {
+    for (right, frame, width) in [
+        (false, &view.left_frame, &view.left_width),
+        (true, &view.right_frame, &view.right_width),
+    ] {
+        let handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        handle.add_css_class("cmux-sidebar-resizer");
+        handle.set_width_request(6);
+        handle.set_halign(if right {
+            gtk::Align::Start
+        } else {
+            gtk::Align::End
+        });
+        handle.set_valign(gtk::Align::Fill);
+        handle.set_cursor_from_name(Some("col-resize"));
+        handle.set_tooltip_text(Some(&strings::text(if right {
+            "sidebar.resize_right"
+        } else {
+            "sidebar.resize_left"
+        })));
+        let start_width = Rc::new(Cell::new(width.get()));
+        let drag = gtk::GestureDrag::new();
+        drag.set_button(1);
+        let start = Rc::clone(&start_width);
+        let weak_frame = frame.downgrade();
+        drag.connect_drag_begin(move |gesture, _, _| {
+            if let Some(frame) = weak_frame.upgrade() {
+                start.set(frame.width());
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        let state = Arc::clone(app_state);
+        let window_id = window_id.to_string();
+        let left_width = Rc::clone(&view.left_width);
+        let right_width = Rc::clone(&view.right_width);
+        let compact = Rc::clone(&view.compact);
+        let weak_root = view.root.downgrade();
+        let weak_left = view.left_slot.downgrade();
+        let weak_right = view.right_slot.downgrade();
+        drag.connect_drag_update(move |_, offset, _| {
+            let (Some(root), Some(left_slot), Some(right_slot)) = (weak_root.upgrade(), weak_left.upgrade(), weak_right.upgrade()) else { return; };
+            let candidate = start_width.get() + (if right { -offset } else { offset }).round() as i32;
+            let (left, right_size) = metrics::sidebar_widths(
+                if right { left_width.get() } else { candidate },
+                if right { candidate } else { right_width.get() },
+                widget_window_width(&root), left_slot.get_visible(), compact.get(),
+            );
+            let method = if right { "sidebar.right" } else { "sidebar.left" };
+            if let Some(result) = call_app_value(&state, method, json!({"action": "resize", "window_id": window_id, "width": if right { right_size } else { left }})) {
+                if let Some(width) = result["width"].as_i64() {
+                    if right {
+                        right_width.set(width as i32);
+                        set_sidebar_slot_width(&right_slot, width as i32);
+                    } else {
+                        left_width.set(width as i32);
+                        set_sidebar_slot_width(&left_slot, width as i32);
+                    }
+                }
+            }
+        });
+        handle.add_controller(drag);
+        frame.add_overlay(&handle);
+        frame.set_measure_overlay(&handle, false);
+    }
+    set_left_sidebar_visible(view, view.left_slot.get_visible());
+    set_right_sidebar_visible(view, view.right_slot.get_visible());
 }
 
 pub(super) fn refresh_overlay(
@@ -284,10 +491,23 @@ pub(super) fn refresh_overlay(
     let Some(slot) = view.overlay_slot.as_ref() else {
         return;
     };
-    while let Some(child) = slot.first_child() {
-        slot.remove(&child);
+    let existing_palette = slot.first_child().filter(|child| {
+        widget_descendant_with_css_class(child, "cmux-palette")
+            .and_then(|panel| panel.downcast::<gtk::Box>().ok())
+            .is_some_and(|panel| update_command_palette_panel(&panel, snapshot, app_state))
+    });
+    let mut child = slot.first_child();
+    while let Some(current) = child {
+        child = current.next_sibling();
+        if existing_palette.as_ref() != Some(&current) {
+            slot.remove(&current);
+        }
     }
-    if let Some(palette) = command_palette_panel(snapshot, app_state) {
+    if let Some(palette) = existing_palette
+        .is_none()
+        .then(|| command_palette_panel(snapshot, app_state))
+        .flatten()
+    {
         palette.add_css_class("cmux-shell-overlay-panel");
         palette.set_halign(gtk::Align::Center);
         palette.set_valign(gtk::Align::Start);
@@ -345,12 +565,12 @@ fn dismiss_command_palette(app_state: &Arc<Mutex<AppState>>, window_id: &str) {
     };
     let params = json!({"window_id": window_id});
     let visible = app
-        .handle("debug.command_palette.visible", &params)
+        .handle_ui("debug.command_palette.visible", &params)
         .ok()
         .and_then(|state| state.get("visible").and_then(Value::as_bool))
         .unwrap_or(false);
     if visible {
-        let _ = app.handle("debug.command_palette.toggle", &params);
+        let _ = app.handle_ui("debug.command_palette.toggle", &params);
     }
 }
 
@@ -609,7 +829,6 @@ mod tests {
 
     #[gtk::test]
     fn compact_right_sidebar_show_mounts_visible_file_content_after_startup() {
-        super::super::style::install().unwrap();
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("drawer-visible.txt"), "test").unwrap();
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));

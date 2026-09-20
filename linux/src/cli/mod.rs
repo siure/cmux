@@ -5458,6 +5458,20 @@ fn command_to_request(command: &[String]) -> Result<(String, Value, TextMode)> {
             right_sidebar_params(command)?,
             TextMode::RightSidebar,
         )),
+        "sidebar"
+            if command.get(1).is_some_and(|action| {
+                matches!(
+                    action.as_str(),
+                    "toggle" | "show" | "hide" | "mode" | "resize"
+                )
+            }) =>
+        {
+            Ok((
+                "sidebar.left".to_string(),
+                right_sidebar_params(command)?,
+                TextMode::Jsonish,
+            ))
+        }
         "sidebar" => {
             let (method, params, action) = custom_sidebar_params(command)?;
             Ok((method, params, TextMode::CustomSidebar { action }))
@@ -9810,6 +9824,35 @@ fn open_notification_params(command: &[String]) -> Result<Value> {
     Ok(json!({"id": id}))
 }
 
+#[cfg(test)]
+mod sidebar_resize_cli_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_resize_passes_width_and_window_to_shared_action() {
+        for command in ["sidebar", "right-sidebar"] {
+            let args = [command, "resize", "360", "--window", "window:2"].map(str::to_string);
+            let (method, params, _) = command_to_request(&args).unwrap();
+            assert_eq!(
+                method,
+                if command == "sidebar" {
+                    "sidebar.left"
+                } else {
+                    "sidebar.right"
+                }
+            );
+            assert_eq!(
+                params,
+                json!({"action": "resize", "width": 360, "window_id": "window:2"})
+            );
+            for invalid in ["0", "-1", "wide", "300.5"] {
+                let args = [command, "resize", invalid].map(str::to_string);
+                assert!(right_sidebar_params(&args).is_err());
+            }
+        }
+    }
+}
+
 fn right_sidebar_params(command: &[String]) -> Result<Value> {
     let mut positional = Vec::new();
     let mut workspace = None;
@@ -9878,6 +9921,19 @@ fn right_sidebar_params(command: &[String]) -> Result<Value> {
                 bail!("right-sidebar: --no-focus is only valid with set");
             }
             params.insert("action".to_string(), json!(action));
+        }
+        "resize" => {
+            if positional.len() != 2 || no_focus {
+                bail!("{} resize requires a width in logical pixels", command[0]);
+            }
+            let width: u32 = positional[1].parse().with_context(|| {
+                format!("{} resize requires a positive integer width", command[0])
+            })?;
+            if width == 0 {
+                bail!("{} resize requires a positive integer width", command[0]);
+            }
+            params.insert("action".to_string(), json!("resize"));
+            params.insert("width".to_string(), json!(width));
         }
         "set" => {
             if positional.len() != 2 {
@@ -13647,7 +13703,8 @@ fn print_text_response(command: &str, value: &Value, mode: TextMode) -> Result<(
                     "{}",
                     serde_json::to_string(&json!({
                         "visible": value.get("visible").cloned().unwrap_or(json!(true)),
-                        "mode": value.get("mode").cloned().unwrap_or(json!("files"))
+                        "mode": value.get("mode").cloned().unwrap_or(json!("files")),
+                        "width": value.get("width").cloned().unwrap_or(json!(288))
                     }))?
                 );
             }
@@ -14229,12 +14286,12 @@ fn print_command_help(command: &str) {
         }
         "right-sidebar" => {
             println!(
-                "Usage: cmux right-sidebar <command> [flags]\n\nCommands:\n  toggle\n  show\n  hide\n  focus\n  set <files|find|vault|sessions|feed|dock>\n  mode\n  files|find|vault|sessions|feed|dock\n\nFlags:\n  --workspace <id|ref>\n  --window <id|ref>\n  --no-focus"
+                "Usage: cmux right-sidebar <command> [flags]\n\nCommands:\n  toggle\n  show\n  hide\n  focus\n  set <files|find|vault|sessions|feed|dock>\n  resize <width>\n  mode\n  files|find|vault|sessions|feed|dock\n\nFlags:\n  --workspace <id|ref>\n  --window <id|ref>\n  --no-focus"
             );
         }
         "sidebar" => {
             println!(
-                "Usage: cmux sidebar <validate|reload|select|clear-state> [name|--all] [--json]\n\nValidate, reload, select, or reset custom left sidebars from ~/.config/cmux/sidebars. Swift files win over JSON files with the same base name. Linux interprets the supported SwiftUI-style subset with live workspace data, persisted @State bindings, and cmux actions; customSidebars.renderer selects in-process or isolated-worker evaluation.\n\nCommands:\n  validate [name]\n  reload [name]\n  select <name|workspaces>\n  clear-state [name]"
+                "Usage: cmux sidebar <validate|reload|select|clear-state> [name|--all] [--json]\n\nValidate, reload, select, or reset custom left sidebars from ~/.config/cmux/sidebars. Swift files win over JSON files with the same base name. Linux interprets the supported SwiftUI-style subset with live workspace data, persisted @State bindings, and cmux actions; customSidebars.renderer selects in-process or isolated-worker evaluation.\n\nCommands:\n  validate [name]\n  reload [name]\n  select <name|workspaces>\n  clear-state [name]\n\nWorkspace sidebar:\n  toggle|show|hide|mode [--window <id|ref>]\n  resize <width> [--window <id|ref>]"
             );
         }
         "disable-browser" => {

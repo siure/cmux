@@ -655,6 +655,182 @@ pub fn set_font_size(
     })
 }
 
+pub fn reset_app_settings() -> Result<Vec<String>, String> {
+    reset_app_settings_with_env(&ConfigEnvironment::live())
+}
+
+fn reset_app_settings_with_env(env: &ConfigEnvironment) -> Result<Vec<String>, String> {
+    let paths = [
+        env.app_support(RELEASE_BUNDLE_ID).join("settings.json"),
+        env.xdg_config_home.join("cmux/settings.json"),
+        primary_cmux_json_path(env),
+    ];
+    // Parse every user layer before changing any file. Project configuration and
+    // Ghostty files are independent of the app settings and remain untouched.
+    let mut changes = Vec::new();
+    for path in paths {
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
+        };
+        if contents.trim().is_empty() {
+            continue;
+        }
+        let parsed = preprocess_jsonc(&contents)
+            .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+        let mut root = serde_json::from_str::<Value>(&parsed)
+            .map_err(|err| format!("failed to parse {}: {err}", path.display()))?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| format!("{} must contain a JSON object", path.display()))?;
+        let before = root.clone();
+        remove_registered_app_settings(&mut root);
+        if root != before {
+            changes.push((path, root));
+        }
+    }
+    let mut changed_paths = Vec::new();
+    for (path, root) in changes {
+        write_primary_cmux_json(&path, &root)?;
+        changed_paths.push(path.display().to_string());
+    }
+    Ok(changed_paths)
+}
+
+fn remove_registered_app_settings(root: &mut Map<String, Value>) {
+    for (section, keys) in [
+        (
+            "app",
+            &[
+                "newWorkspacePlacement",
+                "workspaceInheritWorkingDirectory",
+                "keepWorkspaceOpenWhenClosingLastSurface",
+                "confirmQuit",
+                "warnBeforeQuit",
+                "warnBeforeClosingTab",
+                "warnBeforeClosingTabXButton",
+                "hideTabCloseButton",
+                "systemWideHotkeyEnabled",
+                "devWindowDisplay",
+            ][..],
+        ),
+        (
+            "terminal",
+            &[
+                "showTextBoxOnNewTerminals",
+                "focusTextBoxOnNewTerminals",
+                "textBoxMaxLines",
+                "showScrollBar",
+                "copyOnSelect",
+                "autoResumeAgentSessions",
+            ][..],
+        ),
+        (
+            "sidebar",
+            &[
+                "hideAllDetails",
+                "wrapWorkspaceTitles",
+                "showWorkspaceDescription",
+                "branchLayout",
+                "branchVerticalLayout",
+                "stackBranchDirectory",
+                "pathLastSegmentOnly",
+                "showNotificationMessage",
+                "showBranchDirectory",
+                "showPullRequests",
+                "watchGitStatus",
+                "makePullRequestsClickable",
+                "openPullRequestLinksInCmuxBrowser",
+                "openPortLinksInCmuxBrowser",
+                "showSSH",
+                "showPorts",
+                "showLog",
+                "showProgress",
+                "showCustomMetadata",
+                "rightMaxWidth",
+            ][..],
+        ),
+        ("sidebarAppearance", &["matchTerminalBackground"][..]),
+        (
+            "workspaceColors",
+            &[
+                "indicatorStyle",
+                "selectionColor",
+                "notificationBadgeColor",
+                "colors",
+                "paletteOverrides",
+                "customColors",
+            ][..],
+        ),
+        (
+            "browser",
+            &[
+                "defaultSearchEngine",
+                "customSearchEngineName",
+                "customSearchEngineURLTemplate",
+                "showSearchSuggestions",
+            ][..],
+        ),
+        ("canvas", &["paneGap", "snappingEnabled"][..]),
+        ("diffViewer", &["defaultLayout"][..]),
+        ("customSidebars", &["renderer"][..]),
+    ] {
+        remove_setting_keys(root, section, keys);
+    }
+    if let Some(terminal) = root.get_mut("terminal").and_then(Value::as_object_mut) {
+        remove_setting_keys(
+            terminal,
+            "agentHibernation",
+            &[
+                "enabled",
+                "idleSeconds",
+                "maxLiveTerminals",
+                "confirmationSeconds",
+            ],
+        );
+    }
+    remove_empty_settings_section(root, "terminal");
+    for key in [
+        "rightSidebar.beta.feed.enabled",
+        "rightSidebar.beta.dock.enabled",
+        "extensions.beta.enabled",
+        "customSidebars.beta.enabled",
+        "remoteTmux.beta.enabled",
+    ] {
+        root.remove(key);
+    }
+    if let Some(shortcuts) = root.get_mut("shortcuts").and_then(Value::as_object_mut) {
+        for section in ["bindings", "when"] {
+            if let Some(bindings) = shortcuts.get_mut(section).and_then(Value::as_object_mut) {
+                bindings.retain(|key, _| crate::app::shortcut_name_for_config_id(key).is_none());
+            }
+            remove_empty_settings_section(shortcuts, section);
+        }
+        shortcuts.retain(|key, _| crate::app::shortcut_name_for_config_id(key).is_none());
+    }
+    remove_empty_settings_section(root, "shortcuts");
+}
+
+fn remove_setting_keys(root: &mut Map<String, Value>, section: &str, keys: &[&str]) {
+    if let Some(settings) = root.get_mut(section).and_then(Value::as_object_mut) {
+        for key in keys {
+            settings.remove(*key);
+        }
+    }
+    remove_empty_settings_section(root, section);
+}
+
+fn remove_empty_settings_section(root: &mut Map<String, Value>, section: &str) {
+    if root
+        .get(section)
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty)
+    {
+        root.remove(section);
+    }
+}
+
 pub fn settings_docs_payload() -> SettingsDocsPayload {
     let env = ConfigEnvironment::live();
     let primary = abbreviated_path(&env.xdg_config_home.join("cmux/cmux.json"), &env);
@@ -4071,25 +4247,41 @@ mod tests {
                 "agentHibernation": {"enabled": true, "futureOption": 12}},
             "sidebar": {"hideAllDetails": true},
             "shortcuts": {"bindings": {"newSurface": "ctrl+q", "plugin.action": "ctrl+k"},
-                "newWorkspace": "ctrl+w", "when": {"newSurface": "terminalFocus", "plugin.action": "true"}},
+                "newTab": "ctrl+w", "when": {"newSurface": "terminalFocus", "plugin.action": "true"}},
             "workspaceGroups": {"keep": true}, "profiles": [{"id": "keep"}],
             "unknown": {"keep": true}
         })).unwrap()).unwrap();
-        fs::write(&legacy, r#"{"terminal":{"copyOnSelect":true},"unknown":17}"#).unwrap();
+        fs::write(
+            &legacy,
+            r#"{"terminal":{"copyOnSelect":true},"unknown":17}"#,
+        )
+        .unwrap();
 
         let paths = reset_app_settings_with_env(&env).unwrap();
         assert_eq!(paths.len(), 2);
         let root = read_jsonc_object(&primary).unwrap();
         assert_eq!(root["app"], json!({"customExtension":42}));
-        assert_eq!(root["terminal"], json!({"resumeCommands":[{"name":"keep"}], "agentHibernation":{"futureOption":12}}));
+        assert_eq!(
+            root["terminal"],
+            json!({"resumeCommands":[{"name":"keep"}], "agentHibernation":{"futureOption":12}})
+        );
         assert!(!root.contains_key("sidebar"));
-        assert_eq!(root["shortcuts"], json!({"bindings":{"plugin.action":"ctrl+k"},"when":{"plugin.action":"true"}}));
+        assert_eq!(
+            root["shortcuts"],
+            json!({"bindings":{"plugin.action":"ctrl+k"},"when":{"plugin.action":"true"}})
+        );
         assert_eq!(root["workspaceGroups"], json!({"keep":true}));
         assert_eq!(root["profiles"], json!([{"id":"keep"}]));
         assert_eq!(root["unknown"], json!({"keep":true}));
-        assert_eq!(read_jsonc_object(&legacy).unwrap(), json!({"unknown":17}).as_object().unwrap().clone());
+        assert_eq!(
+            read_jsonc_object(&legacy).unwrap(),
+            json!({"unknown":17}).as_object().unwrap().clone()
+        );
         assert!(!terminal_interaction_settings_with_env(&env).copy_on_select);
-        assert_eq!(app_workspace_settings_with_env(&env).confirm_quit, ConfirmQuitPolicy::Always);
+        assert_eq!(
+            app_workspace_settings_with_env(&env).confirm_quit,
+            ConfirmQuitPolicy::Always
+        );
         assert!(reset_app_settings_with_env(&env).unwrap().is_empty());
     }
 
