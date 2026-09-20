@@ -537,6 +537,45 @@ fn workspace_context(workspace: Option<&Value>) -> String {
 mod tests {
     use super::*;
 
+    #[gtk::test]
+    fn shell_header_exposes_workspace_sidebar_toggle() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let start = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let end = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        append_header_actions(&start, &end, &json!({}), &app_state);
+        let mut child = start.first_child();
+        let mut toggle = None;
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if widget.tooltip_text().as_deref() == Some(strings::text("header.toggle_left_sidebar").as_str()) {
+                toggle = widget.downcast::<gtk::Button>().ok();
+                break;
+            }
+        }
+        toggle.expect("workspace sidebar toggle in titlebar").emit_clicked();
+        let state = call_app_value(&app_state, "sidebar.left", json!({})).unwrap();
+        assert_eq!(state["visible"], false);
+    }
+
+    #[gtk::test]
+    fn shell_overflow_exposes_settings_action() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let overflow = overflow_button(&json!({}), &app_state);
+        let menu = overflow.popover().unwrap().child().unwrap();
+        let mut child = menu.first_child();
+        let mut settings = None;
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if let Ok(button) = widget.downcast::<gtk::Button>() {
+                if button.label().as_deref() == Some(strings::text("header.settings").as_str()) {
+                    settings = Some(button);
+                    break;
+                }
+            }
+        }
+        assert!(settings.is_some(), "Settings must be reachable through the main menu");
+    }
+
     #[test]
     fn next_header_uses_workspace_title_and_context_not_internal_refs() {
         let snapshot = json!({

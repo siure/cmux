@@ -21143,11 +21143,8 @@ mod tests {
         assert!(shortcut_help_visible(&visible));
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_pty_output_refreshes_before_safety_sync() {
-        if gtk::init().is_err() {
-            return;
-        }
         const OUTPUT_MARKER: &str = "CMUX_GTK_PTY_REFRESH";
 
         let application = gtk::Application::builder()
@@ -21286,11 +21283,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_output_does_not_reconcile_an_unchanged_window() {
-        if gtk::init().is_err() {
-            return;
-        }
         let application = gtk::Application::builder()
             .application_id("ai.manaflow.cmux.tests.scoped-fallback-output")
             .flags(gio::ApplicationFlags::NON_UNIQUE)
@@ -21378,9 +21372,6 @@ mod tests {
     fn assert_gtk_external_model_mutations_refresh_before_safety_sync(
         renderer_mode: GtkRendererMode,
     ) {
-        if gtk::init().is_err() {
-            return;
-        }
 
         let renderer_name = match renderer_mode {
             GtkRendererMode::Gtk => "fallback",
@@ -21480,21 +21471,18 @@ mod tests {
         }
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_external_model_mutations_refresh_before_safety_sync() {
         assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Gtk);
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_ghostty_external_model_mutations_refresh_before_safety_sync() {
         assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Ghostty);
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_model_mutation_suppressed_by_browser_focus_retries_when_focus_clears() {
-        if gtk::init().is_err() {
-            return;
-        }
 
         let application = gtk::Application::builder()
             .application_id("ai.manaflow.cmux.tests.browser-focus-model-retry")
@@ -21647,11 +21635,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_terminal_allocation_follows_live_resize() {
-        if gtk::init().is_err() {
-            return;
-        }
         let allocation_app = Arc::new(Mutex::new(
             AppState::with_paths(None, None).expect("allocation app state"),
         ));
@@ -21699,11 +21684,8 @@ mod tests {
         allocation_window.close();
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_runtime_widget_regressions() {
-        if gtk::init().is_err() {
-            return;
-        }
         let terminal_label = gtk::Label::new(Some("selected terminal text"));
         terminal_label.add_css_class("cmux-terminal-preview");
         terminal_label.set_selectable(true);
@@ -22024,6 +22006,19 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
         assert!(!shortcut_chord_pending(&app_state));
     }
 
+    #[gtk::test]
+    fn gtk_command_palette_results_are_pointer_actions() {
+        let snapshot = json!({"command_palette": {
+            "visible": true,
+            "mode": "commands",
+            "selected_index": 0,
+            "results": [{"title": "New Workspace", "command_id": "palette.newWorkspace"}]
+        }});
+        let panel = command_palette_panel(&snapshot).unwrap();
+        let rows = widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-results").unwrap();
+        assert!(rows.first_child().unwrap().is::<gtk::Button>(), "palette rows must accept pointer activation");
+    }
+
     #[test]
     fn gtk_palette_keys_map_to_shortcut_simulation_names() {
         assert_eq!(palette_shortcut_combo("up"), Some("up"));
@@ -22247,10 +22242,12 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
     #[gtk::test]
     fn gtk_editable_keystrokes_never_reach_selected_terminal() {
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
-        let window = gtk::ApplicationWindow::new(&gtk::Application::new(
+        let application = gtk::Application::new(
             Some("ai.manaflow.cmux.tests.editable-routing"),
             gio::ApplicationFlags::NON_UNIQUE,
-        ));
+        );
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let window = gtk::ApplicationWindow::new(&application);
         let search = gtk::SearchEntry::new();
         search.add_css_class("cmux-terminal-search");
         window.set_child(Some(&search));
@@ -22262,7 +22259,7 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
             &Rc::new(RefCell::new(HashMap::new())),
             &Rc::new(RefCell::new(HashMap::new())),
             &Rc::new(RefCell::new(HashMap::new())),
-            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(Vec::new())),
             "window-test",
         );
         let controllers = window.observe_controllers();
