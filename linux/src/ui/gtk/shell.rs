@@ -608,6 +608,235 @@ mod tests {
     }
 
     #[gtk::test]
+    fn compact_right_sidebar_show_mounts_visible_file_content_after_startup() {
+        super::super::style::install().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("drawer-visible.txt"), "test").unwrap();
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.sidebar-drawer")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let row = model_window_rows(&app_state).remove(0);
+        let window_id = model_window_id(&row).unwrap();
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        let snapshot = snapshot_or_error(&app_state, GtkRendererMode::Gtk, window_id);
+        assert!(!right_sidebar_visible(&snapshot));
+        let mut host = create_gtk_window_host(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            window_id,
+            &row,
+            &snapshot,
+            &local_refresh,
+        );
+        host.window.set_default_size(900, 700);
+        host.window.present();
+        let settle = || {
+            let main_loop = glib::MainLoop::new(None, false);
+            let quit = main_loop.clone();
+            glib::timeout_add_local_once(Duration::from_millis(100), move || quit.quit());
+            main_loop.run();
+        };
+        settle();
+        call_app_value(
+            &app_state,
+            "sidebar.right",
+            json!({"action": "show", "window_id": window_id}),
+        )
+        .unwrap();
+        call_app_value(
+            &app_state,
+            "debug.command_palette.toggle",
+            json!({"window_id": window_id}),
+        )
+        .unwrap();
+        let mut shown = snapshot_or_error(&app_state, GtkRendererMode::Gtk, window_id);
+        shown["sidebar"]["cwd"] = json!(directory.path());
+        refresh_gtk_window_host(
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &shown,
+            &local_refresh,
+        );
+        settle();
+        let view = &host.snapshot_view;
+        let drawer = view.right_drawer.as_ref().unwrap();
+        let chrome = widget_descendant_with_css_class(&view.root, "cmux-chrome")
+            .expect("files chrome mounted");
+        assert!(view.compact.get());
+        assert!(drawer.is_visible() && drawer.is_mapped(), "drawer visibility={} mapped={} width={} height={} frame_visible={} slot_visible={} chrome_mapped={}", drawer.is_visible(), drawer.is_mapped(), drawer.width(), drawer.height(), view.right_frame.is_visible(), view.right_slot.is_visible(), chrome.is_mapped());
+        assert!(drawer.width() >= metrics::MIN_RIGHT_SIDEBAR_WIDTH && drawer.height() > 300);
+        assert!(
+            chrome.is_mapped() && chrome.width() >= 250 && chrome.height() > 300,
+            "file content mapped={} width={} height={}",
+            chrome.is_mapped(),
+            chrome.width(),
+            chrome.height()
+        );
+        let bounds = chrome.compute_bounds(&view.root).expect("file bounds");
+        assert!(bounds.x() > view.root.width() as f32 / 2.0);
+        host.window.destroy();
+    }
+
+    #[gtk::test]
+    fn sidebar_drag_targets_its_window_and_preserves_width_across_compact_layout() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let window_id = call_app_value(&app_state, "window.current", json!({})).unwrap()
+            ["window_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for (method, width) in [("sidebar.left", 340), ("sidebar.right", 410)] {
+            call_app_value(
+                &app_state,
+                method,
+                json!({"action": "resize", "width": width}),
+            )
+            .unwrap();
+        }
+        let other = call_app_value(&app_state, "window.create", json!({})).unwrap();
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.sidebar-resize")
+            .build();
+        let local_refresh = GtkLocalRefresh::new(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        let snapshot = json!({"window": {"window_id": window_id}, "left_sidebar": {"width": 340}, "right_sidebar": {"visible": true, "width": 410}});
+        let view = build_snapshot_view(
+            &snapshot,
+            &app_state,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &window_id,
+            &local_refresh,
+        );
+        refresh_sidebar_widths(
+            &view,
+            &json!({"left_sidebar": {"width": 4096}, "right_sidebar": {"width": 4096}}),
+        );
+        assert!(view.left_slot.first_child().unwrap().width_request() <= GTK_APP_DEFAULT_WIDTH / 3);
+        assert_eq!(view.left_width.get(), 4096);
+        refresh_sidebar_widths(&view, &snapshot);
+        let window = gtk::Window::builder()
+            .default_width(1600)
+            .default_height(500)
+            .child(&view.root)
+            .build();
+        window.present();
+        let responsive_view = view.clone();
+        window
+            .surface()
+            .unwrap()
+            .connect_width_notify(move |surface| {
+                set_compact_layout(
+                    &responsive_view,
+                    metrics::compact_layout_for_width(surface.width()),
+                );
+            });
+        let settle = || {
+            let main_loop = glib::MainLoop::new(None, false);
+            let quit = main_loop.clone();
+            glib::timeout_add_local_once(Duration::from_millis(80), move || quit.quit());
+            main_loop.run();
+        };
+        settle();
+        assert_eq!(view.left_frame.width(), 340);
+        assert_eq!(view.right_frame.width(), 410);
+        for (frame, method, offset, expected) in [
+            (&view.left_frame, "sidebar.left", 60.0, 400),
+            (&view.right_frame, "sidebar.right", -30.0, 440),
+        ] {
+            let handle = frame.last_child().unwrap();
+            let controllers = handle.observe_controllers();
+            let gesture = (0..controllers.n_items())
+                .find_map(|i| controllers.item(i).and_downcast::<gtk::GestureDrag>())
+                .unwrap();
+            gesture.emit_by_name::<()>("drag-begin", &[&0.0f64, &0.0f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&offset, &0.0f64]);
+            gesture.emit_by_name::<()>("drag-end", &[&offset, &0.0f64]);
+            assert_eq!(
+                call_app_value(
+                    &app_state,
+                    method,
+                    json!({"action": "mode", "window_id": window_id})
+                )
+                .unwrap()["width"],
+                expected
+            );
+        }
+        assert_eq!(
+            call_app_value(
+                &app_state,
+                "sidebar.left",
+                json!({"action": "mode", "window_id": other["window_id"]})
+            )
+            .unwrap()["width"],
+            240
+        );
+        set_left_sidebar_visible(&view, false);
+        set_left_sidebar_visible(&view, true);
+        assert_eq!(view.left_slot.first_child().unwrap().width_request(), 400);
+        window.set_default_size(800, 500);
+        settle();
+        assert!(view.compact.get());
+        assert_eq!(
+            view.right_frame.parent().unwrap(),
+            view.right_drawer
+                .as_ref()
+                .unwrap()
+                .clone()
+                .upcast::<gtk::Widget>()
+        );
+        // GTK can retain the pre-drawer minimum (840px here) for this first
+        // resize. Check the allocated native width, not the requested 800px.
+        let compact_width = window.surface().unwrap().width();
+        assert!(metrics::compact_layout_for_width(compact_width));
+        assert_eq!(
+            view.left_slot.first_child().unwrap().width_request(),
+            compact_width / 3
+        );
+        assert!(view.main_slot.width() >= metrics::MIN_TERMINAL_WIDTH);
+        assert_eq!(view.left_width.get(), 400);
+        window.set_default_size(1600, 500);
+        settle();
+        assert!(!view.compact.get());
+        assert_eq!(view.left_slot.first_child().unwrap().width_request(), 400);
+        assert_eq!(view.right_slot.first_child().unwrap().width_request(), 440);
+        window.destroy();
+    }
+
+    #[gtk::test]
     fn shell_header_exposes_workspace_sidebar_toggle() {
         let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
         let windows = call_app_value(&app_state, "window.list", json!({})).unwrap();
