@@ -67106,37 +67106,121 @@ mod terminal_source_inheritance_tests {
     #[test]
     fn new_tabs_and_splits_inherit_the_source_terminal_before_workspace_fallback() {
         let mut app = AppState::with_paths_and_terminal_startup(
-            None, None, TerminalStartupMode::RendererOwned,
-        ).unwrap();
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .unwrap();
         let first = app.current_surface_id().unwrap();
         let first_pane = app.surfaces[&first].pane_id.clone();
         let workspace = app.current_workspace_id().unwrap();
-        app.apply_embedded_terminal_pwd(&first, "/tmp/source-a").unwrap();
+        app.apply_embedded_terminal_pwd(&first, "/tmp/source-a")
+            .unwrap();
         app.surfaces.get_mut(&first).unwrap().terminal_font_size = Some(17.0);
-        let second = app.handle("surface.split", &json!({
-            "direction": "right", "cwd": "/tmp/source-b", "terminal_font_size": 23.0,
-        })).unwrap()["surface_id"].as_str().unwrap().to_string();
-        app.apply_embedded_terminal_pwd(&second, "/tmp/source-b").unwrap();
-        app.handle("surface.focus", &json!({"surface_id": first})).unwrap();
-        assert_eq!(app.workspaces[&workspace].cwd.as_deref(), Some("/tmp/source-b"));
+        let second = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "direction": "right", "cwd": "/tmp/source-b", "terminal_font_size": 23.0,
+                }),
+            )
+            .unwrap()["surface_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        app.apply_embedded_terminal_pwd(&second, "/tmp/source-b")
+            .unwrap();
+        app.handle("surface.focus", &json!({"surface_id": first}))
+            .unwrap();
+        assert_eq!(
+            app.workspaces[&workspace].cwd.as_deref(),
+            Some("/tmp/source-b")
+        );
 
-        let tab = app.handle("surface.create", &json!({
-            "workspace_id": workspace, "pane_id": first_pane, "type": "terminal",
-        })).unwrap()["surface_id"].as_str().unwrap().to_string();
-        assert_eq!(app.surfaces[&tab].terminal_cwd.as_deref(), Some("/tmp/source-a"));
+        let tab = app
+            .handle(
+                "surface.create",
+                &json!({
+                    "workspace_id": workspace, "pane_id": first_pane, "type": "terminal",
+                }),
+            )
+            .unwrap()["surface_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            app.surfaces[&tab].terminal_cwd.as_deref(),
+            Some("/tmp/source-a")
+        );
         assert_eq!(app.surfaces[&tab].terminal_font_size, Some(17.0));
-        let split = app.handle("surface.split", &json!({
-            "surface_id": first, "direction": "down",
-        })).unwrap()["surface_id"].as_str().unwrap().to_string();
-        assert_eq!(app.surfaces[&split].terminal_cwd.as_deref(), Some("/tmp/source-a"));
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "surface_id": first, "direction": "down",
+                }),
+            )
+            .unwrap()["surface_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            app.surfaces[&split].terminal_cwd.as_deref(),
+            Some("/tmp/source-a")
+        );
         assert_eq!(app.surfaces[&split].terminal_font_size, Some(17.0));
         for method in ["surface.create", "surface.split"] {
-            let explicit = app.handle(method, &json!({
-                "surface_id": first, "pane_id": first_pane, "direction": "right",
-                "cwd": "/tmp/explicit", "terminal_font_size": 31.0,
-            })).unwrap()["surface_id"].as_str().unwrap().to_string();
-            assert_eq!(app.surfaces[&explicit].terminal_cwd.as_deref(), Some("/tmp/explicit"));
+            let explicit = app
+                .handle(
+                    method,
+                    &json!({
+                        "surface_id": first, "pane_id": first_pane, "direction": "right",
+                        "cwd": "/tmp/explicit", "terminal_font_size": 31.0,
+                    }),
+                )
+                .unwrap()["surface_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                app.surfaces[&explicit].terminal_cwd.as_deref(),
+                Some("/tmp/explicit")
+            );
             assert_eq!(app.surfaces[&explicit].terminal_font_size, Some(31.0));
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_inheritance_defaults_tests {
+    use super::{AppState, EmbeddedTerminalInheritedOptions, TerminalStartupMode};
+    use serde_json::json;
+
+    #[test]
+    fn native_default_options_do_not_reinherit_source_values() {
+        for method in ["surface.create", "surface.split"] {
+            let mut app = AppState::with_paths_and_terminal_startup(
+                None, None, TerminalStartupMode::RendererOwned,
+            ).unwrap();
+            let source = app.current_surface_id().unwrap();
+            let pane = app.surfaces[&source].pane_id.clone();
+            app.surfaces.get_mut(&source).unwrap().terminal_font_size = Some(23.0);
+            app.apply_embedded_terminal_pwd(&source, "/tmp/inherited-source").unwrap();
+            let mut params = json!({"surface_id": source, "pane_id": pane, "direction": "right"});
+            AppState::apply_embedded_terminal_inherited_options(&mut params, Some(&EmbeddedTerminalInheritedOptions {
+                working_directory: None,
+                font_size: None,
+            }));
+            let created = app.handle(method, &params).unwrap()["surface_id"].as_str().unwrap().to_string();
+            assert_eq!(app.surfaces[&created].terminal_font_size, None, "{method}");
+            assert_eq!(app.surfaces[&created].terminal_cwd, None, "{method}");
+
+            app.handle("surface.focus", &json!({"surface_id": source})).unwrap();
+            let mut unavailable = json!({"surface_id": source, "pane_id": pane, "direction": "down"});
+            AppState::apply_embedded_terminal_inherited_options(&mut unavailable, None);
+            let created = app.handle(method, &unavailable).unwrap()["surface_id"].as_str().unwrap().to_string();
+            assert_eq!(app.surfaces[&created].terminal_font_size, Some(23.0), "{method}");
+            assert_eq!(app.surfaces[&created].terminal_cwd.as_deref(), Some("/tmp/inherited-source"), "{method}");
         }
     }
 }
