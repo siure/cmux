@@ -62844,6 +62844,42 @@ mod embedded_terminal_action_tests {
     }
 
     #[test]
+    fn recently_closed_history_survives_session_restore_with_live_identity_remapping() {
+        let (mut app, terminal_id, _, workspace_id) = app_with_current_surface();
+        let pane_id = app.surfaces[&terminal_id].pane_id.clone();
+        let extra = app.handle("surface.create", &json!({"workspace_id": workspace_id, "pane_id": pane_id})).unwrap();
+        app.surfaces.get_mut(extra["surface_id"].as_str().unwrap()).unwrap().title = "Before restart".to_string();
+        app.handle("surface.close", &json!({"surface_id": extra["surface_id"]})).unwrap();
+        let encoded = serde_json::to_vec(&app.session_snapshot(false)).unwrap();
+        let mut restored = AppState::with_paths(None, None).unwrap();
+        restored.restore_session_snapshot(serde_json::from_slice(&encoded).unwrap()).unwrap();
+        let reopened = restored.handle("history.reopen_closed", &json!({})).unwrap();
+        assert_eq!(reopened["handled"], true);
+        assert_eq!(reopened["restored_original_pane"], true);
+        assert_ne!(reopened["workspace_id"], workspace_id);
+        assert_eq!(restored.surfaces[reopened["surface_id"].as_str().unwrap()].title, "Before restart");
+    }
+
+    #[test]
+    fn recently_closed_history_can_reopen_selected_entry_and_clear() {
+        let (mut app, _, _, workspace_id) = app_with_current_surface();
+        for title in ["Older item", "Newer item"] {
+            let extra = app.handle("surface.create", &json!({"workspace_id": workspace_id})).unwrap();
+            app.surfaces.get_mut(extra["surface_id"].as_str().unwrap()).unwrap().title = title.to_string();
+            app.handle("surface.close", &json!({"surface_id": extra["surface_id"]})).unwrap();
+        }
+        let entries = app.handle("history.list", &json!({})).unwrap();
+        assert_eq!(entries["entries"][0]["title"], "Newer item");
+        assert_eq!(entries["entries"][1]["title"], "Older item");
+        let reopened = app.handle("history.reopen", &json!({"id": entries["entries"][1]["id"]})).unwrap();
+        assert_eq!(reopened["handled"], true);
+        assert_eq!(app.surfaces[reopened["surface_id"].as_str().unwrap()].title, "Older item");
+        app.handle("history.clear", &json!({})).unwrap();
+        assert_eq!(app.handle("history.list", &json!({})).unwrap()["entries"], json!([]));
+        assert_eq!(app.handle("history.reopen_closed", &json!({})).unwrap()["handled"], false);
+    }
+
+    #[test]
     fn recently_closed_browser_restores_same_pane_index_history_and_zoom() {
         let (mut app, terminal_id, _surface_ref, workspace_id) = app_with_current_surface();
         app.browser_enabled = true;
