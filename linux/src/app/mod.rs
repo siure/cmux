@@ -66295,3 +66295,30 @@ mod daily_workflow_tests {
         assert!(!app.workspaces.contains_key(&target));
     }
 }
+
+#[cfg(test)]
+mod palette_pointer_activation_tests {
+    use super::{AppState, CommandPaletteMode, TerminalStartupMode};
+    use serde_json::json;
+
+    #[test]
+    fn pointer_activation_targets_visible_command_in_owning_window() {
+        let mut app = AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned).unwrap();
+        let first = app.current_window.clone();
+        let second = app.handle("window.create", &json!({})).unwrap()["window_id"].as_str().unwrap().to_string();
+        app.command_palette_toggle(&first, CommandPaletteMode::Commands).unwrap();
+        app.current_window = second.clone();
+        let first_count = app.windows.iter().find(|w| w.id == first).unwrap().workspaces.len();
+        let second_count = app.windows.iter().find(|w| w.id == second).unwrap().workspaces.len();
+        app.handle("debug.command_palette.activate", &json!({"window_id": first, "command_id": "palette.newWorkspace"})).unwrap();
+        assert_eq!(app.windows.iter().find(|w| w.id == first).unwrap().workspaces.len(), first_count + 1);
+        assert_eq!(app.windows.iter().find(|w| w.id == second).unwrap().workspaces.len(), second_count);
+        assert!(!app.command_palette_state(&first).visible);
+        app.command_palette_toggle(&first, CommandPaletteMode::Commands).unwrap();
+        app.command_palette_state_mut(&first).query = "no matching command".to_string();
+        let count = app.workspaces.len();
+        assert!(app.handle("debug.command_palette.activate", &json!({"window_id": first, "command_id": "palette.newWorkspace"})).is_err());
+        assert_eq!(app.workspaces.len(), count);
+        assert!(app.command_palette_state(&first).visible);
+    }
+}
