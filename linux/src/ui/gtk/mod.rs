@@ -5984,6 +5984,7 @@ fn ensure_browser_surface_controls(
                     });
                 }
 
+                let omnibar_composing = native_editable_composing(&location);
                 let omnibar_keys = gtk::EventControllerKey::new();
                 omnibar_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
                 {
@@ -6000,6 +6001,9 @@ fn ensure_browser_surface_controls(
                     let ghostty_widgets = Rc::clone(ghostty_widgets);
                     let browser_controls = Rc::clone(browser_controls);
                     omnibar_keys.connect_key_pressed(move |_, keyval, _, modifiers| {
+                        if omnibar_composing.get() {
+                            return glib::Propagation::Proceed;
+                        }
                         if let Some(combo) = omnibar_pane_focus_combo(keyval, modifiers) {
                             let previous_surface_id = app_state
                                 .lock()
@@ -6293,12 +6297,16 @@ fn ensure_browser_surface_controls(
                 });
                 find_bar.append(&find_close);
 
+                let find_composing = native_editable_composing(&find_entry);
                 let find_keys = gtk::EventControllerKey::new();
                 find_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
                 let key_find_bar = find_bar.downgrade();
                 let key_web_view = web_view.as_ref().map(|view| view.downgrade());
                 let key_browser_chrome = Rc::clone(&browser_chrome_focused);
                 find_keys.connect_key_pressed(move |_, keyval, _, modifiers| {
+                    if find_composing.get() {
+                        return glib::Propagation::Proceed;
+                    }
                     let Some(view) = key_web_view.as_ref().and_then(|view| view.upgrade()) else {
                         return glib::Propagation::Proceed;
                     };
@@ -6673,6 +6681,16 @@ fn update_terminal_search_query(app_state: &Arc<Mutex<AppState>>, surface_id: &s
     }
 }
 
+// Capture handlers must leave conversion, candidate navigation and commit keys to GTK.
+fn native_editable_composing(entry: &impl IsA<gtk::Editable>) -> Rc<Cell<bool>> {
+    let composing = Rc::new(Cell::new(false));
+    if let Some(text) = entry.delegate().and_downcast::<gtk::Text>() {
+        let preedit = Rc::clone(&composing);
+        text.connect_preedit_changed(move |_, text| preedit.set(!text.is_empty()));
+    }
+    composing
+}
+
 fn ensure_terminal_search_controls(
     state: &GtkTerminalSearchState,
     app_state: &Arc<Mutex<AppState>>,
@@ -6732,10 +6750,14 @@ fn ensure_terminal_search_controls(
                 });
                 root.append(&close);
 
+                let composing = native_editable_composing(&entry);
                 let key = gtk::EventControllerKey::new();
                 key.set_propagation_phase(gtk::PropagationPhase::Capture);
                 let key_ghostty = ghostty.clone();
                 key.connect_key_pressed(move |_, keyval, _, modifiers| {
+                    if composing.get() {
+                        return glib::Propagation::Proceed;
+                    }
                     let action = if keyval == gdk::Key::Escape {
                         Some("end_search")
                     } else if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
