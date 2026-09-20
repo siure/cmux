@@ -792,6 +792,239 @@ impl AppState {
 mod tests {
     use super::*;
 
+    fn closed_fixture(kind: &str) -> AppState {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            Some("/tmp/cmux-history-current.sock".into()),
+            TerminalStartupMode::RendererOwned,
+        )
+        .unwrap();
+        match kind {
+            "panel" => {
+                let surface = app.current_surface_id().unwrap();
+                let created = app
+                    .handle(
+                        "surface.split",
+                        &json!({"surface_id": surface, "direction": "right"}),
+                    )
+                    .unwrap();
+                app.handle(
+                    "surface.close",
+                    &json!({"surface_id": created["surface_id"]}),
+                )
+                .unwrap();
+            }
+            "workspace" => {
+                let created = app
+                    .handle("workspace.create", &json!({"title": "Restore target"}))
+                    .unwrap();
+                app.handle(
+                    "workspace.close",
+                    &json!({"workspace_id": created["workspace_id"]}),
+                )
+                .unwrap();
+            }
+            "window" => {
+                let created = app.handle("window.create", &json!({})).unwrap();
+                app.handle("window.close", &json!({"window_id": created["window_id"]}))
+                    .unwrap();
+            }
+            _ => panic!("unknown fixture"),
+        }
+        app
+    }
+
+    #[test]
+    fn failed_closed_restore_rolls_back_topology_focus_and_history_before_retry() {
+        for kind in ["panel", "workspace", "window"] {
+            let mut app = closed_fixture(kind);
+            Arc::make_mut(app.recently_closed_items.back_mut().unwrap())
+                .item
+                .for_each_surface_mut(|surface| {
+                    // Command spawning rejects a NUL in the saved environment.
+                    surface
+                        .terminal_env
+                        .insert("RESTORE_TEST".into(), "invalid\0value".into());
+                });
+            app.terminal_startup_mode = TerminalStartupMode::CorePty;
+            let before_windows = serde_json::to_value(app.session_snapshot(false).windows).unwrap();
+            let before_history = serde_json::to_value(app.closed_history_snapshot()).unwrap();
+            let before_current = app.current_window.clone();
+            let before_shape = (
+                app.windows.len(),
+                app.workspaces.len(),
+                app.panes.len(),
+                app.surfaces.len(),
+            );
+            for _ in 0..2 {
+                assert!(
+                    app.handle("history.reopen_closed", &json!({})).is_err(),
+                    "{kind}"
+                );
+                assert_eq!(
+                    (
+                        app.windows.len(),
+                        app.workspaces.len(),
+                        app.panes.len(),
+                        app.surfaces.len()
+                    ),
+                    before_shape,
+                    "{kind}"
+                );
+                assert_eq!(
+                    serde_json::to_value(app.session_snapshot(false).windows).unwrap(),
+                    before_windows,
+                    "{kind}"
+                );
+                assert_eq!(
+                    serde_json::to_value(app.closed_history_snapshot()).unwrap(),
+                    before_history,
+                    "{kind}"
+                );
+                assert_eq!(app.current_window, before_current, "{kind}");
+            }
+            Arc::make_mut(app.recently_closed_items.back_mut().unwrap())
+                .item
+                .for_each_surface_mut(|surface| {
+                    surface.terminal_env.remove("RESTORE_TEST");
+                });
+            assert_eq!(
+                app.handle("history.reopen_closed", &json!({})).unwrap()["handled"],
+                true,
+                "{kind}"
+            );
+            assert!(app.recently_closed_items.is_empty(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn closed_restore_rolls_back_when_browser_settings_changed_on_disk() {
+        for kind in ["panel", "workspace", "window"] {
+            let mut app = closed_fixture(kind);
+            let directory = tempfile::tempdir().unwrap();
+            app.browser_settings_path = directory.path().join("browser.json");
+            app.browser_enabled = true;
+            browser_settings::save_enabled(&app.browser_settings_path, false).unwrap();
+            Arc::make_mut(app.recently_closed_items.back_mut().unwrap())
+                .item
+                .for_each_surface_mut(|surface| {
+                    surface.kind = "browser".into();
+                });
+            let before_windows = serde_json::to_value(app.session_snapshot(false).windows).unwrap();
+            let before_history = serde_json::to_value(app.closed_history_snapshot()).unwrap();
+            let before_shape = (
+                app.windows.len(),
+                app.workspaces.len(),
+                app.panes.len(),
+                app.surfaces.len(),
+            );
+            assert!(
+                app.handle("history.reopen_closed", &json!({})).is_err(),
+                "{kind}"
+            );
+            assert_eq!(
+                (
+                    app.windows.len(),
+                    app.workspaces.len(),
+                    app.panes.len(),
+                    app.surfaces.len()
+                ),
+                before_shape,
+                "{kind}"
+            );
+            assert_eq!(
+                serde_json::to_value(app.session_snapshot(false).windows).unwrap(),
+                before_windows,
+                "{kind}"
+            );
+            assert_eq!(
+                serde_json::to_value(app.closed_history_snapshot()).unwrap(),
+                before_history,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn closed_restore_rebinds_transport_environment_to_the_current_socket() {
+        for kind in ["panel", "workspace", "window"] {
+            let mut app = closed_fixture(kind);
+            let old_env = HashMap::from([
+                (
+                    "CMUX_SOCKET_PATH".into(),
+                    "/tmp/cmux-history-old.sock".into(),
+                ),
+                ("CMUX_SOCKET".into(), "/tmp/cmux-history-legacy.sock".into()),
+                (
+                    REMOTE_TMUX_CONNECTION_ENV.into(),
+                    "former-connection".into(),
+                ),
+                (REMOTE_TMUX_MANUAL_IO_ENV.into(), "1".into()),
+                (REMOTE_TMUX_WINDOW_ENV.into(), "1".into()),
+                (REMOTE_TMUX_PANE_ENV.into(), "2".into()),
+                ("CMUX_REMOTE_TMUX_HOST".into(), "old-host".into()),
+                ("CMUX_REMOTE_TMUX_SESSION".into(), "old-session".into()),
+                ("PROJECT_VARIABLE".into(), "preserved".into()),
+            ]);
+            let item = &mut Arc::make_mut(app.recently_closed_items.back_mut().unwrap()).item;
+            item.for_each_surface_mut(|surface| surface.terminal_env = old_env.clone());
+            match item {
+                ClosedItem::Workspace(workspace) => {
+                    workspace.snapshot.workspace_env = old_env.clone()
+                }
+                ClosedItem::Window(window) => {
+                    for workspace in &mut window.snapshot.workspaces {
+                        workspace.workspace_env = old_env.clone();
+                    }
+                }
+                ClosedItem::Panel(_) => {}
+            }
+            let existing = app.surfaces.keys().cloned().collect::<HashSet<_>>();
+            app.terminal_startup_mode = TerminalStartupMode::CorePty;
+            assert_eq!(
+                app.handle("history.reopen_closed", &json!({})).unwrap()["handled"],
+                true,
+                "{kind}"
+            );
+            let restored = app
+                .surfaces
+                .values()
+                .filter(|surface| !existing.contains(&surface.id))
+                .collect::<Vec<_>>();
+            assert!(!restored.is_empty());
+            for surface in restored {
+                assert!(
+                    surface.terminal.is_some(),
+                    "{kind}: restored shell never started"
+                );
+                assert!(!surface.remote_session_active, "{kind}");
+                assert_eq!(
+                    surface
+                        .terminal_env
+                        .get("CMUX_SOCKET_PATH")
+                        .map(String::as_str),
+                    Some("/tmp/cmux-history-current.sock"),
+                    "{kind}"
+                );
+                assert!(!surface.terminal_env.contains_key("CMUX_SOCKET"), "{kind}");
+                assert!(
+                    !surface
+                        .terminal_env
+                        .keys()
+                        .any(|key| key.starts_with("CMUX_REMOTE_TMUX_")),
+                    "{kind}"
+                );
+                assert_eq!(
+                    surface
+                        .terminal_env
+                        .get("PROJECT_VARIABLE")
+                        .map(String::as_str),
+                    Some("preserved")
+                );
+            }
+        }
+    }
+
     #[test]
     fn closed_history_limits_scrollback_bytes_and_shares_saved_records() {
         let mut app = AppState::with_paths(None, None).unwrap();
