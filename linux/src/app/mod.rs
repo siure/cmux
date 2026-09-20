@@ -66447,14 +66447,60 @@ mod daily_workspace_batch_tests {
     #[test]
     fn right_sidebar_starts_hidden_and_restores_explicit_visibility() {
         let mut app = app();
-        assert_eq!(app.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["visible"], false);
-        assert_eq!(app.session_snapshot(false).windows[0].right_sidebar_visible, Some(false));
-        assert_eq!(app.handle("sidebar.right", &json!({"action": "toggle"})).unwrap()["visible"], true);
+        assert_eq!(
+            app.handle("sidebar.right", &json!({"action": "mode"}))
+                .unwrap()["visible"],
+            false
+        );
+        assert_eq!(
+            app.session_snapshot(false).windows[0].right_sidebar_visible,
+            Some(false)
+        );
+        assert_eq!(
+            app.handle("sidebar.right", &json!({"action": "toggle"}))
+                .unwrap()["visible"],
+            true
+        );
         let mut restored = self::app();
-        restored.restore_session_snapshot(app.session_snapshot(false)).unwrap();
-        assert_eq!(restored.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["visible"], true);
-        restored.handle("sidebar.right", &json!({"action": "hide"})).unwrap();
-        app.restore_session_snapshot(restored.session_snapshot(false)).unwrap();
-        assert_eq!(app.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["visible"], false);
+        restored
+            .restore_session_snapshot(app.session_snapshot(false))
+            .unwrap();
+        assert_eq!(
+            restored
+                .handle("sidebar.right", &json!({"action": "mode"}))
+                .unwrap()["visible"],
+            true
+        );
+        restored
+            .handle("sidebar.right", &json!({"action": "hide"}))
+            .unwrap();
+        app.restore_session_snapshot(restored.session_snapshot(false))
+            .unwrap();
+        assert_eq!(
+            app.handle("sidebar.right", &json!({"action": "mode"}))
+                .unwrap()["visible"],
+            false
+        );
+    }
+}
+
+#[cfg(test)]
+mod shortcut_snapshot_tests {
+    use super::{AppState, TerminalStartupMode};
+    use serde_json::json;
+
+    #[test]
+    fn transient_shortcuts_do_not_save_but_workspace_creation_does() {
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None, None, TerminalStartupMode::RendererOwned,
+        ).unwrap();
+        let before = app.session_snapshot_persist_attempt_count_for_test();
+        for combo in ["ctrl+shift+p", "w", "down", "up", "backspace", "n", "down", "ctrl+shift+p", "ctrl+f", "ctrl+alt+shift+f"] {
+            app.handle("debug.shortcut.simulate", &json!({"combo": combo})).unwrap();
+            assert_eq!(app.session_snapshot_persist_attempt_count_for_test(), before, "{combo}");
+        }
+        app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+n"})).unwrap();
+        assert!(app.session_snapshot_persist_attempt_count_for_test() > before);
+        assert_eq!(app.workspaces.len(), 2);
     }
 }
