@@ -4054,6 +4054,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reset_app_settings_preserves_unmanaged_configuration_and_clears_legacy_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = ConfigEnvironment {
+            home: tmp.path().to_path_buf(),
+            xdg_config_home: tmp.path().join("config"),
+            xdg_cache_home: tmp.path().join("cache"),
+            bundle_id: RELEASE_BUNDLE_ID.to_string(),
+        };
+        let primary = primary_cmux_json_path(&env);
+        let legacy = env.xdg_config_home.join("cmux/settings.json");
+        fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        fs::write(&primary, serde_json::to_vec(&json!({
+            "app": {"confirmQuit": "never", "customExtension": 42},
+            "terminal": {"copyOnSelect": true, "resumeCommands": [{"name": "keep"}],
+                "agentHibernation": {"enabled": true, "futureOption": 12}},
+            "sidebar": {"hideAllDetails": true},
+            "shortcuts": {"bindings": {"newSurface": "ctrl+q", "plugin.action": "ctrl+k"},
+                "newWorkspace": "ctrl+w", "when": {"newSurface": "terminalFocus", "plugin.action": "true"}},
+            "workspaceGroups": {"keep": true}, "profiles": [{"id": "keep"}],
+            "unknown": {"keep": true}
+        })).unwrap()).unwrap();
+        fs::write(&legacy, r#"{"terminal":{"copyOnSelect":true},"unknown":17}"#).unwrap();
+
+        let paths = reset_app_settings_with_env(&env).unwrap();
+        assert_eq!(paths.len(), 2);
+        let root = read_jsonc_object(&primary).unwrap();
+        assert_eq!(root["app"], json!({"customExtension":42}));
+        assert_eq!(root["terminal"], json!({"resumeCommands":[{"name":"keep"}], "agentHibernation":{"futureOption":12}}));
+        assert!(!root.contains_key("sidebar"));
+        assert_eq!(root["shortcuts"], json!({"bindings":{"plugin.action":"ctrl+k"},"when":{"plugin.action":"true"}}));
+        assert_eq!(root["workspaceGroups"], json!({"keep":true}));
+        assert_eq!(root["profiles"], json!([{"id":"keep"}]));
+        assert_eq!(root["unknown"], json!({"keep":true}));
+        assert_eq!(read_jsonc_object(&legacy).unwrap(), json!({"unknown":17}).as_object().unwrap().clone());
+        assert!(!terminal_interaction_settings_with_env(&env).copy_on_select);
+        assert_eq!(app_workspace_settings_with_env(&env).confirm_quit, ConfirmQuitPolicy::Always);
+        assert!(reset_app_settings_with_env(&env).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_app_settings_rejects_invalid_input_before_modifying_any_layer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = ConfigEnvironment {
+            home: tmp.path().to_path_buf(),
+            xdg_config_home: tmp.path().join("config"),
+            xdg_cache_home: tmp.path().join("cache"),
+            bundle_id: RELEASE_BUNDLE_ID.to_string(),
+        };
+        let primary = primary_cmux_json_path(&env);
+        let legacy = env.xdg_config_home.join("cmux/settings.json");
+        fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        let original = r#"{"terminal":{"copyOnSelect":true}}"#;
+        fs::write(&legacy, original).unwrap();
+        fs::write(&primary, "{broken JSON").unwrap();
+        assert!(reset_app_settings_with_env(&env).is_err());
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), original);
+        assert_eq!(fs::read_to_string(&primary).unwrap(), "{broken JSON");
+    }
+
+    #[test]
     fn synced_preview_overlays_cmux_on_ghostty_entries() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().to_path_buf();
