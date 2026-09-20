@@ -62922,6 +62922,21 @@ mod embedded_terminal_action_tests {
     }
 
     #[test]
+    fn recently_closed_history_restores_group_membership_after_session_restart() {
+        let (mut app, _, _, workspace_id) = app_with_current_surface();
+        app.handle("workspace.group.create", &json!({"child_workspace_ids": [workspace_id]})).unwrap();
+        app.handle("workspace.close", &json!({"workspace_id": workspace_id})).unwrap();
+        let encoded = serde_json::to_vec(&app.session_snapshot(false)).unwrap();
+        let mut restored = AppState::with_paths(None, None).unwrap();
+        restored.restore_session_snapshot(serde_json::from_slice(&encoded).unwrap()).unwrap();
+        let group_id = restored.workspace_groups.keys().next().unwrap().clone();
+        let reopened = restored.handle("history.reopen_closed", &json!({})).unwrap();
+        assert_eq!(reopened["handled"], true);
+        let workspace = &restored.workspaces[reopened["workspace_id"].as_str().unwrap()];
+        assert_eq!(workspace.group_id.as_deref(), Some(group_id.as_str()));
+    }
+
+    #[test]
     fn recently_closed_browser_restores_same_pane_index_history_and_zoom() {
         let (mut app, terminal_id, _surface_ref, workspace_id) = app_with_current_surface();
         app.browser_enabled = true;
