@@ -1,3 +1,5 @@
+mod session_persistence;
+
 use crate::{
     agent_hibernation_settings,
     agent_session::{AgentSessionRuntime, AgentSessionRuntimeSnapshot},
@@ -59191,6 +59193,51 @@ mod embedded_terminal_action_tests {
     }
 
     #[test]
+    fn sidebar_widths_are_window_specific_and_survive_session_restore() {
+        let mut app = AppState::with_paths(None, None).expect("app state");
+        let first_window = app.current_window.clone();
+        app.handle("window.create", &json!({})).expect("second window");
+        for (method, width, default) in [("sidebar.left", 340, 240), ("sidebar.right", 410, 288)] {
+            let result = app.handle(method, &json!({"action": "resize", "window_id": first_window, "width": width})).expect("resize sidebar");
+            assert_eq!(result["width"], width);
+            assert_eq!(app.handle(method, &json!({"action": "mode"})).unwrap()["width"], default);
+            app.handle(method, &json!({"action": "hide", "window_id": first_window})).unwrap();
+            app.handle(method, &json!({"action": "show", "window_id": first_window})).unwrap();
+            assert_eq!(app.handle(method, &json!({"action": "mode", "window_id": first_window})).unwrap()["width"], width);
+        }
+        let snapshot = app.session_snapshot(false);
+        let mut restored = AppState::with_paths(None, None).expect("restored app");
+        restored.restore_session_snapshot(snapshot.clone()).unwrap();
+        let restored_first = restored.windows[0].id.clone();
+        for (method, width) in [("sidebar.left", 340), ("sidebar.right", 410)] {
+            assert_eq!(restored.handle(method, &json!({"action": "mode", "window_id": restored_first})).unwrap()["width"], width);
+        }
+        let mut legacy = serde_json::to_value(snapshot).unwrap();
+        for window in legacy["windows"].as_array_mut().unwrap() {
+            window.as_object_mut().unwrap().remove("left_sidebar_width");
+            window.as_object_mut().unwrap().remove("right_sidebar_width");
+        }
+        restored.restore_session_snapshot(serde_json::from_value(legacy).unwrap()).unwrap();
+        assert_eq!(restored.handle("sidebar.left", &json!({"action": "mode"})).unwrap()["width"], 240);
+        assert_eq!(restored.handle("sidebar.right", &json!({"action": "mode"})).unwrap()["width"], 288);
+    }
+
+    #[test]
+    fn sidebar_resize_validates_and_clamps_width_without_showing_or_focusing() {
+        let mut app = AppState::with_paths(None, None).unwrap();
+        for (method, minimum) in [("sidebar.left", 240), ("sidebar.right", 276)] {
+            app.handle(method, &json!({"action": "hide"})).unwrap();
+            let resized = app.handle(method, &json!({"action": "resize", "width": 1})).unwrap();
+            assert_eq!(resized["width"], minimum);
+            assert_eq!(resized["visible"], false);
+            assert_eq!(app.handle(method, &json!({"action": "resize", "width": 9000})).unwrap()["width"], 4096);
+            for width in [json!(null), json!("300"), json!(-1), json!(300.5)] {
+                assert!(app.handle(method, &json!({"action": "resize", "width": width})).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn session_snapshot_restores_left_and_right_sidebar_visibility_independently() {
         let mut app = AppState::with_paths(None, None).expect("app state");
         app.handle("debug.sidebar.visible", &json!({"visible": false}))
@@ -62773,6 +62820,27 @@ mod embedded_terminal_action_tests {
         assert_eq!(older["handled"], true);
         assert_eq!(older["workspace_id"], restored_id);
         assert_eq!(app.surfaces[older["surface_id"].as_str().unwrap()].title, "Older closed tab");
+    }
+
+    #[test]
+    fn recently_closed_window_restores_workspaces_and_pending_history() {
+        let (mut app, _, _, workspace_id) = app_with_current_surface();
+        let original_window = app.current_window.clone();
+        let extra = app.handle("workspace.create", &json!({"title": "Closed before window"})).unwrap();
+        app.handle("workspace.close", &json!({"workspace_id": extra["workspace_id"]})).unwrap();
+        app.handle("window.create", &json!({})).unwrap();
+        app.handle("window.close", &json!({"window_id": original_window})).unwrap();
+        let reopened = app.handle("history.reopen_closed", &json!({})).unwrap();
+        assert_eq!(reopened["handled"], true);
+        let restored_window = reopened["window_id"].as_str().unwrap();
+        assert_ne!(restored_window, original_window);
+        assert_eq!(app.windows.len(), 2);
+        assert_eq!(app.current_window, restored_window);
+        assert!(!app.workspaces.contains_key(&workspace_id));
+        let older = app.handle("history.reopen_closed", &json!({})).unwrap();
+        assert_eq!(older["handled"], true);
+        assert_eq!(older["window_id"], reopened["window_id"]);
+        assert_eq!(app.workspaces[older["workspace_id"].as_str().unwrap()].title, "Closed before window");
     }
 
     #[test]
