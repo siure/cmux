@@ -34231,7 +34231,7 @@ fn split_resizes_existing_and_new_terminal_ptys_evenly() {
 }
 
 #[test]
-fn surface_send_key_ctrl_d_plus_alias_closes_split_pane() {
+fn surface_send_key_ctrl_d_reaches_running_program_without_closing_split() {
     let server = start_server();
     let created = rpc(
         &server.socket,
@@ -34242,7 +34242,11 @@ fn surface_send_key_ctrl_d_plus_alias_closes_split_pane() {
     let split = rpc(
         &server.socket,
         "surface.split",
-        json!({"workspace_id": workspace_id, "direction": "right"}),
+        json!({
+            "workspace_id": workspace_id,
+            "direction": "right",
+            "command": "printf 'CMUX_EOT_READY\n'; cat; printf 'CMUX_EOT_RECEIVED\n'; sleep 30"
+        }),
     );
     let right_surface = split["surface_id"].as_str().unwrap();
 
@@ -34253,18 +34257,31 @@ fn surface_send_key_ctrl_d_plus_alias_closes_split_pane() {
     );
     assert_eq!(before["panes"].as_array().unwrap().len(), 2);
 
+    let wait_for = |marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = rpc(&server.socket, "surface.read_text", json!({"surface_id": right_surface}));
+            if text["text"].as_str().unwrap_or_default().contains(marker) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "terminal did not produce {marker}: {text}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for("CMUX_EOT_READY");
     rpc(
         &server.socket,
         "surface.send_key",
         json!({"workspace_id": workspace_id, "surface_id": right_surface, "key": "ctrl+d"}),
     );
 
+    wait_for("CMUX_EOT_RECEIVED");
     let after = rpc(
         &server.socket,
         "pane.list",
         json!({"workspace_id": workspace_id}),
     );
-    assert_eq!(after["panes"].as_array().unwrap().len(), 1);
+    assert_eq!(after["panes"].as_array().unwrap().len(), 2);
 }
 
 #[test]

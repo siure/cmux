@@ -54769,30 +54769,26 @@ mod render_activity_tests {
         let split_pane = app.surfaces[split_surface].pane_id.clone();
         let split_workspace = app.panes[&split_pane].workspace_id.clone();
         assert_eq!(app.workspaces[&split_workspace].panes.len(), 2);
-        let before_direct_close = activity.model_mutation_generation();
-        let closed = app
-            .handle(
-                "surface.send_key",
-                &json!({"surface_id": split_surface, "key": "ctrl+d"}),
-            )
-            .expect("close split with direct key input");
-        assert_eq!(closed["surface_id"], split["surface_id"]);
-        assert_eq!(app.workspaces[&split_workspace].panes.len(), 1);
-        assert!(activity.model_mutation_generation() > before_direct_close);
+        let before_input = activity.model_mutation_generation();
+        app.handle(
+            "surface.send_key",
+            &json!({"surface_id": split_surface, "key": "ctrl+d"}),
+        ).expect("send EOT through direct key input");
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 2);
+        assert_eq!(activity.model_mutation_generation(), before_input);
+        assert_eq!(
+            app.drain_embedded_terminal_input(split_surface).unwrap(),
+            vec![super::EmbeddedTerminalInput::Key("ctrl+d".to_string())]
+        );
 
-        let split = app
-            .handle(
-                "surface.split",
-                &json!({"direction": "right", "type": "terminal"}),
-            )
-            .expect("split terminal pane for shortcut");
-        let before_shortcut_close = activity.model_mutation_generation();
-        let closed = app
-            .handle("debug.shortcut.simulate", &json!({"combo": "ctrl+d"}))
-            .expect("close split with GTK shortcut path");
-        assert_eq!(closed["surface_id"], split["surface_id"]);
-        assert_eq!(app.workspaces[&split_workspace].panes.len(), 1);
-        assert!(activity.model_mutation_generation() > before_shortcut_close);
+        app.handle("debug.shortcut.simulate", &json!({"combo": "ctrl+d"}))
+            .expect("send EOT through GTK shortcut path");
+        assert_eq!(app.workspaces[&split_workspace].panes.len(), 2);
+        assert_eq!(activity.model_mutation_generation(), before_input);
+        assert_eq!(
+            app.drain_embedded_terminal_input(split_surface).unwrap(),
+            vec![super::EmbeddedTerminalInput::Key("ctrl-d".to_string())]
+        );
 
         let before_legacy_read = activity.model_mutation_generation();
         app.handle_legacy_v1("list_panes").expect("legacy read");
