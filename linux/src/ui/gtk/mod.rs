@@ -22387,3 +22387,32 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
     }
 
 }
+
+#[cfg(test)]
+mod daily_layout_tests {
+    use super::*;
+
+    #[gtk::test]
+    fn right_sidebar_does_not_take_spare_terminal_width() {
+        let app = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let snapshot = json!({"right_sidebar": {"visible": true, "mode": "files"}, "sidebar": {"cwd": ""}});
+        let chrome = app_chrome_sidebar(&snapshot, &app, GtkUiMode::Next);
+        let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        main.set_hexpand(true);
+        let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        body.append(&main);
+        body.append(&chrome);
+        let window = gtk::Window::builder().default_width(1180).default_height(700).child(&body).build();
+        window.present();
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            while glib::MainContext::default().pending() {
+                glib::MainContext::default().iteration(false);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(chrome.width() <= metrics::RIGHT_SIDEBAR_WIDTH + 20,
+            "right sidebar must retain its requested width, got {}", chrome.width());
+        window.destroy();
+    }
+}
