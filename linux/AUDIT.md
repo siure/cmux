@@ -229,11 +229,14 @@ excluded from the final source.
 
 ## PR review follow-up (2026-09-21)
 
-Codex and Greptile identified three additional reproducible issues:
+Codex and Greptile identified additional reproducible issues:
 
-- A compact-layout sidebar drag saved the temporarily clamped width. Dragging
-  now adjusts the stored preference; only presentation applies the window-size
-  clamp. The mounted GTK test verifies the width after widening the window.
+- A compact-layout sidebar drag could overwrite the preference without moving
+  the divider. Ineffective drags now preserve the preference. Explicit resizing
+  starts at the visible divider and persists its clamped target, matching the
+  original's pointer behavior. A first review fix used the hidden preferred
+  width and introduced a drag dead zone; the mounted GTK test now verifies
+  immediate movement, returning to the origin, and subsequent window widening.
 - A failed history restore could leave new panes, workspaces, or windows behind.
   Restore now rolls back topology, focus, and history, cleans up new PTYs, and
   preserves existing terminals. Regressions cover repeated failures and a
@@ -242,13 +245,16 @@ Codex and Greptile identified three additional reproducible issues:
   startup or route nested commands to the previous socket. Restored terminals
   discard remote control values and bind both socket aliases to the current
   app. Tests check the actual child environment while retaining user variables.
+- Bulk workspace close actions bypassed history. They now capture each target
+  before removal, including the confirmation path. Tests cover close above,
+  below, and others, preserve pinned workspaces, and restore split layouts,
+  scrollback, and the original workspace order.
 
-The sidebar regression and three history regressions failed before their
-fixes. Review evidence and final suite logs are in
+The sidebar and history regressions failed before their fixes. Review evidence and final suite logs are in
 `../../cmux-daily-audit-2026-09-20/pr5-review/`.
 
-After these corrections, the full display-free suite passes **880 tests** and
-GTK passes **1,098 tests**, each with five existing explicit ignores. The GTK
+After these corrections, the full display-free suite passes **881 tests** and
+GTK passes **1,099 tests**, each with five existing explicit ignores. The GTK
 build and formatting check pass. The child-environment test waits for the
 spawned shell's environment to become observable instead of racing its exec.
 
