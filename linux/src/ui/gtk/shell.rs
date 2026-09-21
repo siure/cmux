@@ -1094,6 +1094,38 @@ mod tests {
         assert!(!view.compact.get());
         assert_eq!(view.left_slot.first_child().unwrap().width_request(), 410);
         assert_eq!(view.right_slot.first_child().unwrap().width_request(), 440);
+        for (frame, method, offset, minimum) in [
+            (
+                &view.left_frame,
+                "sidebar.left",
+                -1000.0,
+                metrics::SIDEBAR_WIDTH,
+            ),
+            (
+                &view.right_frame,
+                "sidebar.right",
+                1000.0,
+                metrics::MIN_RIGHT_SIDEBAR_WIDTH,
+            ),
+        ] {
+            let controllers = frame.last_child().unwrap().observe_controllers();
+            let gesture = (0..controllers.n_items())
+                .find_map(|i| controllers.item(i).and_downcast::<gtk::GestureDrag>())
+                .unwrap();
+            gesture.emit_by_name::<()>("drag-begin", &[&0.0f64, &0.0f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&offset, &0.0f64]);
+            gesture.emit_by_name::<()>("drag-end", &[&offset, &0.0f64]);
+            assert_eq!(
+                call_app_value(
+                    &app_state,
+                    method,
+                    json!({"action": "mode", "window_id": window_id})
+                )
+                .unwrap()["width"],
+                minimum,
+                "dragging beyond zero clamps to the minimum",
+            );
+        }
         window.destroy();
     }
 
