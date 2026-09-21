@@ -1186,18 +1186,36 @@ mod tests {
                     surface.terminal_env.get("CMUX_SOCKET_PATH"),
                     "{kind}"
                 );
-                let pid = surface.terminal.as_ref().unwrap().pid().unwrap();
-                let process_env = fs::read(format!("/proc/{pid}/environ")).unwrap();
-                for expected in [
+                let terminal = surface.terminal.as_ref().unwrap();
+                let pid = terminal.pid().unwrap();
+                let expected_env = [
                     b"CMUX_SOCKET_PATH=/tmp/cmux-history-current.sock".as_slice(),
                     b"CMUX_SOCKET=/tmp/cmux-history-current.sock".as_slice(),
-                ] {
-                    assert!(
-                        process_env
-                            .split(|byte| *byte == 0)
-                            .any(|entry| entry == expected),
-                        "{kind}"
+                ];
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    // The child PID may exist before its final exec publishes
+                    // the shell environment through procfs.
+                    let ready = fs::read(format!("/proc/{pid}/environ")).is_ok_and(|process_env| {
+                        expected_env.iter().all(|expected| {
+                            process_env
+                                .split(|byte| *byte == 0)
+                                .any(|entry| entry == *expected)
+                        })
+                    });
+                    if ready {
+                        break;
+                    }
+                    assert_eq!(
+                        terminal.try_wait_exit().unwrap(),
+                        None,
+                        "{kind}: shell exited before environment was ready"
                     );
+                    assert!(
+                        Instant::now() < deadline,
+                        "{kind}: current socket aliases did not reach the child environment"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 assert!(
                     !surface
