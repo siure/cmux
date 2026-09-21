@@ -459,8 +459,14 @@ fn install_sidebar_resizers(
             ) else {
                 return;
             };
-            let candidate =
-                start_width.get() + (if right { -offset } else { offset }).round() as i32;
+            let minimum = if right {
+                metrics::MIN_RIGHT_SIDEBAR_WIDTH
+            } else {
+                metrics::SIDEBAR_WIDTH
+            };
+            let candidate = (start_width.get()
+                + (if right { -offset } else { offset }).round() as i32)
+                .max(minimum);
             let method = if right {
                 "sidebar.right"
             } else {

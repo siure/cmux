@@ -251,3 +251,8 @@ After these corrections, the full display-free suite passes **880 tests** and
 GTK passes **1,098 tests**, each with five existing explicit ignores. The GTK
 build and formatting check pass. The child-environment test waits for the
 spawned shell's environment to become observable instead of racing its exec.
+
+A follow-up review also found that a large sidebar drag could submit a zero or
+negative width. Both edges now clamp to their minimum before calling the
+resize API. The mounted drag regression failed before this boundary fix and
+passes afterward for both sidebars.
