@@ -1080,7 +1080,6 @@ mod tests {
             .unwrap();
         gesture.emit_by_name::<()>("drag-begin", &[&0.0f64, &0.0f64]);
         gesture.emit_by_name::<()>("drag-update", &[&10.0f64, &0.0f64]);
-        gesture.emit_by_name::<()>("drag-end", &[&10.0f64, &0.0f64]);
         assert_eq!(
             call_app_value(
                 &app_state,
@@ -1088,17 +1087,30 @@ mod tests {
                 json!({"action": "mode", "window_id": window_id}),
             )
             .unwrap()["width"],
-            410,
-            "compact drag adjusts the preference, not its temporary display clamp",
+            400,
+            "a drag that cannot move the divider preserves the preference",
         );
         assert_eq!(
             view.left_slot.first_child().unwrap().width_request(),
             compact_width / 3
         );
+        gesture.emit_by_name::<()>("drag-update", &[&-10.0f64, &0.0f64]);
+        settle();
+        assert_eq!(view.left_frame.width(), compact_width / 3 - 10);
+        assert_eq!(view.left_width.get(), compact_width / 3 - 10);
+        gesture.emit_by_name::<()>("drag-update", &[&0.0f64, &0.0f64]);
+        settle();
+        assert_eq!(view.left_frame.width(), compact_width / 3);
+        assert_eq!(view.left_width.get(), 400);
+        gesture.emit_by_name::<()>("drag-update", &[&-10.0f64, &0.0f64]);
+        gesture.emit_by_name::<()>("drag-end", &[&-10.0f64, &0.0f64]);
         window.set_default_size(1600, 500);
         settle();
         assert!(!view.compact.get());
-        assert_eq!(view.left_slot.first_child().unwrap().width_request(), 410);
+        assert_eq!(
+            view.left_slot.first_child().unwrap().width_request(),
+            compact_width / 3 - 10
+        );
         assert_eq!(view.right_slot.first_child().unwrap().width_request(), 440);
         for (frame, method, offset, minimum) in [
             (
