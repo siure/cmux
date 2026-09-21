@@ -146,9 +146,137 @@ pub(super) struct ClosedWindow {
     snapshot: SessionWindowSnapshot,
 }
 
+// Only topology and selection are copied. Existing surfaces and their live PTYs
+// stay in place; a failed restore disposes exclusively of newly created objects.
+struct RestoreCheckpoint {
+    windows: Vec<Window>,
+    workspaces: HashMap<String, RestoredWorkspaceLayout>,
+    panes: HashMap<String, Pane>,
+    surface_ids: HashSet<String>,
+    current_window: String,
+    history: HistoryRecords,
+    last_workspace_by_window: HashMap<String, String>,
+    focus_history_by_window: HashMap<String, FocusHistoryState>,
+    sidebar_selection: HashMap<String, SidebarWorkspaceSelectionState>,
+    command_palettes: HashMap<String, CommandPaletteState>,
+    canvas_states: HashMap<String, CanvasWorkspaceState>,
+}
+
+struct RestoredWorkspaceLayout {
+    panes: Vec<String>,
+    selected_pane: Option<String>,
+    column_sizes: Vec<f64>,
+    row_sizes: Vec<f64>,
+    browser_profile: Option<String>,
+}
+
+impl RestoreCheckpoint {
+    fn capture(app: &AppState) -> Self {
+        Self {
+            windows: app.windows.clone(),
+            workspaces: app
+                .workspaces
+                .iter()
+                .map(|(id, workspace)| {
+                    (
+                        id.clone(),
+                        RestoredWorkspaceLayout {
+                            panes: workspace.panes.clone(),
+                            selected_pane: workspace.selected_pane.clone(),
+                            column_sizes: workspace.debug_column_sizes.clone(),
+                            row_sizes: workspace.debug_row_sizes.clone(),
+                            browser_profile: workspace.preferred_browser_profile_id.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            panes: app.panes.clone(),
+            surface_ids: app.surfaces.keys().cloned().collect(),
+            current_window: app.current_window.clone(),
+            history: app.recently_closed_items.clone(),
+            last_workspace_by_window: app.last_workspace_by_window.clone(),
+            focus_history_by_window: app.focus_history_by_window.clone(),
+            sidebar_selection: app.sidebar_workspace_selection_by_window.clone(),
+            command_palettes: app.command_palettes.clone(),
+            canvas_states: app.canvas_states.clone(),
+        }
+    }
+
+    fn rollback(self, app: &mut AppState) {
+        let created_surfaces = app
+            .surfaces
+            .keys()
+            .filter(|id| !self.surface_ids.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in created_surfaces {
+            if let Some(runtime) = app.agent_session_runtimes.remove(&id) {
+                let _ = runtime.stop();
+            }
+            if let Some(surface) = app.surfaces.remove(&id) {
+                if let Some(terminal) = surface.terminal {
+                    let _ = terminal.kill();
+                }
+            }
+            app.project_panels.remove(&id);
+            app.tab_ref_aliases.retain(|_, surface| surface != &id);
+        }
+        let created_workspaces = app
+            .workspaces
+            .keys()
+            .filter(|id| !self.workspaces.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in created_workspaces {
+            app.remove_workspace(&id);
+        }
+        let created_windows = app
+            .windows
+            .iter()
+            .filter(|window| !self.windows.iter().any(|old| old.id == window.id))
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        for id in created_windows {
+            let _ = app.close_window(&json!({"window_id": id, "record_history": false}));
+        }
+        for (id, layout) in self.workspaces {
+            if let Some(workspace) = app.workspaces.get_mut(&id) {
+                workspace.panes = layout.panes;
+                workspace.selected_pane = layout.selected_pane;
+                workspace.debug_column_sizes = layout.column_sizes;
+                workspace.debug_row_sizes = layout.row_sizes;
+                workspace.preferred_browser_profile_id = layout.browser_profile;
+            }
+        }
+        app.resize_attachments
+            .retain(|id, _| self.panes.contains_key(id));
+        app.panes = self.panes;
+        app.windows = self.windows;
+        app.current_window = self.current_window;
+        app.recently_closed_items = self.history;
+        app.last_workspace_by_window = self.last_workspace_by_window;
+        app.focus_history_by_window = self.focus_history_by_window;
+        app.sidebar_workspace_selection_by_window = self.sidebar_selection;
+        app.command_palettes = self.command_palettes;
+        app.canvas_states = self.canvas_states;
+        // A late resize failure may already have resized another existing pane.
+        for id in app.workspaces.keys().cloned().collect::<Vec<_>>() {
+            let _ = app.apply_workspace_terminal_sizes(&id);
+        }
+    }
+}
+
+fn prepare_closed_environment(env: &mut HashMap<String, String>) {
+    env.retain(|key, _| {
+        !matches!(key.as_str(), "CMUX_SOCKET" | "CMUX_SOCKET_PATH")
+            && !key.starts_with("CMUX_REMOTE_TMUX_")
+    });
+}
+
 // Reopening launches a fresh shell. Saved commands and partially submitted input
 // are display/history data, never instructions to execute again.
 fn prepare_closed_surface(snapshot: &mut SessionSurfaceSnapshot) {
+    prepare_closed_environment(&mut snapshot.terminal_env);
     snapshot.terminal_command = None;
     snapshot.terminal_initial_input = None;
     snapshot.terminal_wait_after_command = false;
@@ -184,6 +312,7 @@ fn closed_scrollback_tail(surface: &Surface, remaining_bytes: &mut usize) -> Opt
 }
 
 fn prepare_closed_workspace(snapshot: &mut SessionWorkspaceSnapshot) {
+    prepare_closed_environment(&mut snapshot.workspace_env);
     for pane in &mut snapshot.panes {
         for surface in &mut pane.surfaces {
             prepare_closed_surface(surface);
@@ -558,10 +687,41 @@ impl AppState {
         if !available {
             return Ok(None);
         }
+        match &mut item {
+            ClosedItem::Workspace(workspace) => prepare_closed_workspace(&mut workspace.snapshot),
+            ClosedItem::Window(window) => {
+                for workspace in &mut window.snapshot.workspaces {
+                    prepare_closed_workspace(workspace);
+                }
+            }
+            ClosedItem::Panel(_) => {}
+        }
+        if let Some(socket_path) = self.local_socket_path.as_ref() {
+            item.for_each_surface_mut(|surface| {
+                if surface.kind == "terminal" {
+                    // Override both aliases, including any inherited by the child
+                    // process from the app's own launch environment.
+                    surface
+                        .terminal_env
+                        .insert("CMUX_SOCKET_PATH".into(), socket_path.clone());
+                    surface
+                        .terminal_env
+                        .insert("CMUX_SOCKET".into(), socket_path.clone());
+                }
+            });
+        }
+        let checkpoint = RestoreCheckpoint::capture(self);
         let result = match item {
-            ClosedItem::Panel(panel) => self.restore_closed_panel(panel)?,
-            ClosedItem::Workspace(workspace) => Some(self.restore_closed_workspace(workspace)?),
-            ClosedItem::Window(window) => Some(self.restore_closed_window(window)?),
+            ClosedItem::Panel(panel) => self.restore_closed_panel(panel),
+            ClosedItem::Workspace(workspace) => self.restore_closed_workspace(workspace).map(Some),
+            ClosedItem::Window(window) => self.restore_closed_window(window).map(Some),
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                checkpoint.rollback(self);
+                return Err(error);
+            }
         };
         if let Some(mut result) = result {
             self.recently_closed_items.remove(index);
@@ -847,6 +1007,11 @@ mod tests {
                         .insert("RESTORE_TEST".into(), "invalid\0value".into());
                 });
             app.terminal_startup_mode = TerminalStartupMode::CorePty;
+            let existing_surface = app.current_surface_id().unwrap();
+            app.ensure_surface_terminal_started(&existing_surface)
+                .unwrap();
+            let existing_terminal = app.surfaces[&existing_surface].terminal.clone().unwrap();
+            let existing_pid = existing_terminal.pid();
             let before_windows = serde_json::to_value(app.session_snapshot(false).windows).unwrap();
             let before_history = serde_json::to_value(app.closed_history_snapshot()).unwrap();
             let before_current = app.current_window.clone();
@@ -882,6 +1047,16 @@ mod tests {
                     "{kind}"
                 );
                 assert_eq!(app.current_window, before_current, "{kind}");
+                assert_eq!(
+                    app.surfaces[&existing_surface]
+                        .terminal
+                        .as_ref()
+                        .unwrap()
+                        .pid(),
+                    existing_pid
+                );
+                assert_eq!(existing_terminal.try_wait_exit().unwrap(), None);
+                existing_terminal.send_text("true\n").unwrap();
             }
             Arc::make_mut(app.recently_closed_items.back_mut().unwrap())
                 .item
@@ -1006,7 +1181,24 @@ mod tests {
                     Some("/tmp/cmux-history-current.sock"),
                     "{kind}"
                 );
-                assert!(!surface.terminal_env.contains_key("CMUX_SOCKET"), "{kind}");
+                assert_eq!(
+                    surface.terminal_env.get("CMUX_SOCKET"),
+                    surface.terminal_env.get("CMUX_SOCKET_PATH"),
+                    "{kind}"
+                );
+                let pid = surface.terminal.as_ref().unwrap().pid().unwrap();
+                let process_env = fs::read(format!("/proc/{pid}/environ")).unwrap();
+                for expected in [
+                    b"CMUX_SOCKET_PATH=/tmp/cmux-history-current.sock".as_slice(),
+                    b"CMUX_SOCKET=/tmp/cmux-history-current.sock".as_slice(),
+                ] {
+                    assert!(
+                        process_env
+                            .split(|byte| *byte == 0)
+                            .any(|entry| entry == expected),
+                        "{kind}"
+                    );
+                }
                 assert!(
                     !surface
                         .terminal_env

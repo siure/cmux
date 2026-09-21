@@ -299,6 +299,7 @@ impl AgentLifecycleState {
     }
 }
 
+#[derive(Clone)]
 struct Window {
     id: String,
     title: String,
@@ -491,6 +492,7 @@ pub(crate) enum EmbeddedTerminalInput {
     ProcessOutput(Vec<u8>),
 }
 
+#[derive(Clone)]
 struct Pane {
     id: String,
     workspace_id: String,
@@ -2949,7 +2951,7 @@ struct FocusHistoryEntry {
     surface_id: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct FocusHistoryState {
     entries: Vec<FocusHistoryEntry>,
     index: Option<usize>,
