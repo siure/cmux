@@ -17848,6 +17848,8 @@ impl AppState {
                 break;
             }
             closed_workspace_refs.push(self.workspace_ref(&target_id));
+            let (_, index, _) = self.workspace_window_index_len(&target_id)?;
+            self.capture_closed_workspace(&target_id, index);
             self.remove_workspace(&target_id);
             closed_workspace_ids.push(target_id);
         }
