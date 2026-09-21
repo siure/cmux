@@ -1246,13 +1246,7 @@ mod tests {
                 )
                 .unwrap();
                 let titles = [
-                    "Above A",
-                    "Pinned above",
-                    "Above B",
-                    "Anchor",
-                    "Below A",
-                    "Pinned below",
-                    "Below B",
+                    "Pinned A", "Pinned B", "Above A", "Above B", "Anchor", "Below A", "Below B",
                 ];
                 let mut ids = vec![app.current_workspace_id().unwrap()];
                 app.workspaces.get_mut(&ids[0]).unwrap().title = titles[0].into();
@@ -1265,13 +1259,17 @@ mod tests {
                             .into(),
                     );
                 }
-                for index in [1, 5] {
-                    app.workspaces.get_mut(&ids[index]).unwrap().pinned = true;
+                for index in [0, 1] {
+                    app.handle(
+                        "workspace.action",
+                        &json!({"workspace_id": ids[index], "action": "pin"}),
+                    )
+                    .unwrap();
                 }
                 let target_indices: &[usize] = match action {
-                    "close_above" => &[0, 2],
-                    "close_below" => &[4, 6],
-                    _ => &[0, 2, 4, 6],
+                    "close_above" => &[2, 3],
+                    "close_below" => &[5, 6],
+                    _ => &[2, 3, 5, 6],
                 };
                 for &index in target_indices {
                     let original = app.workspace_selected_surface(&ids[index]).unwrap();
@@ -1289,7 +1287,7 @@ mod tests {
                     .handle(
                         "workspace.action",
                         &json!({
-                            "workspace_id": ids[3], "action": action,
+                            "workspace_id": ids[4], "action": action,
                             "source": if confirmed { "context_menu" } else { "api" }
                         }),
                     )
@@ -1307,7 +1305,7 @@ mod tests {
                 };
                 assert_eq!(result["closed"], target_indices.len());
                 assert!(app.workspaces.contains_key(&ids[1]));
-                assert!(app.workspaces.contains_key(&ids[5]));
+                assert!(app.workspaces.contains_key(&ids[0]));
                 let history = app.handle("history.list", &json!({})).unwrap();
                 assert_eq!(
                     history["entries"].as_array().unwrap().len(),
@@ -1330,7 +1328,7 @@ mod tests {
                 let window = app
                     .windows
                     .iter()
-                    .find(|window| window.id == app.workspaces[&ids[3]].window_id)
+                    .find(|window| window.id == app.workspaces[&ids[4]].window_id)
                     .unwrap();
                 let restored_titles = window
                     .workspaces
