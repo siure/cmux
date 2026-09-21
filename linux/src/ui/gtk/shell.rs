@@ -435,12 +435,19 @@ fn install_sidebar_resizers(
             "sidebar.resize_left"
         })));
         let start_width = Rc::new(Cell::new(width.get()));
+        let start_preference = Rc::new(Cell::new(width.get()));
         let drag = gtk::GestureDrag::new();
         drag.set_button(1);
         let start = Rc::clone(&start_width);
+        let preference = Rc::clone(&start_preference);
         let preferred_width = Rc::clone(width);
+        let weak_frame = frame.downgrade();
         drag.connect_drag_begin(move |gesture, _, _| {
-            start.set(preferred_width.get());
+            let Some(frame) = weak_frame.upgrade() else {
+                return;
+            };
+            start.set(frame.width());
+            preference.set(preferred_width.get());
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
         let state = Arc::clone(app_state);
@@ -467,6 +474,26 @@ fn install_sidebar_resizers(
             let candidate = (start_width.get()
                 + (if right { -offset } else { offset }).round() as i32)
                 .max(minimum);
+            let right_max = config::sidebar_settings()
+                .right_max_width
+                .unwrap_or(1200.0)
+                .round() as i32;
+            let right_max = right_max.max(metrics::MIN_RIGHT_SIDEBAR_WIDTH);
+            let (left, right_size) = metrics::sidebar_widths(
+                if right { left_width.get() } else { candidate },
+                if right { candidate } else { right_width.get() }.min(right_max),
+                widget_window_width(&root),
+                left_slot.get_visible(),
+                compact.get(),
+            );
+            let rendered = if right { right_size } else { left };
+            // An ineffective drag retains the preference; a visible resize
+            // follows the pointer from the divider's actual starting position.
+            let candidate = if rendered == start_width.get() {
+                start_preference.get()
+            } else {
+                rendered
+            };
             let method = if right {
                 "sidebar.right"
             } else {
@@ -483,15 +510,9 @@ fn install_sidebar_resizers(
                     } else {
                         left_width.set(width as i32);
                     }
-                    let right_max = config::sidebar_settings()
-                        .right_max_width
-                        .unwrap_or(1200.0)
-                        .round() as i32;
                     let (left, right_size) = metrics::sidebar_widths(
                         left_width.get(),
-                        right_width
-                            .get()
-                            .min(right_max.max(metrics::MIN_RIGHT_SIDEBAR_WIDTH)),
+                        right_width.get().min(right_max),
                         widget_window_width(&root),
                         left_slot.get_visible(),
                         compact.get(),
