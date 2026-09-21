@@ -1236,6 +1236,114 @@ mod tests {
     }
 
     #[test]
+    fn bulk_closed_workspaces_reopen_with_layout_scrollback_and_order() {
+        for action in ["close_above", "close_below", "close_others"] {
+            for confirmed in [false, true] {
+                let mut app = AppState::with_paths_and_terminal_startup(
+                    None,
+                    None,
+                    TerminalStartupMode::RendererOwned,
+                )
+                .unwrap();
+                let titles = [
+                    "Above A",
+                    "Pinned above",
+                    "Above B",
+                    "Anchor",
+                    "Below A",
+                    "Pinned below",
+                    "Below B",
+                ];
+                let mut ids = vec![app.current_workspace_id().unwrap()];
+                app.workspaces.get_mut(&ids[0]).unwrap().title = titles[0].into();
+                for title in &titles[1..] {
+                    ids.push(
+                        app.handle("workspace.create", &json!({"title": title}))
+                            .unwrap()["workspace_id"]
+                            .as_str()
+                            .unwrap()
+                            .into(),
+                    );
+                }
+                for index in [1, 5] {
+                    app.workspaces.get_mut(&ids[index]).unwrap().pinned = true;
+                }
+                let target_indices: &[usize] = match action {
+                    "close_above" => &[0, 2],
+                    "close_below" => &[4, 6],
+                    _ => &[0, 2, 4, 6],
+                };
+                for &index in target_indices {
+                    let original = app.workspace_selected_surface(&ids[index]).unwrap();
+                    app.handle("surface.split", &json!({"workspace_id": ids[index], "surface_id": original, "direction": "right"})).unwrap();
+                    for surface_id in app.workspace_surface_ids(&ids[index]) {
+                        app.surfaces
+                            .get_mut(&surface_id)
+                            .unwrap()
+                            .terminal_scrollback_snapshot =
+                            Some(format!("{} scrollback", titles[index]));
+                    }
+                }
+                app.app_workspace_settings.warn_before_closing_tab = confirmed;
+                let request = app
+                    .handle(
+                        "workspace.action",
+                        &json!({
+                            "workspace_id": ids[3], "action": action,
+                            "source": if confirmed { "context_menu" } else { "api" }
+                        }),
+                    )
+                    .unwrap();
+                let result = if confirmed {
+                    assert_eq!(request["confirmation_required"], true);
+                    assert!(app.recently_closed_items.is_empty());
+                    app.handle(
+                        "app.close_confirmation.reply",
+                        &json!({"id": request["confirmation"]["id"], "confirmed": true}),
+                    )
+                    .unwrap()
+                } else {
+                    request
+                };
+                assert_eq!(result["closed"], target_indices.len());
+                assert!(app.workspaces.contains_key(&ids[1]));
+                assert!(app.workspaces.contains_key(&ids[5]));
+                let history = app.handle("history.list", &json!({})).unwrap();
+                assert_eq!(
+                    history["entries"].as_array().unwrap().len(),
+                    target_indices.len(),
+                    "{action}, confirmed={confirmed}"
+                );
+                for &index in target_indices.iter().rev() {
+                    let reopened = app.handle("history.reopen_closed", &json!({})).unwrap();
+                    assert_eq!(reopened["handled"], true);
+                    let workspace_id = reopened["workspace_id"].as_str().unwrap();
+                    assert_eq!(app.workspaces[workspace_id].title, titles[index]);
+                    assert_eq!(app.workspaces[workspace_id].panes.len(), 2);
+                    for surface_id in app.workspace_surface_ids(workspace_id) {
+                        assert_eq!(
+                            *app.surfaces[&surface_id].buffer.lock().unwrap(),
+                            format!("{} scrollback", titles[index])
+                        );
+                    }
+                }
+                let window = app
+                    .windows
+                    .iter()
+                    .find(|window| window.id == app.workspaces[&ids[3]].window_id)
+                    .unwrap();
+                let restored_titles = window
+                    .workspaces
+                    .iter()
+                    .map(|id| app.workspaces[id].title.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(restored_titles, titles, "{action}, confirmed={confirmed}");
+                assert!(app.recently_closed_items.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn closed_history_limits_scrollback_bytes_and_shares_saved_records() {
         let mut app = AppState::with_paths(None, None).unwrap();
         let surface_id = app.current_surface_id().unwrap();
