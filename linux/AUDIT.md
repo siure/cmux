@@ -226,3 +226,28 @@ the selected text with Backspace before starting composition avoids this path.
 The audit records this as an unresolved toolkit limitation, not a fixed cmux
 bug. An experimental suggestion-refresh change did not correct it and was
 excluded from the final source.
+
+## PR review follow-up (2026-09-21)
+
+Codex and Greptile identified three additional reproducible issues:
+
+- A compact-layout sidebar drag saved the temporarily clamped width. Dragging
+  now adjusts the stored preference; only presentation applies the window-size
+  clamp. The mounted GTK test verifies the width after widening the window.
+- A failed history restore could leave new panes, workspaces, or windows behind.
+  Restore now rolls back topology, focus, and history, cleans up new PTYs, and
+  preserves existing terminals. Regressions cover repeated failures and a
+  successful retry for panels, workspaces, and windows.
+- Saved remote-tmux and socket environment values could prevent fresh shell
+  startup or route nested commands to the previous socket. Restored terminals
+  discard remote control values and bind both socket aliases to the current
+  app. Tests check the actual child environment while retaining user variables.
+
+The sidebar regression and three history regressions failed before their
+fixes. Review evidence and final suite logs are in
+`../../cmux-daily-audit-2026-09-20/pr5-review/`.
+
+After these corrections, the full display-free suite passes **880 tests** and
+GTK passes **1,098 tests**, each with five existing explicit ignores. The GTK
+build and formatting check pass. The child-environment test waits for the
+spawned shell's environment to become observable instead of racing its exec.
