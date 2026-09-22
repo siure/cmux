@@ -18366,6 +18366,10 @@ impl AppState {
         let remote_tmux_close = self.remote_tmux_close_surface_requested(&surface_id)?;
         let is_last_surface = self.workspace_surface_ids(&workspace_id).len() <= 1;
         if remote_tmux_close && is_last_surface {
+            if bool_param(params, "record_history").unwrap_or(true) {
+                let (_, index, _) = self.workspace_window_index_len(&workspace_id)?;
+                self.capture_closed_workspace(&workspace_id, index);
+            }
             self.remove_workspace(&workspace_id);
             return Ok(json!({
                 "surface_id": surface_id,
