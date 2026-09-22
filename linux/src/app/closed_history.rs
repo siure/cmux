@@ -1342,6 +1342,90 @@ mod tests {
     }
 
     #[test]
+    fn deleted_group_members_reopen_in_order_without_recreating_the_group() {
+        for outside in [false, true] {
+            for record_history in [false, true] {
+                let mut app = AppState::with_paths_and_terminal_startup(
+                    None,
+                    None,
+                    TerminalStartupMode::RendererOwned,
+                )
+                .unwrap();
+                let first = app.current_workspace_id().unwrap();
+                app.handle(
+                    "workspace.action",
+                    &json!({"workspace_id": first, "action": "rename", "title": "Child A"}),
+                )
+                .unwrap();
+                let second = app
+                    .handle("workspace.create", &json!({"title": "Child B"}))
+                    .unwrap()["workspace_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                if outside {
+                    app.handle("workspace.create", &json!({"title": "Outside"}))
+                        .unwrap();
+                }
+                let group = app
+                    .handle(
+                        "workspace.group.create",
+                        &json!({"name": "Anchor", "child_workspace_ids": [first, second]}),
+                    )
+                    .unwrap()["group"]
+                    .clone();
+                let mut params = json!({"group_id": group["id"]});
+                if !record_history {
+                    params["record_history"] = json!(false);
+                }
+                let deleted = app.handle("workspace.group.delete", &params).unwrap();
+                assert_eq!(deleted["closed_workspace_count"], 3);
+                assert_eq!(app.workspaces.len(), 1);
+                assert!(app.workspace_groups.is_empty());
+                let history = app.handle("history.list", &json!({})).unwrap();
+                let entries = history["entries"].as_array().unwrap();
+                if !record_history {
+                    assert!(entries.is_empty());
+                    assert_eq!(
+                        app.handle("history.reopen_closed", &json!({})).unwrap()["handled"],
+                        false
+                    );
+                    continue;
+                }
+                let titles = entries
+                    .iter()
+                    .map(|entry| entry["title"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(titles, ["Anchor", "Child B", "Child A"]);
+                for _ in 0..3 {
+                    assert_eq!(
+                        app.handle("history.reopen_closed", &json!({})).unwrap()["handled"],
+                        true
+                    );
+                }
+                let workspaces = app.handle("workspace.list", &json!({})).unwrap();
+                let titles = workspaces["workspaces"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|workspace| workspace["title"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(&titles[..3], ["Anchor", "Child A", "Child B"]);
+                assert_eq!(titles.len(), 4);
+                if outside {
+                    assert_eq!(titles[3], "Outside");
+                }
+                assert!(app.workspace_groups.is_empty());
+                assert!(app
+                    .workspaces
+                    .values()
+                    .all(|workspace| workspace.group_id.is_none()));
+                assert!(app.recently_closed_items.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn closed_history_limits_scrollback_bytes_and_shares_saved_records() {
         let mut app = AppState::with_paths(None, None).unwrap();
         let surface_id = app.current_surface_id().unwrap();
