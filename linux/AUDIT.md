@@ -253,8 +253,8 @@ Codex and Greptile identified additional reproducible issues:
 The sidebar and history regressions failed before their fixes. Review evidence and final suite logs are in
 `../../cmux-daily-audit-2026-09-20/pr5-review/`.
 
-After these corrections, the full display-free suite passes **881 tests** and
-GTK passes **1,099 tests**, each with five existing explicit ignores. The GTK
+After these corrections, the full display-free suite passes **882 tests** and
+GTK passes **1,100 tests**, each with five existing explicit ignores. The GTK
 build and formatting check pass. The child-environment test waits for the
 spawned shell's environment to become observable instead of racing its exec.
 
@@ -262,3 +262,19 @@ A follow-up review also found that a large sidebar drag could submit a zero or
 negative width. Both edges now clamp to their minimum before calling the
 resize API. The mounted drag regression failed before this boundary fix and
 passes afterward for both sidebars.
+
+The final remote-tmux pane also removed its workspace without recording history.
+That close now captures the workspace unless `record_history` is false. The live
+control-stream socket test failed before the fix and now verifies reopening its
+scrollback, as well as the history opt-out.
+
+The same close-path audit found that deleting a group skipped history for every
+member. Group deletion now records its children before its anchor, matching the
+original close order. Its regression covers reopening workspace order, keeping
+the group dissolved, explicit history suppression, and retaining a usable
+workspace when the group held every workspace in the window.
+
+A review suggestion to recreate dissolved groups was rejected after checking
+the original. `Sources/TabManager.swift` deliberately dissolves an anchored group
+when its anchor closes and drops stale membership on reopen. An isolated Linux
+RPC check matches that behavior; reopening does not recreate the group.
