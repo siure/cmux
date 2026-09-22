@@ -14796,9 +14796,17 @@ impl AppState {
             .get(&group_id)
             .map(|group| group.window_id.clone())
             .ok_or_else(|| AppError::not_found("Group not found"))?;
-        let members = self.group_member_ids(&group_id);
+        let anchor_workspace_id = self.workspace_groups[&group_id].anchor_workspace_id.clone();
+        let mut members = self.group_member_ids(&group_id);
+        // Close the anchor last so reopening restores it before its children.
+        members.sort_by_key(|id| id == &anchor_workspace_id);
+        let record_history = bool_param(params, "record_history").unwrap_or(true);
         self.workspace_groups.remove(&group_id);
         for workspace_id in &members {
+            if record_history {
+                let (_, index, _) = self.workspace_window_index_len(workspace_id)?;
+                self.capture_closed_workspace(workspace_id, index);
+            }
             self.remove_workspace(workspace_id);
         }
         self.ensure_window_has_workspace(&window_id)?;
