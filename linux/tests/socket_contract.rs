@@ -30283,6 +30283,13 @@ fn core_shortcuts_cover_workspace_layout_configuration_and_notifications() {
 fn right_sidebar_shortcuts_toggle_focus_and_switch_modes_in_sidebar_context() {
     let server = start_server();
 
+    let shown = rpc(
+        &server.socket,
+        "debug.shortcut.simulate",
+        json!({"combo": "ctrl+alt+b"}),
+    );
+    assert_eq!(shown["visible"], true);
+
     let hidden = rpc(
         &server.socket,
         "debug.shortcut.simulate",
@@ -33589,6 +33596,59 @@ fn remote_tmux_live_control_stream_seeds_output_and_routes_input() {
     assert!(ssh_log.contains("control: new-window -t ops"));
     assert!(ssh_log.contains("control: rename-window -t @0 'renamed main'"));
     assert!(ssh_log.contains("control: kill-window -t @1"));
+
+    let history_before = rpc(&server.socket, "history.list", json!({}));
+    let closed = rpc(
+        &server.socket,
+        "surface.close",
+        json!({"surface_id": &surface_id}),
+    );
+    assert_eq!(closed["workspace_closed"], true);
+    assert_eq!(closed["routed_to_remote_tmux"], true);
+    let history = rpc(&server.socket, "history.list", json!({}));
+    assert_eq!(
+        history["entries"].as_array().unwrap().len(),
+        history_before["entries"].as_array().unwrap().len() + 1,
+        "closing the last remote pane must record its workspace"
+    );
+    let reopened = rpc(&server.socket, "history.reopen_closed", json!({}));
+    assert_eq!(reopened["handled"], true);
+    let restored = rpc(
+        &server.socket,
+        "surface.list",
+        json!({"workspace_id": reopened["workspace_id"]}),
+    );
+    assert_eq!(restored["surfaces"].as_array().unwrap().len(), 1);
+    let text = rpc(
+        &server.socket,
+        "surface.read_text",
+        json!({"surface_id": restored["surfaces"][0]["surface_id"], "raw": true}),
+    );
+    assert!(text["text"].as_str().unwrap().contains("seed-pane-0"));
+
+    let work_surfaces = rpc(
+        &server.socket,
+        "surface.list",
+        json!({"workspace_id": &work_workspace_id}),
+    );
+    for surface in work_surfaces["surfaces"].as_array().unwrap() {
+        if surface["surface_id"] != main_surface_id {
+            rpc(
+                &server.socket,
+                "surface.close",
+                json!({"surface_id": surface["surface_id"], "record_history": false}),
+            );
+        }
+    }
+    let closed = rpc(
+        &server.socket,
+        "surface.close",
+        json!({"surface_id": &main_surface_id, "record_history": false}),
+    );
+    assert_eq!(closed["workspace_closed"], true);
+    assert_eq!(closed["routed_to_remote_tmux"], true);
+    let history_after = rpc(&server.socket, "history.list", json!({}));
+    assert_eq!(history_after["entries"], history_before["entries"]);
 }
 
 #[test]
@@ -34224,7 +34284,7 @@ fn split_resizes_existing_and_new_terminal_ptys_evenly() {
 }
 
 #[test]
-fn surface_send_key_ctrl_d_plus_alias_closes_split_pane() {
+fn surface_send_key_ctrl_d_reaches_running_program_without_closing_split() {
     let server = start_server();
     let created = rpc(
         &server.socket,
@@ -34235,7 +34295,11 @@ fn surface_send_key_ctrl_d_plus_alias_closes_split_pane() {
     let split = rpc(
         &server.socket,
         "surface.split",
-        json!({"workspace_id": workspace_id, "direction": "right"}),
+        json!({
+            "workspace_id": workspace_id,
+            "direction": "right",
+            "command": "printf 'CMUX_EOT_READY\n'; cat; printf 'CMUX_EOT_RECEIVED\n'; sleep 30"
+        }),
     );
     let right_surface = split["surface_id"].as_str().unwrap();
 
@@ -34246,18 +34310,38 @@ fn surface_send_key_ctrl_d_plus_alias_closes_split_pane() {
     );
     assert_eq!(before["panes"].as_array().unwrap().len(), 2);
 
+    let wait_for = |marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = rpc(
+                &server.socket,
+                "surface.read_text",
+                json!({"surface_id": right_surface}),
+            );
+            if text["text"].as_str().unwrap_or_default().contains(marker) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "terminal did not produce {marker}: {text}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for("CMUX_EOT_READY");
     rpc(
         &server.socket,
         "surface.send_key",
         json!({"workspace_id": workspace_id, "surface_id": right_surface, "key": "ctrl+d"}),
     );
 
+    wait_for("CMUX_EOT_RECEIVED");
     let after = rpc(
         &server.socket,
         "pane.list",
         json!({"workspace_id": workspace_id}),
     );
-    assert_eq!(after["panes"].as_array().unwrap().len(), 1);
+    assert_eq!(after["panes"].as_array().unwrap().len(), 2);
 }
 
 #[test]
@@ -34841,7 +34925,7 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
         &[],
     );
     assert_eq!(initial["window_id"], current_window);
-    assert_eq!(initial["visible"], true);
+    assert_eq!(initial["visible"], false);
     assert_eq!(initial["mode"], "files");
 
     let hide = cli(&server.socket, &["right-sidebar", "hide"]);
@@ -34895,6 +34979,7 @@ fn cli_right_sidebar_namespace_controls_visibility_and_mode() {
 #[test]
 fn socket_left_sidebar_controls_visibility_without_changing_right_sidebar() {
     let server = start_server();
+    rpc(&server.socket, "sidebar.right", json!({"action": "show"}));
     let initial = rpc(&server.socket, "sidebar.left", json!({"action": "mode"}));
     assert_eq!(initial["visible"], true);
 

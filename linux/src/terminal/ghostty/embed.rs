@@ -3777,7 +3777,7 @@ mod tests {
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let loaded = ghostty_load_symbol_names_from_source(include_str!("ghostty_embed.rs"));
+        let loaded = ghostty_load_symbol_names_from_source(include_str!("embed.rs"));
 
         assert_eq!(
             loaded, required,
@@ -3787,7 +3787,7 @@ mod tests {
 
     #[test]
     fn gtk_ghostty_shared_app_keeps_callback_userdata_alive_through_app_drop() {
-        let source = include_str!("gtk_ghostty.rs");
+        let source = include_str!("gtk_host.rs");
         let fields = source
             .split_once("struct GtkGhosttyApp {")
             .and_then(|(_, body)| body.split_once("\n}\n\nimpl GtkGhosttyApp"))
@@ -3813,7 +3813,7 @@ mod tests {
 
     #[test]
     fn gtk_ghostty_host_rotates_tokens_after_surface_teardown() {
-        let source = include_str!("gtk_ghostty.rs");
+        let source = include_str!("gtk_host.rs");
         assert_eq!(
             source
                 .matches("rotate_ghostty_callback_registration(self.callbacks.as_mut());")

@@ -942,7 +942,7 @@ fn create_gtk_window_host(
         window.set_titlebar(Some(titlebar));
     }
     window.set_child(Some(&snapshot_view.root));
-    if ui_mode.is_next() {
+    {
         let responsive_view = snapshot_view.clone();
         let resize_connected = Rc::new(Cell::new(false));
         window.connect_map(move |window| {
@@ -1087,7 +1087,7 @@ fn refresh_gtk_window_host(
         host.last_header_rebuild_key = header_rebuild_key;
     }
     let overlay_rebuild_key = shell::overlay_rebuild_key(snapshot);
-    if ui_mode.is_next() && host.last_overlay_rebuild_key != overlay_rebuild_key {
+    if host.last_overlay_rebuild_key != overlay_rebuild_key {
         let window_id = model_window_id(row).unwrap_or_default();
         shell::refresh_overlay(&host.snapshot_view, snapshot, app_state, window_id);
         host.last_overlay_rebuild_key = overlay_rebuild_key;
@@ -1111,9 +1111,12 @@ fn refresh_gtk_window_host(
         fallback_output_generations != host.last_fallback_terminal_output_generations;
 
     if host.last_left_rebuild_key != rebuild_keys.left && !left_rebuild_suppressed {
-        replace_snapshot_slot_child(
+        refresh_workspace_sidebar(
             &host.snapshot_view.left_slot,
-            Some(workspace_sidebar(snapshot, app_state, ui_mode).upcast()),
+            &host.last_left_rebuild_key,
+            snapshot,
+            app_state,
+            ui_mode,
         );
         if ui_mode.is_next() {
             let compact = host
@@ -1125,6 +1128,7 @@ fn refresh_gtk_window_host(
         host.last_left_rebuild_key = rebuild_keys.left;
     }
     shell::set_left_sidebar_visible(&host.snapshot_view, left_sidebar_visible(snapshot));
+    shell::refresh_sidebar_widths(&host.snapshot_view, snapshot);
 
     let pane_chrome_rebuild_keys = snapshot_pane_chrome_rebuild_keys(snapshot);
     if host.last_pane_chrome_rebuild_keys != pane_chrome_rebuild_keys {
@@ -1219,6 +1223,7 @@ fn refresh_gtk_window_host(
             .then(|| app_chrome_sidebar(snapshot, app_state, ui_mode).upcast());
         replace_snapshot_slot_child(&host.snapshot_view.right_slot, sidebar);
         shell::set_right_sidebar_visible(&host.snapshot_view, right_sidebar_visible(snapshot));
+        shell::refresh_sidebar_widths(&host.snapshot_view, snapshot);
         host.last_right_rebuild_key = rebuild_keys.right;
     }
 
@@ -1363,6 +1368,24 @@ fn close_confirmation_prompts(snapshot: &Value) -> Vec<GtkCloseConfirmationPromp
         .into_iter()
         .flatten()
         .filter_map(|request| {
+            let kind = value_str(request, "kind", "");
+            if matches!(kind, "workspace" | "workspace-batch") {
+                return Some(GtkCloseConfirmationPrompt {
+                    id: value_string(request, "id")?,
+                    title: strings::text(if kind == "workspace" {
+                        "close.workspace_title"
+                    } else {
+                        "close.workspaces_title"
+                    }),
+                    message: strings::text(if kind == "workspace" {
+                        "close.workspace_message"
+                    } else {
+                        "close.workspaces_message"
+                    }),
+                    accept_label: strings::text("close.accept"),
+                    cancel_label: strings::text("close.cancel"),
+                });
+            }
             Some(GtkCloseConfirmationPrompt {
                 id: value_string(request, "id")?,
                 title: value_str(request, "title", "Confirm close").to_string(),
@@ -1460,7 +1483,7 @@ fn model_window_rows(app_state: &Arc<Mutex<AppState>>) -> Vec<Value> {
     let Ok(mut app) = app_state.lock() else {
         return Vec::new();
     };
-    app.handle("window.list", &json!({}))
+    app.handle_ui("window.list", &json!({}))
         .ok()
         .and_then(|value| value.get("windows").and_then(Value::as_array).cloned())
         .unwrap_or_default()
@@ -1490,7 +1513,7 @@ fn model_window_fullscreen(window: &Value) -> bool {
 
 fn present_current_gtk_window(app_state: &Arc<Mutex<AppState>>, hosts: &GtkWindowHosts) {
     let window_id = app_state.lock().ok().and_then(|mut app| {
-        app.handle("window.current", &json!({}))
+        app.handle_ui("window.current", &json!({}))
             .ok()
             .and_then(|value| {
                 value
@@ -2396,6 +2419,9 @@ fn snapshot_right_rebuild_key(snapshot: &Value) -> Value {
         .get("right_sidebar")
         .cloned()
         .unwrap_or(Value::Null);
+    if let Some(state) = state.as_object_mut() {
+        state.remove("width");
+    }
     let feed_items = state
         .as_object_mut()
         .and_then(|state| state.remove("feed_items"))
@@ -2475,11 +2501,27 @@ fn workspace_sidebar(
     app_state: &Arc<Mutex<AppState>>,
     ui_mode: GtkUiMode,
 ) -> gtk::Box {
-    let width = if ui_mode.is_next() {
-        metrics::SIDEBAR_WIDTH
-    } else {
-        260
-    };
+    let width = snapshot
+        .pointer("/left_sidebar/width")
+        .and_then(Value::as_i64)
+        .map(|width| width.clamp(i64::from(metrics::SIDEBAR_WIDTH), 4096) as i32)
+        .unwrap_or(metrics::SIDEBAR_WIDTH);
+    let sidebar = workspace_sidebar_content(snapshot, app_state, ui_mode);
+    let frame = bounded_workspace_sidebar(sidebar.clone(), width);
+    let scroller = frame
+        .first_child()
+        .unwrap()
+        .downcast::<gtk::ScrolledWindow>()
+        .unwrap();
+    reveal_selected_workspace(&scroller, &sidebar);
+    frame
+}
+
+fn workspace_sidebar_content(
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    ui_mode: GtkUiMode,
+) -> gtk::Box {
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
     sidebar.add_css_class("cmux-sidebar");
     sidebar.set_hexpand(true);
@@ -2500,7 +2542,7 @@ fn workspace_sidebar(
         })
     {
         append_custom_sidebar(&sidebar, custom_sidebar, app_state);
-        return bounded_workspace_sidebar(sidebar, width);
+        return sidebar;
     }
 
     let drag_state = Rc::new(RefCell::new(GtkWorkspaceDragState::default()));
@@ -2528,7 +2570,114 @@ fn workspace_sidebar(
         }
     }
 
-    bounded_workspace_sidebar(sidebar, width)
+    sidebar
+}
+
+fn workspace_sidebar_navigation_key(
+    snapshot: &Value,
+) -> Vec<(GtkWorkspaceSidebarRowKind, String, bool)> {
+    workspace_sidebar_rows(snapshot)
+        .into_iter()
+        .map(|row| (row.kind, row.target, row.selected))
+        .collect()
+}
+
+fn refresh_workspace_sidebar(
+    slot: &gtk::Box,
+    previous_snapshot: &Value,
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+    ui_mode: GtkUiMode,
+) {
+    let scroller = slot
+        .first_child()
+        .and_then(|frame| frame.first_child())
+        .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok());
+    let Some(scroller) = scroller else {
+        replace_snapshot_slot_child(
+            slot,
+            Some(workspace_sidebar(snapshot, app_state, ui_mode).upcast()),
+        );
+        return;
+    };
+    let scroll_position = scroller.vadjustment().value();
+    let sidebar = workspace_sidebar_content(snapshot, app_state, ui_mode);
+    if let Some(viewport) = scroller
+        .child()
+        .and_then(|child| child.downcast::<gtk::Viewport>().ok())
+    {
+        viewport.set_child(Some(&sidebar));
+    } else {
+        scroller.set_child(Some(&sidebar));
+    }
+    if workspace_sidebar_navigation_key(previous_snapshot)
+        != workspace_sidebar_navigation_key(snapshot)
+    {
+        reveal_selected_workspace(&scroller, &sidebar);
+    } else {
+        let adjustment = scroller.vadjustment().downgrade();
+        after_widget_layout(sidebar.upcast_ref(), move |_| {
+            if let Some(adjustment) = adjustment.upgrade() {
+                adjustment.set_value(scroll_position);
+            }
+        });
+    }
+}
+
+fn reveal_selected_workspace(scroller: &gtk::ScrolledWindow, sidebar: &gtk::Box) {
+    if let Some(selected) =
+        widget_descendant_with_css_class(sidebar.upcast_ref(), "cmux-workspace-selected")
+    {
+        reveal_scrolled_child(
+            scroller,
+            sidebar.upcast_ref(),
+            &selected,
+            gtk::Orientation::Vertical,
+        );
+    }
+}
+
+fn reveal_scrolled_child(
+    scroller: &gtk::ScrolledWindow,
+    content: &gtk::Widget,
+    child: &gtk::Widget,
+    orientation: gtk::Orientation,
+) {
+    let scroller = scroller.downgrade();
+    let child = child.downgrade();
+    after_widget_layout(content, move |content| {
+        if let (Some(scroller), Some(child)) = (scroller.upgrade(), child.upgrade()) {
+            if let Some(bounds) = child.compute_bounds(content) {
+                let (adjustment, start, size) = if orientation == gtk::Orientation::Horizontal {
+                    (scroller.hadjustment(), bounds.x(), bounds.width())
+                } else {
+                    (scroller.vadjustment(), bounds.y(), bounds.height())
+                };
+                let start = f64::from(start);
+                let end = start + f64::from(size);
+                let value = adjustment.value();
+                if start < value {
+                    adjustment.set_value(start);
+                } else if end > value + adjustment.page_size() {
+                    adjustment.set_value(start.min(end - adjustment.page_size()));
+                }
+            }
+        }
+    });
+}
+
+fn after_widget_layout(widget: &gtk::Widget, action: impl Fn(&gtk::Widget) + 'static) {
+    let waited_for_layout = Cell::new(false);
+    widget.add_tick_callback(move |widget, _| {
+        // Tick callbacks precede layout. The following frame has the new row allocation.
+        if !waited_for_layout.replace(true) {
+            return glib::ControlFlow::Continue;
+        }
+        if widget.width() > 0 && widget.height() > 0 {
+            action(widget);
+        }
+        glib::ControlFlow::Break
+    });
 }
 
 fn bounded_workspace_sidebar(sidebar: gtk::Box, width: i32) -> gtk::Box {
@@ -3813,7 +3962,7 @@ fn workspace_sidebar_row(
             call_app(
                 &app_state,
                 "workspace.close",
-                json!({"workspace_id": target}),
+                json!({"workspace_id": target, "source": "tab_button"}),
             );
         });
         row_container.append(&close);
@@ -5347,6 +5496,7 @@ fn replace_browser_omnibar_suggestions(
     for suggestion in &next {
         let row = gtk::ListBoxRow::new();
         row.add_css_class("cmux-browser-suggestion");
+        row.set_focusable(false);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 1);
         let title_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let title = gtk::Label::new(Some(&suggestion.title));
@@ -5598,6 +5748,7 @@ fn ensure_browser_surface_controls(
                     }
                 });
                 root.append(&back);
+                root.append(&forward);
                 root.append(&reload);
 
                 let location = gtk::Entry::new();
@@ -5636,7 +5787,8 @@ fn ensure_browser_surface_controls(
                 }
 
                 let omnibar_popover = gtk::Popover::new();
-                omnibar_popover.set_autohide(true);
+                // Address completion stays nonmodal so typing continues in GtkText.
+                omnibar_popover.set_autohide(false);
                 omnibar_popover.set_has_arrow(false);
                 parent_context_popover(&omnibar_popover, &location);
                 let omnibar_scroll = gtk::ScrolledWindow::new();
@@ -5645,6 +5797,7 @@ fn ensure_browser_surface_controls(
                 omnibar_scroll.set_max_content_height(320);
                 let omnibar_list = gtk::ListBox::new();
                 omnibar_list.add_css_class("cmux-browser-suggestions");
+                omnibar_list.set_focusable(false);
                 omnibar_list.set_selection_mode(gtk::SelectionMode::Single);
                 omnibar_list.set_activate_on_single_click(true);
                 omnibar_scroll.set_child(Some(&omnibar_list));
@@ -5702,7 +5855,7 @@ fn ensure_browser_surface_controls(
                         let Some(popover) = popover.upgrade() else {
                             return;
                         };
-                        if suppressed.get() || !location.has_focus() {
+                        if suppressed.get() || !widget_contains_focus(&location) {
                             popover.popdown();
                             return;
                         }
@@ -5755,7 +5908,7 @@ fn ensure_browser_surface_controls(
                         let remote_generation = Arc::clone(&remote_generation);
                         glib::timeout_add_local(Duration::from_millis(50), move || {
                             if remote_generation.load(Ordering::Relaxed) != generation
-                                || !location.has_focus()
+                                || !widget_contains_focus(&location)
                                 || location.text().as_str() != query
                             {
                                 return glib::ControlFlow::Break;
@@ -5796,21 +5949,19 @@ fn ensure_browser_surface_controls(
                 }
                 {
                     let refresh = Rc::clone(&refresh_suggestions);
-                    let popover = omnibar_popover.clone();
-                    let browser_chrome_focused = Rc::clone(&browser_chrome_focused);
-                    let location_focus_acquired = Rc::new(Cell::new(false));
-                    location.connect_notify_local(Some("has-focus"), move |entry, _| {
-                        if entry.has_focus() {
-                            location_focus_acquired.set(true);
-                            browser_chrome_focused.set(true);
-                            refresh();
-                        } else {
-                            if location_focus_acquired.replace(false) {
-                                browser_chrome_focused.set(false);
-                            }
-                            popover.popdown();
-                        }
+                    let entered_chrome = Rc::clone(&browser_chrome_focused);
+                    let focus = gtk::EventControllerFocus::new();
+                    focus.connect_enter(move |_| {
+                        entered_chrome.set(true);
+                        refresh();
                     });
+                    let popover = omnibar_popover.clone();
+                    let exited_chrome = Rc::clone(&browser_chrome_focused);
+                    focus.connect_leave(move |_| {
+                        exited_chrome.set(false);
+                        popover.popdown();
+                    });
+                    location.add_controller(focus);
                 }
 
                 {
@@ -5833,6 +5984,7 @@ fn ensure_browser_surface_controls(
                     });
                 }
 
+                let omnibar_composing = native_editable_composing(&location);
                 let omnibar_keys = gtk::EventControllerKey::new();
                 omnibar_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
                 {
@@ -5849,6 +6001,9 @@ fn ensure_browser_surface_controls(
                     let ghostty_widgets = Rc::clone(ghostty_widgets);
                     let browser_controls = Rc::clone(browser_controls);
                     omnibar_keys.connect_key_pressed(move |_, keyval, _, modifiers| {
+                        if omnibar_composing.get() {
+                            return glib::Propagation::Proceed;
+                        }
                         if let Some(combo) = omnibar_pane_focus_combo(keyval, modifiers) {
                             let previous_surface_id = app_state
                                 .lock()
@@ -5979,14 +6134,6 @@ fn ensure_browser_surface_controls(
                 browser_tools_content.set_margin_bottom(10);
                 browser_tools_content.set_margin_start(10);
                 browser_tools_content.set_margin_end(10);
-
-                let forward_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                let forward_label = label("Forward", "cmux-browser-tools-label");
-                forward_label.set_hexpand(true);
-                forward_label.set_xalign(0.0);
-                forward_row.append(&forward_label);
-                forward_row.append(&forward);
-                browser_tools_content.append(&forward_row);
 
                 let profile_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 let profile_label = label("Profile", "cmux-browser-tools-label");
@@ -6150,12 +6297,16 @@ fn ensure_browser_surface_controls(
                 });
                 find_bar.append(&find_close);
 
+                let find_composing = native_editable_composing(&find_entry);
                 let find_keys = gtk::EventControllerKey::new();
                 find_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
                 let key_find_bar = find_bar.downgrade();
                 let key_web_view = web_view.as_ref().map(|view| view.downgrade());
                 let key_browser_chrome = Rc::clone(&browser_chrome_focused);
                 find_keys.connect_key_pressed(move |_, keyval, _, modifiers| {
+                    if find_composing.get() {
+                        return glib::Propagation::Proceed;
+                    }
                     let Some(view) = key_web_view.as_ref().and_then(|view| view.upgrade()) else {
                         return glib::Propagation::Proceed;
                     };
@@ -6250,7 +6401,9 @@ fn ensure_browser_surface_controls(
                 .is_some_and(crate::gtk_webkit::GtkWebKitView::can_go_forward),
     );
     let display_url = browser_omnibar_display_text(&state.url);
-    if !controls.location.has_focus() && controls.location.text().as_str() != display_url {
+    if !widget_contains_focus(&controls.location)
+        && controls.location.text().as_str() != display_url
+    {
         controls.location.set_text(display_url);
     }
     if let Some(view) = &controls.web_view {
@@ -6528,6 +6681,16 @@ fn update_terminal_search_query(app_state: &Arc<Mutex<AppState>>, surface_id: &s
     }
 }
 
+// Capture handlers must leave conversion, candidate navigation and commit keys to GTK.
+fn native_editable_composing(entry: &impl IsA<gtk::Editable>) -> Rc<Cell<bool>> {
+    let composing = Rc::new(Cell::new(false));
+    if let Some(text) = entry.delegate().and_downcast::<gtk::Text>() {
+        let preedit = Rc::clone(&composing);
+        text.connect_preedit_changed(move |_, text| preedit.set(!text.is_empty()));
+    }
+    composing
+}
+
 fn ensure_terminal_search_controls(
     state: &GtkTerminalSearchState,
     app_state: &Arc<Mutex<AppState>>,
@@ -6587,10 +6750,14 @@ fn ensure_terminal_search_controls(
                 });
                 root.append(&close);
 
+                let composing = native_editable_composing(&entry);
                 let key = gtk::EventControllerKey::new();
                 key.set_propagation_phase(gtk::PropagationPhase::Capture);
                 let key_ghostty = ghostty.clone();
                 key.connect_key_pressed(move |_, keyval, _, modifiers| {
+                    if composing.get() {
+                        return glib::Propagation::Proceed;
+                    }
                     let action = if keyval == gdk::Key::Escape {
                         Some("end_search")
                     } else if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
@@ -6766,12 +6933,6 @@ fn surface_area(
         );
         main.append(&label(&title, "cmux-heading"));
         main.append(&toolbar(snapshot, app_state));
-        if let Some(palette) = command_palette_panel(snapshot) {
-            main.append(&palette);
-        }
-        if let Some(shortcuts) = shortcut_help_panel(snapshot, None) {
-            main.append(&shortcuts);
-        }
     }
 
     let views = snapshot
@@ -8914,20 +9075,17 @@ fn selected_workspace_group_target(snapshot: &Value) -> Option<String> {
 fn app_chrome_sidebar(
     snapshot: &Value,
     app_state: &Arc<Mutex<AppState>>,
-    ui_mode: GtkUiMode,
+    _ui_mode: GtkUiMode,
 ) -> gtk::Box {
     let chrome = gtk::Box::new(gtk::Orientation::Vertical, 10);
     chrome.add_css_class("cmux-chrome");
     chrome.set_focusable(true);
-    let configured_width = config::sidebar_settings()
-        .right_max_width
-        .unwrap_or(if ui_mode.is_next() {
-            metrics::RIGHT_SIDEBAR_WIDTH as f64
-        } else {
-            300.0
-        })
-        .clamp(276.0, 4096.0);
-    chrome.set_width_request(configured_width.round() as i32);
+    chrome.set_hexpand(false);
+    let configured_width = snapshot
+        .pointer("/right_sidebar/width")
+        .and_then(Value::as_i64)
+        .map(|width| width.clamp(i64::from(metrics::MIN_RIGHT_SIDEBAR_WIDTH), 4096) as i32)
+        .unwrap_or(metrics::RIGHT_SIDEBAR_WIDTH);
     chrome.set_vexpand(true);
 
     let mode = right_sidebar_mode(snapshot);
@@ -8942,7 +9100,7 @@ fn app_chrome_sidebar(
         "dock" => append_right_sidebar_dock(&chrome, snapshot, app_state),
         _ => append_right_sidebar_files(&chrome, sidebar, app_state, false),
     }
-    chrome
+    bounded_workspace_sidebar(chrome, configured_width)
 }
 
 fn right_sidebar_visible(snapshot: &Value) -> bool {
@@ -8950,7 +9108,7 @@ fn right_sidebar_visible(snapshot: &Value) -> bool {
         .get("right_sidebar")
         .and_then(|sidebar| sidebar.get("visible"))
         .and_then(Value::as_bool)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn left_sidebar_visible(snapshot: &Value) -> bool {
@@ -9381,32 +9539,410 @@ fn append_notification_section(
     }
 }
 
-fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
-    let palette = snapshot.get("command_palette")?;
-    if !palette
-        .get("visible")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+fn accept_open_directory(
+    app_state: &Arc<Mutex<AppState>>,
+    window_id: &str,
+    response: gtk::ResponseType,
+    file: Option<gio::File>,
+) -> bool {
+    if response != gtk::ResponseType::Accept {
+        return false;
+    }
+    let Some(path) = file
+        .and_then(|file| file.path())
+        .filter(|path| path.is_dir())
+    else {
+        return false;
+    };
+    call_app(
+        app_state,
+        "workspace.create",
+        json!({
+            "window_id": window_id, "cwd": path.to_string_lossy(), "focus": true
+        }),
+    )
+}
+
+fn open_directory_picker(
+    parent: &gtk::Window,
+    app_state: &Arc<Mutex<AppState>>,
+    result: &Value,
+) -> Option<gtk::FileChooserNative> {
+    if result.get("native_action").and_then(Value::as_str) != Some("open_directory") {
         return None;
     }
+    let window_id = result.get("window_id")?.as_str()?.to_string();
+    let dialog = gtk::FileChooserNative::builder()
+        .title(strings::text("directory.open_title"))
+        .accept_label(strings::text("directory.open"))
+        .cancel_label(strings::text("directory.cancel"))
+        .action(gtk::FileChooserAction::SelectFolder)
+        .select_multiple(false)
+        .modal(true)
+        .transient_for(parent)
+        .build();
+    if let Some(cwd) = result
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| Path::new(cwd).is_dir())
+    {
+        let _ = dialog.set_current_folder(Some(&gio::File::for_path(cwd)));
+    }
+    let app_state = Arc::clone(app_state);
+    dialog.connect_response(move |dialog, response| {
+        accept_open_directory(&app_state, &window_id, response, dialog.file());
+    });
+    Some(dialog)
+}
 
+type NativeDirectoryPickerState = Rc<RefCell<Option<gtk::FileChooserNative>>>;
+
+fn native_directory_picker_state(parent: &gtk::Window) -> NativeDirectoryPickerState {
+    let state = Rc::new(RefCell::new(None::<gtk::FileChooserNative>));
+    let weak_state = Rc::downgrade(&state);
+    parent.connect_unrealize(move |_| {
+        if let Some(state) = weak_state.upgrade() {
+            let dialog = state.borrow_mut().take();
+            if let Some(dialog) = dialog {
+                dialog.destroy();
+            }
+        }
+    });
+    state
+}
+
+fn apply_native_dialog_result(
+    parent: &gtk::Window,
+    app_state: &Arc<Mutex<AppState>>,
+    state: &NativeDirectoryPickerState,
+    result: &Value,
+) {
+    if result.get("native_action").and_then(Value::as_str) != Some("open_directory") {
+        return;
+    }
+    let existing = state.borrow().clone();
+    if let Some(dialog) = existing {
+        dialog.show();
+        return;
+    }
+    let Some(dialog) = open_directory_picker(parent, app_state, result) else {
+        return;
+    };
+    let weak_state = Rc::downgrade(state);
+    dialog.connect_response(move |dialog, _| {
+        if let Some(state) = weak_state.upgrade() {
+            let is_current = state.borrow().as_ref() == Some(dialog);
+            if is_current {
+                state.borrow_mut().take();
+            }
+        }
+        dialog.destroy();
+    });
+    // Native dialogs are not retained by GTK when shown. The owning window's
+    // state keeps this chooser alive until a response or window destruction.
+    *state.borrow_mut() = Some(dialog.clone());
+    let weak_dialog = dialog.downgrade();
+    glib::idle_add_local_once(move || {
+        if let Some(dialog) = weak_dialog.upgrade() {
+            dialog.show();
+        }
+    });
+}
+
+fn call_palette_action(
+    app_state: &Arc<Mutex<AppState>>,
+    method: &str,
+    params: Value,
+    widget: &gtk::Widget,
+) -> Option<Value> {
+    let previous_surface = app_state
+        .lock()
+        .ok()
+        .and_then(|app| app.current_input_surface_id());
+    let result = call_app_value(app_state, method, params)?;
+    apply_clipboard_shortcut_result(&result);
+    let payload = json!({"result": result, "previous_surface": previous_surface})
+        .to_string()
+        .to_variant();
+    let _ = widget.activate_action("palette.result", Some(&payload));
+    Some(result)
+}
+
+fn command_palette_panel(snapshot: &Value, app_state: &Arc<Mutex<AppState>>) -> Option<gtk::Box> {
+    let palette = snapshot.get("command_palette")?;
+    if palette.get("visible").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let mode = value_str(palette, "mode", "commands");
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.add_css_class("cmux-palette");
-    let query = value_str(palette, "query", "");
-    let mode = value_str(palette, "mode", "commands");
-    let heading = if query.is_empty() {
-        strings::text(if mode == "global_search" {
+    panel.set_widget_name(mode);
+    let window_id = snapshot
+        .pointer("/window/window_id")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let text = value_str(palette, "input_text", value_str(palette, "query", ""));
+    let composing = Rc::new(Cell::new(false));
+    let input: gtk::Widget = if mode == "workspace_description_input" {
+        let view = gtk::TextView::new();
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        view.set_height_request(80);
+        view.buffer().set_text(text);
+        view.buffer().set_enable_undo(true);
+        let state = Arc::clone(app_state);
+        let target = window_id.clone();
+        let input_mode = mode.to_string();
+        view.buffer().connect_changed(move |buffer| {
+            call_app(
+                &state,
+                "debug.command_palette.input.set",
+                json!({
+                    "window_id": target, "mode": input_mode,
+                    "text": buffer.text(&buffer.start_iter(), &buffer.end_iter(), true).as_str()
+                }),
+            );
+        });
+        let preedit = Rc::clone(&composing);
+        view.connect_preedit_changed(move |view, text| {
+            preedit.set(!text.is_empty());
+            if text.is_empty() {
+                view.remove_css_class("cmux-palette-composing");
+            } else {
+                view.add_css_class("cmux-palette-composing");
+            }
+        });
+        view.upcast()
+    } else {
+        let entry = gtk::Entry::new();
+        entry.set_text(text);
+        entry.set_placeholder_text(Some(&strings::text(if mode == "global_search" {
             "palette.search_placeholder"
         } else {
             "palette.command_placeholder"
-        })
-    } else {
-        format!("> {query}")
+        })));
+        entry.set_position(-1);
+        if palette.get("select_all_active").and_then(Value::as_bool) == Some(true) {
+            entry.select_region(0, -1);
+        }
+        let state = Arc::clone(app_state);
+        let target = window_id.clone();
+        let input_mode = mode.to_string();
+        entry.connect_changed(move |entry| {
+            call_app(
+                &state,
+                "debug.command_palette.input.set",
+                json!({
+                    "window_id": target, "mode": input_mode, "text": entry.text().as_str()
+                }),
+            );
+        });
+        let state = Arc::clone(app_state);
+        let target = window_id.clone();
+        entry.connect_activate(move |entry| {
+            call_palette_action(
+                &state,
+                "debug.command_palette.input.key",
+                json!({"window_id": target, "key": "enter"}),
+                entry.upcast_ref(),
+            );
+        });
+        let preedit = Rc::clone(&composing);
+        if let Some(text) = entry.delegate().and_downcast::<gtk::Text>() {
+            text.set_enable_undo(true);
+            let weak_entry = entry.downgrade();
+            text.connect_preedit_changed(move |_, text| {
+                preedit.set(!text.is_empty());
+                if let Some(entry) = weak_entry.upgrade() {
+                    if text.is_empty() {
+                        entry.remove_css_class("cmux-palette-composing");
+                    } else {
+                        entry.add_css_class("cmux-palette-composing");
+                    }
+                }
+            });
+        }
+        entry.upcast()
     };
-    let query_label = label(&heading, "cmux-palette-query");
-    query_label.set_xalign(0.0);
-    panel.append(&query_label);
+    input.add_css_class("cmux-palette-input");
+    input.add_css_class("cmux-palette-query");
+    input.set_hexpand(true);
+    panel.append(&input);
+
+    // Keep the editor attached while results change so GTK owns caret, selection,
+    // clipboard, undo and input-method composition for the entire palette session.
+    let previous_focus = Rc::new(RefCell::new(None::<glib::WeakRef<gtk::Widget>>));
+    let result_action = gio::SimpleAction::new("result", Some(glib::VariantTy::STRING));
+    let result_previous_focus = Rc::clone(&previous_focus);
+    let result_state = Arc::clone(app_state);
+    let weak_panel = panel.downgrade();
+    result_action.connect_activate(move |_, parameter| {
+        if let Some(payload) = parameter
+            .and_then(|value| value.str())
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        {
+            let previous = result_previous_focus
+                .borrow()
+                .as_ref()
+                .and_then(|weak| weak.upgrade());
+            apply_document_shortcut_result(&result_state, previous.as_ref(), &payload["result"]);
+        }
+        if let Some(panel) = weak_panel.upgrade() {
+            let _ = panel.activate_action("win.cmux-palette-result", parameter);
+        }
+    });
+    let action_group = gio::SimpleActionGroup::new();
+    action_group.add_action(&result_action);
+    panel.insert_action_group("palette", Some(&action_group));
+    let previous = Rc::clone(&previous_focus);
+    input.connect_map(move |input| {
+        if let Some(window) = input.root().and_downcast::<gtk::Window>() {
+            *previous.borrow_mut() = gtk::prelude::GtkWindowExt::focus(&window)
+                .filter(|focused| !widget_is_or_descendant_of(focused, input))
+                .map(|focused| focused.downgrade());
+        }
+        if let Some(entry) = input.downcast_ref::<gtk::Entry>() {
+            entry.grab_focus_without_selecting();
+        } else {
+            input.grab_focus();
+        }
+    });
+    let restore_state = Arc::clone(app_state);
+    let restore_surface = app_state
+        .lock()
+        .ok()
+        .and_then(|app| app.current_input_surface_id());
+    input.connect_unmap(move |_| {
+        if restore_state
+            .lock()
+            .ok()
+            .and_then(|app| app.current_input_surface_id())
+            != restore_surface
+        {
+            return;
+        }
+        if let Some(previous) = previous_focus
+            .borrow_mut()
+            .take()
+            .and_then(|weak| weak.upgrade())
+        {
+            if previous.is_mapped() {
+                previous.grab_focus();
+            }
+        }
+    });
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let state = Arc::clone(app_state);
+    let input_mode = mode.to_string();
+    let weak_input = input.downgrade();
+    keys.connect_key_pressed(move |_, key, _, modifiers| {
+        let Some(input) = weak_input.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        if composing.get() {
+            return glib::Propagation::Proceed;
+        }
+        let plain = !modifiers.intersects(
+            gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::META_MASK,
+        );
+        let action = if plain && key == gdk::Key::Escape {
+            Some("escape")
+        } else if plain
+            && input_mode == "workspace_description_input"
+            && matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+            && !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            Some("enter")
+        } else if plain
+            && key == gdk::Key::BackSpace
+            && input_mode == "rename_input"
+            && input
+                .downcast_ref::<gtk::Entry>()
+                .is_some_and(|entry| entry.text().is_empty())
+        {
+            Some("backspace")
+        } else if !command_palette_input_mode(&input_mode) && plain {
+            match key {
+                gdk::Key::Up => Some("up"),
+                gdk::Key::Down => Some("down"),
+                gdk::Key::Page_Up => Some("pageup"),
+                gdk::Key::Page_Down => Some("pagedown"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(action) = action {
+            call_palette_action(
+                &state,
+                "debug.command_palette.input.key",
+                json!({"window_id": window_id, "key": action}),
+                &input,
+            );
+            return glib::Propagation::Stop;
+        }
+        if !plain {
+            if let Some(combo) = app_shortcut_combo_for_key(key, modifiers) {
+                let handled = call_palette_action(
+                    &state,
+                    "debug.command_palette.input.key",
+                    json!({"window_id": window_id, "key": "shortcut", "combo": combo}),
+                    &input,
+                )
+                .is_some_and(|result| {
+                    result.get("handled").and_then(Value::as_bool) != Some(false)
+                });
+                if handled {
+                    return glib::Propagation::Stop;
+                }
+            }
+        }
+        glib::Propagation::Proceed
+    });
+    panel.add_controller(keys);
+    update_command_palette_panel(&panel, snapshot, app_state);
+    Some(panel)
+}
+
+fn update_command_palette_panel(
+    panel: &gtk::Box,
+    snapshot: &Value,
+    app_state: &Arc<Mutex<AppState>>,
+) -> bool {
+    let Some(palette) = snapshot.get("command_palette") else {
+        return false;
+    };
+    let mode = value_str(palette, "mode", "commands");
+    if palette.get("visible").and_then(Value::as_bool) != Some(true) || panel.widget_name() != mode
+    {
+        return false;
+    }
+    let Some(input) = panel.first_child() else {
+        return false;
+    };
+    let text = value_str(palette, "input_text", value_str(palette, "query", ""));
+    if let Some(entry) = input.downcast_ref::<gtk::Entry>() {
+        if !input.has_css_class("cmux-palette-composing") && entry.text().as_str() != text {
+            entry.set_text(text);
+            entry.set_position(-1);
+        }
+    } else if let Some(view) = input.downcast_ref::<gtk::TextView>() {
+        let buffer = view.buffer();
+        if !input.has_css_class("cmux-palette-composing")
+            && buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .as_str()
+                != text
+        {
+            buffer.set_text(text);
+        }
+    }
+    while let Some(child) = input.next_sibling() {
+        panel.remove(&child);
+    }
     let rows = gtk::Box::new(gtk::Orientation::Vertical, 2);
     rows.add_css_class("cmux-palette-results");
 
@@ -9414,6 +9950,7 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
         .get("selected_index")
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
+    let mut selected_row = None;
     for (index, result) in palette
         .get("results")
         .and_then(Value::as_array)
@@ -9431,11 +9968,13 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
             },
             8,
         );
-        row.add_css_class("cmux-palette-row");
-        if index == selected {
-            row.add_css_class("cmux-palette-selected");
-        }
-        let title = value_str(result, "title", "Command");
+        let localized_title = result
+            .get("title_key")
+            .and_then(Value::as_str)
+            .map(|key| strings::text(key).replace("{title}", value_str(result, "title_arg", "")));
+        let title = localized_title
+            .as_deref()
+            .unwrap_or_else(|| value_str(result, "title", "Command"));
         let kind = value_str(result, "trailing_label", "");
         row.append(&label(
             &if global_search_row && !kind.is_empty() {
@@ -9446,11 +9985,6 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
             "cmux-heading",
         ));
         if input_row {
-            let draft = label(value_str(result, "label", ""), "cmux-palette-input");
-            draft.set_wrap(true);
-            draft.set_selectable(true);
-            draft.set_xalign(0.0);
-            row.append(&draft);
             let input_hint = value_str(result, "input_hint", "");
             if !input_hint.is_empty() {
                 row.append(&label(input_hint, "cmux-muted"));
@@ -9474,21 +10008,56 @@ fn command_palette_panel(snapshot: &Value) -> Option<gtk::Box> {
             row.append(&label(&hint, "cmux-muted"));
         }
         row.set_hexpand(true);
-        rows.append(&row);
+        if !input_row {
+            let button = gtk::Button::builder().child(&row).build();
+            button.add_css_class("cmux-palette-row");
+            button.set_focus_on_click(false);
+            button.update_property(&[gtk::accessible::Property::Label(title)]);
+            if index == selected {
+                button.add_css_class("cmux-palette-selected");
+                selected_row = Some(button.clone().upcast::<gtk::Widget>());
+            }
+            let params = json!({
+                "window_id": snapshot.pointer("/window/window_id"),
+                "command_id": result.get("command_id")
+            });
+            let app_state = Arc::clone(app_state);
+            button.connect_clicked(move |button| {
+                call_palette_action(
+                    &app_state,
+                    "debug.command_palette.activate",
+                    params.clone(),
+                    button.upcast_ref(),
+                );
+            });
+            rows.append(&button);
+        } else {
+            row.add_css_class("cmux-palette-row");
+            rows.append(&row);
+        }
     }
     let scroll = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
         .min_content_height(120)
         .max_content_height(520)
+        .propagate_natural_height(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
         .child(&rows)
         .build();
     scroll.add_css_class("cmux-palette-scroll");
+    if let Some(selected_row) = selected_row {
+        reveal_scrolled_child(
+            &scroll,
+            rows.upcast_ref(),
+            &selected_row,
+            gtk::Orientation::Vertical,
+        );
+    }
     panel.append(&scroll);
 
-    Some(panel)
+    true
 }
 
 fn command_palette_input_mode(mode: &str) -> bool {
@@ -9898,14 +10467,27 @@ fn populate_pane_tab_strip(
         .unwrap_or(false);
     let (scroller, tab_row) = pane_tab_scroller(root);
     let mut existing = HashMap::new();
+    let mut previous_navigation = Vec::new();
     let mut child = tab_row.first_child();
     while let Some(widget) = child {
         child = widget.next_sibling();
         if let Ok(tab_widget) = widget.downcast::<gtk::Box>() {
+            previous_navigation.push((
+                tab_widget.widget_name().to_string(),
+                tab_widget
+                    .first_child()
+                    .is_some_and(|button| button.has_css_class("cmux-pane-tab-selected")),
+            ));
             existing.insert(tab_widget.widget_name().to_string(), tab_widget);
         }
     }
+    let navigation_changed = previous_navigation
+        != tabs
+            .iter()
+            .map(|tab| (tab.surface_id.clone(), tab.selected))
+            .collect::<Vec<_>>();
     let mut previous = None;
+    let mut selected_widget = None;
     for tab in &tabs {
         let tab_widget = existing.remove(&tab.surface_id).unwrap_or_else(|| {
             let tab_widget = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -9941,7 +10523,7 @@ fn populate_pane_tab_strip(
                 if call_app(
                     &app_state,
                     "surface.close",
-                    json!({"surface_id": surface_id, "source": "tab_middle_click"}),
+                    json!({"surface_id": surface_id, "source": "middle_click"}),
                 ) {
                     if let Some(local_refresh) = local_refresh.as_ref() {
                         local_refresh.schedule();
@@ -9960,10 +10542,23 @@ fn populate_pane_tab_strip(
             local_refresh,
         );
         tab_row.reorder_child_after(&tab_widget, previous.as_ref());
+        if tab.selected {
+            selected_widget = Some(tab_widget.clone());
+        }
         previous = Some(tab_widget);
     }
     for tab_widget in existing.into_values() {
         tab_row.remove(&tab_widget);
+    }
+    if navigation_changed {
+        if let Some(selected) = selected_widget {
+            reveal_scrolled_child(
+                &scroller,
+                tab_row.upcast_ref(),
+                selected.upcast_ref(),
+                gtk::Orientation::Horizontal,
+            );
+        }
     }
 
     let mut child = scroller.next_sibling();
@@ -9982,8 +10577,15 @@ fn populate_pane_tab_strip(
         button.update_property(&[gtk::accessible::Property::Label(&tooltip)]);
         let app_state = Arc::clone(app_state);
         let local_refresh = local_refresh.cloned();
+        let source_surface_id = surface_id_or_ref(view);
         button.connect_clicked(move |_| {
-            let handled = call_app(&app_state, method, params.clone());
+            let mut params = params.clone();
+            if let Some(inherited) = source_surface_id.as_deref().and_then(|source| {
+                crate::gtk_ghostty::inherited_terminal_options(source, method == "surface.split")
+            }) {
+                AppState::apply_embedded_terminal_inherited_options(&mut params, Some(&inherited));
+            }
+            let handled = call_app(&app_state, method, params);
             if handled {
                 if let Some(local_refresh) = local_refresh.as_ref() {
                     local_refresh.schedule();
@@ -12117,7 +12719,6 @@ fn settings_content(
     content.add_css_class("cmux-settings-content");
     content.set_hexpand(true);
     content.set_vexpand(true);
-    let snapshot = config::snapshot();
 
     match target {
         "account" => {
@@ -12207,10 +12808,11 @@ fn settings_content(
             ));
         }
         "general" | "app" => {
+            let snapshot = config::snapshot();
             content.append(&label("General", "cmux-heading"));
             content.append(&settings_row(
                 "cmux configuration",
-                &snapshot.cmux.path,
+                &config::primary_cmux_json_path_live().to_string_lossy(),
                 None::<&gtk::Widget>,
             ));
             content.append(&settings_row(
@@ -13675,7 +14277,7 @@ fn settings_content(
             );
             content.append(&settings_row(
                 "Shortcut reference",
-                &snapshot.cmux.path,
+                &config::primary_cmux_json_path_live().to_string_lossy(),
                 Some(&help),
             ));
             if let Some(rows) = call_app_value(app_state, "settings.shortcuts", json!({}))
@@ -13694,19 +14296,108 @@ fn settings_content(
         }
         "settingsJSON" => {
             content.append(&label("cmux.json", "cmux-heading"));
-            content.append(&label(&snapshot.cmux.path, "cmux-muted"));
-            let buffer = gtk::TextBuffer::new(None);
-            buffer.set_text(&snapshot.cmux.contents);
-            let text = gtk::TextView::with_buffer(&buffer);
-            text.set_editable(false);
-            text.set_monospace(true);
-            text.set_wrap_mode(gtk::WrapMode::None);
-            let scroll = gtk::ScrolledWindow::builder()
-                .hexpand(true)
-                .vexpand(true)
-                .child(&text)
-                .build();
-            content.append(&scroll);
+            let path = config::primary_cmux_json_path_live();
+            let open = gtk::Button::with_label(&strings::text("settings.config.open"));
+            open.add_css_class("cmux-settings-open-config");
+            open.set_tooltip_text(Some(&path.to_string_lossy()));
+            let status = label("", "cmux-muted");
+            status.set_wrap(true);
+            status.set_visible(false);
+            let open_status = status.clone();
+            open.connect_clicked(move |_| {
+                let file = match settings_config_file_for_editor(&path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        open_status.set_text(&error);
+                        open_status.set_visible(true);
+                        return;
+                    }
+                };
+                let status = open_status.clone();
+                gio::AppInfo::launch_default_for_uri_async(
+                    &file.uri(),
+                    None::<&gio::AppLaunchContext>,
+                    None::<&gio::Cancellable>,
+                    move |result| {
+                        status.set_visible(result.is_err());
+                        if let Err(error) = result {
+                            status.set_text(&error.to_string());
+                        }
+                    },
+                );
+            });
+            content.append(&settings_row(
+                &strings::text("settings.config.file"),
+                &config::primary_cmux_json_path_live().to_string_lossy(),
+                Some(&open),
+            ));
+            let docs = gtk::LinkButton::with_label(
+                &config::settings_docs_payload().docs_url,
+                &strings::text("settings.config.docs"),
+            );
+            docs.add_css_class("cmux-settings-config-docs");
+            content.append(&settings_row(
+                &strings::text("settings.config.documentation"),
+                &strings::text("settings.config.docs_detail"),
+                Some(&docs),
+            ));
+            content.append(&status);
+        }
+        "reset" => {
+            content.append(&label(
+                &strings::text("settings.reset.title"),
+                "cmux-heading",
+            ));
+            let reset = gtk::Button::with_label(&strings::text("settings.reset.action"));
+            reset.add_css_class("cmux-settings-reset");
+            let status = label("", "cmux-muted");
+            status.set_wrap(true);
+            status.set_visible(false);
+            let reset_state = Arc::clone(app_state);
+            let reset_status = status.clone();
+            reset.connect_clicked(move |button| {
+                let dialog = gtk::MessageDialog::builder()
+                    .message_type(gtk::MessageType::Question)
+                    .modal(true)
+                    .text(strings::text("settings.reset.confirm"))
+                    .secondary_text(strings::text("settings.reset.detail"))
+                    .build();
+                if let Some(window) = button.root().and_downcast::<gtk::Window>() {
+                    dialog.set_transient_for(Some(&window));
+                }
+                dialog.add_button(&strings::text("close.cancel"), gtk::ResponseType::Cancel);
+                dialog.add_button(
+                    &strings::text("settings.reset.action"),
+                    gtk::ResponseType::Accept,
+                );
+                dialog.set_default_response(gtk::ResponseType::Cancel);
+                let app_state = Arc::clone(&reset_state);
+                let status = reset_status.clone();
+                dialog.connect_response(move |dialog, response| {
+                    if response == gtk::ResponseType::Accept {
+                        let result = app_state
+                            .lock()
+                            .map_err(|error| error.to_string())
+                            .and_then(|mut app| {
+                                app.handle_ui("settings.reset", &json!({"confirmed": true}))
+                                    .map_err(|error| error.message)
+                            });
+                        status.set_text(&match result {
+                            Ok(_) => strings::text("settings.reset.done"),
+                            Err(error) => error,
+                        });
+                        status.set_visible(true);
+                    }
+                    dialog.close();
+                });
+                dialog.present();
+            });
+            content.append(&settings_row(
+                &strings::text("settings.reset.action"),
+                &strings::text("settings.reset.detail"),
+                Some(&reset),
+            ));
+            content.append(&status);
         }
         _ => {
             content.append(&label(section_title, "cmux-heading"));
@@ -13726,6 +14417,59 @@ fn settings_content(
     content
 }
 
+fn settings_config_file_for_editor(path: &Path) -> Result<gio::File, String> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file.write_all(b"{}\n").map_err(|error| error.to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_file() => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(gio::File::for_path(path))
+}
+
+fn filter_settings_search_section(content: &gtk::Box, title: &str, tokens: &[String]) -> bool {
+    let title = title.to_lowercase();
+    let section_matches = tokens.iter().all(|token| title.contains(token));
+    let mut matched = section_matches;
+    let mut child = content.first_child();
+    while let Some(widget) = child {
+        if widget.has_css_class("cmux-settings-row") {
+            // Index the same title/detail labels shown next to each control.
+            // Editable values and configuration-file contents are not search metadata.
+            let mut text = title.clone();
+            let mut copy = widget.first_child().and_then(|copy| copy.first_child());
+            while let Some(label) = copy {
+                if let Some(label) = label.downcast_ref::<gtk::Label>() {
+                    text.push(' ');
+                    text.push_str(&label.text().to_lowercase());
+                }
+                copy = label.next_sibling();
+            }
+            let visible = tokens.iter().all(|token| text.contains(token));
+            widget.set_visible(visible);
+            matched |= visible;
+        }
+        child = widget.next_sibling();
+    }
+    let mut child = content.first_child();
+    while let Some(widget) = child {
+        if !widget.has_css_class("cmux-settings-row") {
+            widget.set_visible(matched && widget.has_css_class("cmux-heading"));
+        }
+        child = widget.next_sibling();
+    }
+    content.set_visible(matched);
+    matched
+}
+
 fn settings_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) -> Option<gtk::Box> {
     let settings = view.get("settings")?;
     let target = settings
@@ -13742,17 +14486,28 @@ fn settings_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) -> Opti
     root.set_hexpand(true);
     root.set_vexpand(true);
 
+    let nav_panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let search = gtk::SearchEntry::new();
+    search.add_css_class("cmux-settings-search");
+    search.set_placeholder_text(Some(&strings::text("settings.search.placeholder")));
+    search.set_margin_top(8);
+    search.set_margin_start(8);
+    search.set_margin_end(8);
+    nav_panel.append(&search);
     let nav = gtk::Box::new(gtk::Orientation::Vertical, 2);
     nav.add_css_class("cmux-settings-nav");
     nav.set_size_request(210, -1);
-    for item in settings
+    let targets = settings
         .get("targets")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-    {
-        let key = item.get("key").and_then(Value::as_str).unwrap_or_default();
-        let title = item.get("title").and_then(Value::as_str).unwrap_or(key);
+        .map(|item| {
+            let key = value_str(item, "key", "");
+            (key.to_string(), value_str(item, "title", key).to_string())
+        })
+        .collect::<Vec<_>>();
+    for (key, title) in &targets {
         let button = gtk::ToggleButton::with_label(title);
         button.set_active(key == target);
         let app_state = Arc::clone(app_state);
@@ -13770,10 +14525,84 @@ fn settings_surface_view(view: &Value, app_state: &Arc<Mutex<AppState>>) -> Opti
     let nav_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
         .child(&nav)
         .build();
-    root.append(&nav_scroll);
-    root.append(&settings_content(target, section_title, app_state));
+    nav_panel.append(&nav_scroll);
+    root.append(&nav_panel);
+    let content = settings_content(target, section_title, app_state);
+    let content_scroll = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .child(&content)
+        .build();
+    root.append(&content_scroll);
+
+    let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    results.add_css_class("cmux-settings-search-results");
+    let empty = label(&strings::text("settings.search.empty"), "cmux-muted");
+    empty.set_margin_top(16);
+    empty.set_margin_start(18);
+    let sections = Rc::new(RefCell::new(Vec::<(String, gtk::Box)>::new()));
+    let searching = Cell::new(false);
+    let saved_offset = Cell::new(0.0);
+    let search_state = Arc::clone(app_state);
+    let target = target.to_string();
+    let section_title = section_title.to_string();
+    search.connect_search_changed(move |search| {
+        let tokens = search
+            .text()
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            if searching.replace(false) {
+                // Settings edited in search results must also be reflected in
+                // the selected page when the search is dismissed.
+                let content = settings_content(&target, &section_title, &search_state);
+                content_scroll.set_child(Some(&content));
+                let offset = saved_offset.get();
+                let scroll = content_scroll.downgrade();
+                after_widget_layout(content.upcast_ref(), move |_| {
+                    if let Some(scroll) = scroll.upgrade() {
+                        scroll.vadjustment().set_value(offset);
+                    }
+                });
+                sections.borrow_mut().clear();
+                while let Some(child) = results.first_child() {
+                    results.remove(&child);
+                }
+            }
+            return;
+        }
+        if sections.borrow().is_empty() {
+            let has_app = targets.iter().any(|(key, _)| key == "app");
+            for (key, title) in &targets {
+                // General and App are aliases of the same settings section.
+                if key == "general" && has_app {
+                    continue;
+                }
+                let section = settings_content(key, title, &search_state);
+                section.set_vexpand(false);
+                results.append(&section);
+                sections.borrow_mut().push((title.clone(), section));
+            }
+            results.append(&empty);
+        }
+        let mut matched = false;
+        for (title, section) in sections.borrow().iter() {
+            matched |= filter_settings_search_section(section, title, &tokens);
+        }
+        empty.set_visible(!matched);
+        if !searching.replace(true) {
+            saved_offset.set(content_scroll.vadjustment().value());
+            content_scroll.set_child(Some(&results));
+        }
+        content_scroll.vadjustment().set_value(0.0);
+    });
+    search.connect_stop_search(|search| search.set_text(""));
     Some(root)
 }
 
@@ -14994,6 +15823,55 @@ fn connect_terminal_keys(
     pending_browser_shortcut_actions: &PendingBrowserShortcutActions,
     window_id: &str,
 ) {
+    let directory_picker = native_directory_picker_state(window.upcast_ref());
+    let result_directory_picker = Rc::clone(&directory_picker);
+    let palette_result =
+        gio::SimpleAction::new("cmux-palette-result", Some(glib::VariantTy::STRING));
+    let result_state = Arc::clone(app_state);
+    let result_window = window.downgrade();
+    let result_ghostty = Rc::clone(ghostty_widgets);
+    let result_browser = Rc::clone(browser_controls);
+    let result_diff = Rc::clone(diff_controls);
+    let result_pending = Rc::clone(pending_browser_shortcut_actions);
+    palette_result.connect_activate(move |_, parameter| {
+        let Some(payload) = parameter
+            .and_then(|value| value.str())
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        else {
+            return;
+        };
+        let result = &payload["result"];
+        if let Some(window) = result_window.upgrade() {
+            apply_native_dialog_result(
+                window.upcast_ref(),
+                &result_state,
+                &result_directory_picker,
+                result,
+            );
+        }
+        apply_diff_shortcut_result(&result_diff, result);
+        apply_terminal_shortcut_result(&result_ghostty, result);
+        if browser_shortcut_result(result)
+            && !apply_browser_shortcut_result(&result_browser, result)
+        {
+            queue_pending_browser_shortcut_action(&result_browser, &result_pending, result.clone());
+        }
+        focus_changed_model_surface(
+            &result_state,
+            &result_ghostty,
+            &result_browser,
+            payload.get("previous_surface").and_then(Value::as_str),
+        );
+        if result.get("quit").and_then(Value::as_bool) == Some(true) {
+            if let Some(application) = result_window
+                .upgrade()
+                .and_then(|window| window.application())
+            {
+                application.quit();
+            }
+        }
+    });
+    window.add_action(&palette_result);
     let controller = gtk::EventControllerKey::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     let browser_focus_escape = Rc::new(RefCell::new(BrowserFocusEscapeState::default()));
@@ -15018,6 +15896,9 @@ fn connect_terminal_keys(
         let focused_widget = weak_window
             .upgrade()
             .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+        if widget_or_ancestor_has_css_class(focused_widget.as_ref(), "cmux-palette-input") {
+            return glib::Propagation::Proceed;
+        }
         if control_activation_key_should_propagate(
             focused_widget_is_activation_control(focused_widget.as_ref()),
             keyval,
@@ -15103,9 +15984,8 @@ fn connect_terminal_keys(
                 || widget.is::<gtk::SearchEntry>()
                 || widget.is::<gtk::TextView>()
         });
-        let browser_location_focused = focused_widget
-            .as_ref()
-            .is_some_and(|widget| widget.has_css_class("cmux-browser-location"));
+        let browser_location_focused =
+            widget_or_ancestor_has_css_class(focused_widget.as_ref(), "cmux-browser-location");
         let terminal_search_focused =
             widget_or_ancestor_has_css_class(focused_widget.as_ref(), "cmux-terminal-search");
         let browser_location_navigation_key = browser_location_focused
@@ -15195,6 +16075,14 @@ fn connect_terminal_keys(
                     apply_diff_shortcut_result(&diff_controls, result);
                     apply_terminal_shortcut_result(&ghostty_widgets, result);
                     apply_clipboard_shortcut_result(result);
+                    if let Some(window) = weak_window.upgrade() {
+                        apply_native_dialog_result(
+                            window.upcast_ref(),
+                            &app_state,
+                            &directory_picker,
+                            result,
+                        );
+                    }
                 }
                 if let Some(result) = result.filter(browser_shortcut_result) {
                     if !apply_browser_shortcut_result(&browser_controls, &result) {
@@ -15225,6 +16113,11 @@ fn connect_terminal_keys(
                 return glib::Propagation::Stop;
             }
         }
+        // Native editors and web content own their input even while the selected
+        // terminal is loading or GTK focus is transitioning between surfaces.
+        if focused_webkit_widget || editable_focused {
+            return glib::Propagation::Proceed;
+        }
         let ghostty_focus_in_transition = model_ghostty_surface_id.is_some()
             && model_ghostty_surface_id != focused_ghostty_surface_id;
         if ghostty_focus_in_transition
@@ -15242,7 +16135,7 @@ fn connect_terminal_keys(
                 glib::Propagation::Proceed
             };
         }
-        if focused_ghostty_widget.is_some() || focused_webkit_widget || editable_focused {
+        if focused_ghostty_widget.is_some() {
             return glib::Propagation::Proceed;
         }
         let Some(input) = terminal_input_for_key(keyval, modifiers) else {
@@ -15582,13 +16475,13 @@ fn focus_browser_chrome_widget(widget: gtk::Widget, chrome_focus_requested: Rc<C
     let immediate = widget.clone();
     let immediate_focus_requested = Rc::clone(&chrome_focus_requested);
     glib::idle_add_local_once(move || {
-        if immediate_focus_requested.get() && !immediate.has_focus() {
+        if immediate_focus_requested.get() && !widget_contains_focus(&immediate) {
             immediate.grab_focus();
         }
     });
     let attempts = Rc::new(Cell::new(0_u8));
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        if !chrome_focus_requested.get() || widget.has_focus() {
+        if !chrome_focus_requested.get() || widget_contains_focus(&widget) {
             return glib::ControlFlow::Break;
         }
         let attempt = attempts.get().saturating_add(1);
@@ -16040,14 +16933,14 @@ fn call_app_value(app_state: &Arc<Mutex<AppState>>, method: &str, params: Value)
     let Ok(mut app) = app_state.lock() else {
         return None;
     };
-    app.handle(method, &params).ok()
+    app.handle_ui(method, &params).ok()
 }
 
 fn palette_visible(app_state: &Arc<Mutex<AppState>>) -> bool {
     let Ok(mut app) = app_state.lock() else {
         return false;
     };
-    app.handle("debug.command_palette.visible", &json!({}))
+    app.handle_ui("debug.command_palette.visible", &json!({}))
         .ok()
         .and_then(|value| value.get("visible").and_then(Value::as_bool))
         .unwrap_or(false)
@@ -16933,7 +17826,7 @@ fn workspace_action_params(workspace_id: &str, action: &str) -> Option<Value> {
     if workspace_id.trim().is_empty() {
         return None;
     }
-    Some(json!({"workspace_id": workspace_id, "action": action}))
+    Some(json!({"workspace_id": workspace_id, "action": action, "source": "context_menu"}))
 }
 
 fn workspace_context_action_specs(
@@ -18132,6 +19025,157 @@ mod tests {
         None
     }
 
+    #[gtk::test]
+    fn gtk_tab_selection_reveals_overflow_without_resetting_manual_scroll() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let mut snapshot = gtk_tab_test_snapshot("surface-a", "alpha");
+        snapshot["surface_views"][0]["tabs"] = json!((0..16)
+            .map(|index| json!({
+                "surface_id": format!("surface-{index}"),
+                "title": format!("Terminal tab {index}"),
+                "selected": index == 0
+            }))
+            .collect::<Vec<_>>());
+        let strip = pane_tab_strip(&snapshot["surface_views"][0], &app_state, None)
+            .expect("pane tab strip");
+        let window = gtk::Window::builder()
+            .default_width(500)
+            .default_height(100)
+            .child(&strip)
+            .build();
+        window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let (scroller, tab_row) = pane_tab_scroller(&strip);
+        let adjustment = scroller.hadjustment();
+        assert!(adjustment.upper() > adjustment.page_size() * 2.0);
+        adjustment.set_value(120.0);
+        snapshot["surface_views"][0]["tabs"][1]["title"] = json!("Renamed terminal");
+        populate_pane_tab_strip(&strip, &snapshot["surface_views"][0], &app_state, None);
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert!(
+            (adjustment.value() - 120.0).abs() < 1.0,
+            "title updates must preserve manual scrolling"
+        );
+
+        snapshot["surface_views"][0]["tabs"][0]["selected"] = json!(false);
+        snapshot["surface_views"][0]["tabs"][15]["selected"] = json!(true);
+        populate_pane_tab_strip(&strip, &snapshot["surface_views"][0], &app_state, None);
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let selected = tab_row.last_child().expect("last tab");
+        let bounds = selected.compute_bounds(&tab_row).expect("tab bounds");
+        assert!(
+            f64::from(bounds.x()) >= adjustment.value() - 1.0,
+            "selected tab starts within viewport"
+        );
+        assert!(
+            f64::from(bounds.x() + bounds.width())
+                <= adjustment.value() + adjustment.page_size() + 1.0,
+            "keyboard-selected overflow tab must be fully visible"
+        );
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_workspace_refresh_preserves_scroll_and_reveals_selection() {
+        let application = gtk::Application::builder()
+            .application_id("ai.manaflow.cmux.tests.workspace-scroll")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gio::Cancellable>)
+            .expect("register app");
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("app state"),
+        ));
+        let row = json!({"window_id": "window-a", "title": "Scroll test", "selected": true});
+        let mut snapshot = gtk_tab_test_snapshot("surface-a", "alpha");
+        snapshot["workspaces"] = json!((0..40)
+            .map(|index| json!({
+                "workspace_id": format!("workspace-{index}"),
+                "title": format!("Workspace {index}"),
+                "selected": index == 0
+            }))
+            .collect::<Vec<_>>());
+        let local_refresh = gtk_test_local_refresh(&application, &app_state);
+        let mut host = create_gtk_window_host(
+            &application,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            "window-a",
+            &row,
+            &snapshot,
+            &local_refresh,
+        );
+        host.window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let scroller = host
+            .snapshot_view
+            .left_slot
+            .first_child()
+            .expect("sidebar frame")
+            .first_child()
+            .expect("sidebar scroller")
+            .downcast::<gtk::ScrolledWindow>()
+            .expect("scrolled window");
+        let adjustment = scroller.vadjustment();
+        assert!(adjustment.upper() > adjustment.page_size() * 2.0);
+        adjustment.set_value(220.0);
+        snapshot["workspaces"][1]["title"] = json!("Renamed workspace");
+        refresh_gtk_window_host(
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &snapshot,
+            &local_refresh,
+        );
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let current_scroller = host
+            .snapshot_view
+            .left_slot
+            .first_child()
+            .expect("sidebar frame")
+            .first_child()
+            .expect("sidebar scroller")
+            .downcast::<gtk::ScrolledWindow>()
+            .expect("scrolled window");
+        assert!(
+            (current_scroller.vadjustment().value() - 220.0).abs() < 1.0,
+            "workspace metadata updates must preserve manual scrolling"
+        );
+
+        snapshot["workspaces"][0]["selected"] = json!(false);
+        snapshot["workspaces"][39]["selected"] = json!(true);
+        refresh_gtk_window_host(
+            &mut host,
+            &app_state,
+            GtkRendererMode::Gtk,
+            GtkUiMode::Next,
+            &row,
+            &snapshot,
+            &local_refresh,
+        );
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        let sidebar = widget_descendant_with_css_class(
+            host.snapshot_view.left_slot.upcast_ref(),
+            "cmux-sidebar",
+        )
+        .expect("sidebar");
+        let selected = widget_descendant_with_css_class(&sidebar, "cmux-workspace-selected")
+            .expect("selected workspace");
+        let bounds = selected.compute_bounds(&sidebar).expect("workspace bounds");
+        assert!(f64::from(bounds.y()) >= adjustment.value() - 1.0);
+        assert!(f64::from(bounds.y() + bounds.height()) <=
+            adjustment.value() + adjustment.page_size() + 1.0,
+            "keyboard-selected overflow workspace must be visible: bounds={bounds:?}, value={}, page={}, upper={}",
+            adjustment.value(), adjustment.page_size(), adjustment.upper());
+        host.window.destroy();
+    }
+
     fn assert_gtk_pane_tab_reconciliation_preserves_widgets_and_scroll_position() {
         let app_state = Arc::new(Mutex::new(
             AppState::with_paths(None, None).expect("app state"),
@@ -18185,6 +19229,197 @@ mod tests {
         let quit_loop = main_loop.clone();
         glib::timeout_add_local_once(duration, move || quit_loop.quit());
         main_loop.run();
+    }
+
+    #[gtk::test]
+    fn gtk_settings_shortcuts_scroll_inside_a_short_pane() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("settings app state"),
+        ));
+        let settings = settings_surface_view(
+            &json!({
+                "surface_id": "settings-test",
+                "settings": {
+                    "target": "keyboardShortcuts",
+                    "title": "Keyboard Shortcuts",
+                    "targets": [{"key": "keyboardShortcuts", "title": "Keyboard Shortcuts"}]
+                }
+            }),
+            &app_state,
+        )
+        .expect("settings view");
+        let (minimum_height, _, _, _) = settings.measure(gtk::Orientation::Vertical, 900);
+        assert!(
+            minimum_height <= 300,
+            "settings demand {minimum_height}px in a short pane"
+        );
+        let window = gtk::Window::new();
+        window.set_default_size(900, 300);
+        window.set_child(Some(&settings));
+        window.present();
+        gtk_run_main_loop_for(Duration::from_millis(50));
+
+        let scroller = settings
+            .last_child()
+            .and_downcast::<gtk::ScrolledWindow>()
+            .expect("settings content scroller");
+        let adjustment = scroller.vadjustment();
+        assert!(adjustment.upper() > adjustment.page_size());
+        adjustment.set_value(adjustment.upper() - adjustment.page_size());
+        gtk_run_main_loop_for(Duration::from_millis(20));
+        assert!(
+            adjustment.value() > 0.0,
+            "last shortcut rows must be reachable"
+        );
+        assert!(
+            window.height() <= 300,
+            "settings must fit the requested pane height"
+        );
+        let offset = adjustment.value();
+        let search =
+            widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-search")
+                .and_then(|widget| widget.downcast::<gtk::SearchEntry>().ok())
+                .expect("settings search");
+        search.set_text("no-such-setting-9384");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        search.set_text("");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        assert!(
+            (adjustment.value() - offset).abs() < 1.0,
+            "clearing search restores the page's scroll position"
+        );
+        window.close();
+    }
+
+    #[gtk::test]
+    fn gtk_settings_search_finds_controls_in_other_sections_without_losing_focus() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("settings app state"),
+        ));
+        let settings = settings_surface_view(
+            &json!({
+                "surface_id": "settings-test",
+                "settings": {
+                    "target": "general",
+                    "title": "General",
+                    "targets": [
+                        {"key": "general", "title": "General"},
+                        {"key": "terminal", "title": "Terminal"}
+                    ]
+                }
+            }),
+            &app_state,
+        )
+        .expect("settings view");
+        let search =
+            widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-search")
+                .and_then(|widget| widget.downcast::<gtk::SearchEntry>().ok())
+                .expect("settings search");
+        let window = gtk::Window::new();
+        window.set_default_size(900, 300);
+        window.set_child(Some(&settings));
+        window.present();
+        search.grab_focus();
+        search.set_text("COPY selection");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        let results =
+            widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-search-results")
+                .expect("search results");
+        let matching_section = results
+            .first_child()
+            .expect("general section")
+            .next_sibling()
+            .expect("terminal section");
+        assert!(matching_section.is_visible());
+        assert!(!results.first_child().unwrap().is_visible());
+        let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("search focus");
+        assert!(focus == search || focus.is_ancestor(&search));
+
+        search.set_text("no-such-setting-9384");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        assert!(results.last_child().expect("empty message").is_visible());
+        search.set_text("");
+        gtk_run_main_loop_for(Duration::from_millis(250));
+        assert!(widget_descendant_with_css_class(
+            settings.upcast_ref(),
+            "cmux-settings-search-results"
+        )
+        .is_none());
+        assert!(
+            widget_descendant_with_css_class(settings.upcast_ref(), "cmux-settings-content")
+                .is_some()
+        );
+        window.close();
+    }
+
+    #[gtk::test]
+    fn gtk_settings_json_opens_the_json_configuration() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("settings app state"),
+        ));
+        let content = settings_content("settingsJSON", "cmux.json", &app_state);
+        let button =
+            widget_descendant_with_css_class(content.upcast_ref(), "cmux-settings-open-config")
+                .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+                .expect("open config action");
+        assert_eq!(
+            button.tooltip_text().as_deref(),
+            Some(
+                config::primary_cmux_json_path_live()
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert!(widget_descendant_with_css_class(
+            content.upcast_ref(),
+            "cmux-settings-config-docs"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn gtk_settings_open_config_creates_missing_file_and_preserves_existing_contents() {
+        let temporary = tempfile::tempdir().expect("temporary config home");
+        let path = temporary.path().join("cmux/cmux.json");
+        let file = settings_config_file_for_editor(&path).expect("create missing config");
+        assert_eq!(file.path().as_deref(), Some(path.as_path()));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
+        let existing = "// preserve comments\n{\"app\": {\"confirmQuit\": \"always\"}}\n";
+        fs::write(&path, existing).unwrap();
+        settings_config_file_for_editor(&path).expect("open existing config");
+        assert_eq!(fs::read_to_string(&path).unwrap(), existing);
+        assert!(settings_config_file_for_editor(temporary.path()).is_err());
+    }
+
+    #[gtk::test]
+    fn gtk_settings_reset_requires_confirmation_and_cancel_keeps_settings() {
+        let app_state = Arc::new(Mutex::new(
+            AppState::with_paths(None, None).expect("settings app state"),
+        ));
+        let content = settings_content("reset", "Reset", &app_state);
+        let reset = widget_descendant_with_css_class(content.upcast_ref(), "cmux-settings-reset")
+            .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+            .expect("reset action");
+        let window = gtk::Window::new();
+        window.set_child(Some(&content));
+        window.present();
+        reset.emit_clicked();
+        gtk_run_main_loop_for(Duration::from_millis(20));
+        let dialog = gtk::Window::list_toplevels()
+            .into_iter()
+            .find_map(|widget| {
+                widget
+                    .downcast::<gtk::MessageDialog>()
+                    .ok()
+                    .filter(|dialog| dialog.transient_for().as_ref() == Some(&window))
+            })
+            .expect("reset confirmation");
+        dialog.response(gtk::ResponseType::Cancel);
+        gtk_run_main_loop_for(Duration::from_millis(20));
+        assert!(!dialog.is_visible());
+        // Cancellation never calls the reset endpoint or writes configuration.
+        assert!(!content.last_child().expect("reset status").is_visible());
+        window.close();
     }
 
     fn gtk_test_local_refresh(
@@ -18540,7 +19775,7 @@ mod tests {
 
     #[test]
     fn gtk_right_sidebar_state_maps_visibility_and_vault_alias() {
-        assert!(right_sidebar_visible(&json!({})));
+        assert!(!right_sidebar_visible(&json!({})));
         assert_eq!(right_sidebar_mode(&json!({})), "files");
         let snapshot = json!({
             "right_sidebar": {"visible": false, "mode": "vault"}
@@ -19739,6 +20974,7 @@ mod tests {
             workspace_action_params(&workspace_id, "mark-read").expect("workspace action params");
         assert_eq!(action_params["workspace_id"], "workspace:2");
         assert_eq!(action_params["action"], "mark-read");
+        assert_eq!(action_params["source"], "context_menu");
         assert!(workspace_action_params("   ", "pin").is_none());
         let new_group_params = workspace_new_group_params(&workspace_id).expect("new group params");
         assert_eq!(
@@ -21143,11 +22379,8 @@ mod tests {
         assert!(shortcut_help_visible(&visible));
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_pty_output_refreshes_before_safety_sync() {
-        if gtk::init().is_err() {
-            return;
-        }
         const OUTPUT_MARKER: &str = "CMUX_GTK_PTY_REFRESH";
 
         let application = gtk::Application::builder()
@@ -21286,11 +22519,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_output_does_not_reconcile_an_unchanged_window() {
-        if gtk::init().is_err() {
-            return;
-        }
         let application = gtk::Application::builder()
             .application_id("ai.manaflow.cmux.tests.scoped-fallback-output")
             .flags(gio::ApplicationFlags::NON_UNIQUE)
@@ -21378,10 +22608,6 @@ mod tests {
     fn assert_gtk_external_model_mutations_refresh_before_safety_sync(
         renderer_mode: GtkRendererMode,
     ) {
-        if gtk::init().is_err() {
-            return;
-        }
-
         let renderer_name = match renderer_mode {
             GtkRendererMode::Gtk => "fallback",
             GtkRendererMode::Ghostty => "ghostty",
@@ -21480,22 +22706,18 @@ mod tests {
         }
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_external_model_mutations_refresh_before_safety_sync() {
         assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Gtk);
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_ghostty_external_model_mutations_refresh_before_safety_sync() {
         assert_gtk_external_model_mutations_refresh_before_safety_sync(GtkRendererMode::Ghostty);
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_model_mutation_suppressed_by_browser_focus_retries_when_focus_clears() {
-        if gtk::init().is_err() {
-            return;
-        }
-
         let application = gtk::Application::builder()
             .application_id("ai.manaflow.cmux.tests.browser-focus-model-retry")
             .flags(gio::ApplicationFlags::NON_UNIQUE)
@@ -21537,9 +22759,6 @@ mod tests {
             &presented_model_window,
             &global_visibility,
         );
-        let activity_refresh_source = local_refresh
-            .install_render_activity_refresh()
-            .expect("model activity refresh source");
         let row = model_window_rows(&app_state)
             .into_iter()
             .next()
@@ -21587,14 +22806,20 @@ mod tests {
             .snapshot_view
             .main_slot
             .append(&location);
+        // Initial focus notifications also schedule reconciliation. Focus the entry's
+        // GtkText child before dispatching them so the synthetic tree stays mounted.
+        assert!(location.grab_focus());
         window.present();
         gtk_run_main_loop_for(Duration::from_millis(100));
-        gtk::prelude::GtkWindowExt::set_focus(&window, Some(&location));
-        gtk_run_main_loop_for(Duration::from_millis(50));
         assert!(widget_or_ancestor_has_css_class(
             gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
             "cmux-browser-location"
         ));
+
+        // Start observing only once the synthetic browser entry owns focus.
+        let activity_refresh_source = local_refresh
+            .install_render_activity_refresh()
+            .expect("model activity refresh source");
 
         app_state
             .lock()
@@ -21647,11 +22872,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_fallback_terminal_allocation_follows_live_resize() {
-        if gtk::init().is_err() {
-            return;
-        }
         let allocation_app = Arc::new(Mutex::new(
             AppState::with_paths(None, None).expect("allocation app state"),
         ));
@@ -21699,11 +22921,8 @@ mod tests {
         allocation_window.close();
     }
 
-    #[test]
+    #[gtk::test]
     fn gtk_runtime_widget_regressions() {
-        if gtk::init().is_err() {
-            return;
-        }
         let terminal_label = gtk::Label::new(Some("selected terminal text"));
         terminal_label.add_css_class("cmux-terminal-preview");
         terminal_label.set_selectable(true);
@@ -22024,6 +23243,296 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
         assert!(!shortcut_chord_pending(&app_state));
     }
 
+    #[gtk::test]
+    fn gtk_palette_native_editing_preserves_selection_and_model_window() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let windows = call_app_value(&app_state, "window.list", json!({})).unwrap();
+        let window_id = windows["windows"][0]["id"]
+            .as_str()
+            .or_else(|| windows["windows"][0]["window_id"].as_str())
+            .unwrap();
+        call_app(
+            &app_state,
+            "debug.command_palette.toggle",
+            json!({"window_id": window_id}),
+        );
+        let snapshot = |app: &Arc<Mutex<AppState>>| {
+            json!({
+                "window": {"window_id": window_id},
+                "command_palette": call_app_value(app, "debug.command_palette.results", json!({"window_id": window_id})).unwrap()
+            })
+        };
+        let panel = command_palette_panel(&snapshot(&app_state), &app_state).unwrap();
+        let entry = widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-input")
+            .unwrap()
+            .downcast::<gtk::Entry>()
+            .expect("palette must provide a native editor");
+        entry.set_text("alpha beta");
+        entry.select_region(0, 5);
+        assert!(update_command_palette_panel(
+            &panel,
+            &snapshot(&app_state),
+            &app_state
+        ));
+        assert_eq!(entry.selection_bounds(), Some((0, 5)));
+        entry.delete_selection();
+        let mut position = entry.position();
+        entry.insert_text("gamma", &mut position);
+        let result = call_app_value(
+            &app_state,
+            "debug.command_palette.results",
+            json!({"window_id": window_id}),
+        )
+        .unwrap();
+        assert_eq!(result["input_text"], "gamma beta");
+        assert_eq!(
+            widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-input").unwrap(),
+            entry.clone().upcast::<gtk::Widget>()
+        );
+        // A second window becoming active must not redirect changes from this input.
+        call_app(&app_state, "window.create", json!({}));
+        entry.set_text("original window");
+        let result = call_app_value(
+            &app_state,
+            "debug.command_palette.results",
+            json!({"window_id": window_id}),
+        )
+        .unwrap();
+        assert_eq!(result["input_text"], "original window");
+    }
+
+    #[gtk::test]
+    fn gtk_palette_open_takes_focus_from_existing_editor() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        call_app(&app_state, "debug.command_palette.toggle", json!({}));
+        let snapshot = json!({"command_palette": call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap()});
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let previous = gtk::Entry::new();
+        content.append(&previous);
+        let window = gtk::Window::builder().child(&content).build();
+        window.present();
+        previous.grab_focus();
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        content.append(&panel);
+        assert!(widget_or_ancestor_has_css_class(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            "cmux-palette-input"
+        ));
+        content.remove(&panel);
+        assert!(gtk::prelude::GtkWindowExt::focus(&window)
+            .is_some_and(|focused| widget_is_or_descendant_of(&focused, previous.upcast_ref())));
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_palette_multiline_editing_and_preedit_keep_native_key_ownership() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        call_app(&app_state, "debug.command_palette.toggle", json!({}));
+        assert!(call_app(
+            &app_state,
+            "debug.command_palette.activate",
+            json!({"command_id": "palette.editWorkspaceDescription"})
+        ));
+        let snapshot = json!({"command_palette": call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap()});
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        let view = panel
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::TextView>()
+            .unwrap();
+        let buffer = view.buffer();
+        buffer.set_text("first\nlast");
+        buffer.place_cursor(&buffer.iter_at_offset(6));
+        buffer.insert_at_cursor("middle\n");
+        let result =
+            call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap();
+        assert_eq!(result["input_text"], "first\nmiddle\nlast");
+        let controllers = panel.observe_controllers();
+        let keys = (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .find_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .unwrap();
+        for (key, modifiers) in [
+            (gdk::Key::Return, gdk::ModifierType::SHIFT_MASK),
+            (gdk::Key::Up, gdk::ModifierType::empty()),
+            (gdk::Key::a, gdk::ModifierType::CONTROL_MASK),
+            (gdk::Key::v, gdk::ModifierType::CONTROL_MASK),
+        ] {
+            assert!(!keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &modifiers]));
+        }
+        view.emit_by_name::<()>("preedit-changed", &[&"に"]);
+        for key in [gdk::Key::Return, gdk::Key::Escape] {
+            assert!(!keys
+                .emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &gdk::ModifierType::empty()]));
+        }
+        assert!(palette_visible(&app_state));
+        view.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(keys.emit_by_name::<bool>(
+            "key-pressed",
+            &[&gdk::Key::Return, &0_u32, &gdk::ModifierType::empty()]
+        ));
+        assert!(!palette_visible(&app_state));
+    }
+
+    #[gtk::test]
+    fn gtk_native_directory_picker_survives_idle_and_closes_with_its_window() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let request = call_app_value(
+            &app_state,
+            "debug.shortcut.simulate",
+            json!({
+                "combo": "ctrl+o", "context": {"terminalFocus": false}
+            }),
+        )
+        .unwrap();
+        let parent = gtk::Window::new();
+        parent.present();
+        let picker = native_directory_picker_state(&parent);
+        apply_native_dialog_result(&parent, &app_state, &picker, &request);
+        let weak = picker.borrow().as_ref().unwrap().downgrade();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+        assert!(
+            weak.upgrade().is_some_and(|dialog| dialog.is_visible()),
+            "deferred launch must retain the native chooser until response"
+        );
+        apply_native_dialog_result(&parent, &app_state, &picker, &request);
+        assert_eq!(picker.borrow().as_ref(), weak.upgrade().as_ref());
+        weak.upgrade()
+            .unwrap()
+            .emit_by_name::<()>("response", &[&i32::from(gtk::ResponseType::Cancel)]);
+        assert!(picker.borrow().is_none());
+        apply_native_dialog_result(&parent, &app_state, &picker, &request);
+        parent.destroy();
+        assert!(
+            picker.borrow().is_none(),
+            "closing the owning window must release its chooser even before deferred launch"
+        );
+        gtk_run_main_loop_for(Duration::from_millis(100));
+    }
+
+    #[gtk::test]
+    fn gtk_open_directory_picker_cancellation_and_selection_target_owner() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let request = call_app_value(
+            &app_state,
+            "debug.shortcut.simulate",
+            json!({"combo": "ctrl+o", "context": {"terminalFocus": false}}),
+        )
+        .unwrap();
+        let owner = request["window_id"].as_str().unwrap().to_string();
+        let before = call_app_value(&app_state, "workspace.list", json!({"window_id": owner}))
+            .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .len();
+        let parent = gtk::Window::new();
+        let dialog = open_directory_picker(&parent, &app_state, &request).unwrap();
+        assert_eq!(dialog.action(), gtk::FileChooserAction::SelectFolder);
+        assert_eq!(dialog.transient_for(), Some(parent.clone()));
+        dialog.emit_by_name::<()>("response", &[&i32::from(gtk::ResponseType::Cancel)]);
+        assert_eq!(
+            call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap()
+                ["workspaces"]
+                .as_array()
+                .unwrap()
+                .len(),
+            before
+        );
+        let other = call_app_value(&app_state, "window.create", json!({})).unwrap()["window_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let folder = std::env::temp_dir();
+        assert!(accept_open_directory(
+            &app_state,
+            &owner,
+            gtk::ResponseType::Accept,
+            Some(gio::File::for_path(&folder))
+        ));
+        let workspaces =
+            call_app_value(&app_state, "workspace.list", json!({"window_id": owner})).unwrap();
+        assert_eq!(
+            workspaces["workspaces"].as_array().unwrap().len(),
+            before + 1
+        );
+        assert!(workspaces["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|workspace| workspace["cwd"] == folder.to_string_lossy().as_ref()));
+        assert_eq!(
+            call_app_value(&app_state, "workspace.list", json!({"window_id": other})).unwrap()
+                ["workspaces"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        parent.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_palette_native_activation_delivers_clipboard_results() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        call_app(&app_state, "debug.command_palette.toggle", json!({}));
+        call_app(
+            &app_state,
+            "debug.command_palette.input.set",
+            json!({"mode": "commands", "text": "Copy Workspace ID"}),
+        );
+        let snapshot = json!({"command_palette": call_app_value(&app_state, "debug.command_palette.results", json!({})).unwrap()});
+        assert_eq!(
+            snapshot["command_palette"]["results"][0]["command_id"],
+            "palette.copyWorkspaceID"
+        );
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        let entry = panel
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Entry>()
+            .unwrap();
+        entry.emit_activate();
+        assert!(!palette_visible(&app_state));
+        let clipboard = gdk::Display::default().unwrap().clipboard();
+        let text = glib::MainContext::default()
+            .block_on(clipboard.read_text_future())
+            .unwrap()
+            .unwrap();
+        assert!(text.starts_with("workspace_id="));
+    }
+
+    #[gtk::test]
+    fn gtk_command_palette_results_are_pointer_actions() {
+        let snapshot = json!({"command_palette": {
+            "visible": true,
+            "mode": "commands",
+            "selected_index": 0,
+            "results": [{"title": "New Workspace", "command_id": "palette.newWorkspace"}]
+        }});
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        assert!(call_app(
+            &app_state,
+            "debug.command_palette.toggle",
+            json!({})
+        ));
+        let before = call_app_value(&app_state, "workspace.list", json!({})).unwrap();
+        let panel = command_palette_panel(&snapshot, &app_state).unwrap();
+        let rows =
+            widget_descendant_with_css_class(panel.upcast_ref(), "cmux-palette-results").unwrap();
+        let button = rows
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .expect("palette rows must accept pointer activation");
+        button.emit_clicked();
+        let after = call_app_value(&app_state, "workspace.list", json!({})).unwrap();
+        assert_eq!(
+            after["workspaces"].as_array().unwrap().len(),
+            before["workspaces"].as_array().unwrap().len() + 1
+        );
+        assert!(!palette_visible(&app_state));
+    }
+
     #[test]
     fn gtk_palette_keys_map_to_shortcut_simulation_names() {
         assert_eq!(palette_shortcut_combo("up"), Some("up"));
@@ -22184,6 +23693,247 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
         assert!(browser_surface_requires_recreation("work", 8, &state));
     }
 
+    fn native_entry_capture_keys(entry: &impl IsA<gtk::Widget>) -> gtk::EventControllerKey {
+        let controllers = entry.observe_controllers();
+        (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .filter_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .find(|keys| keys.propagation_phase() == gtk::PropagationPhase::Capture)
+            .expect("application capture controller")
+    }
+
+    fn emit_native_entry_key(keys: &gtk::EventControllerKey, key: gdk::Key) -> bool {
+        keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &gdk::ModifierType::empty()])
+    }
+
+    #[gtk::test]
+    fn gtk_terminal_find_preedit_keeps_native_key_ownership() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let ghostty = crate::gtk_ghostty::ghostty_surface_widget(Default::default());
+        let controls = ensure_terminal_search_controls(
+            &GtkTerminalSearchState {
+                surface_id: "ime-terminal-find".into(),
+                query: String::new(),
+                total: None,
+                selected: None,
+            },
+            &app_state,
+            &ghostty,
+            &Rc::new(RefCell::new(HashMap::new())),
+        );
+        let keys = native_entry_capture_keys(&controls.entry);
+        let text = controls
+            .entry
+            .delegate()
+            .and_downcast::<gtk::Text>()
+            .unwrap();
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        text.emit_by_name::<()>("preedit-changed", &[&"日本語"]);
+        for key in [gdk::Key::Return, gdk::Key::KP_Enter, gdk::Key::Escape] {
+            assert!(!emit_native_entry_key(&keys, key), "IME owns {key:?}");
+        }
+        text.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        assert!(emit_native_entry_key(&keys, gdk::Key::Escape));
+    }
+
+    fn browser_controls_for_native_preedit_test() -> (BrowserSurfaceControls, gtk::Window) {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let browser = call_app_value(
+            &app_state,
+            "surface.create",
+            json!({"type": "browser", "url": "about:blank"}),
+        )
+        .unwrap();
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": browser["surface_id"],
+            "focused": true,
+            "browser": {"profile_id": "default", "url": "about:blank"}
+        }))
+        .unwrap();
+        let controls = ensure_browser_surface_controls(
+            &state,
+            None,
+            &app_state,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+        );
+        let window = gtk::Window::builder().child(&controls.root).build();
+        window.present();
+        (controls, window)
+    }
+
+    #[gtk::test]
+    fn gtk_browser_find_preedit_keeps_native_key_ownership() {
+        let (controls, window) = browser_controls_for_native_preedit_test();
+        assert!(
+            controls.web_view.is_some(),
+            "native WebKit required for Find"
+        );
+        controls.find_bar.set_visible(true);
+        controls.find_entry.grab_focus();
+        let keys = native_entry_capture_keys(&controls.find_entry);
+        let text = controls
+            .find_entry
+            .delegate()
+            .and_downcast::<gtk::Text>()
+            .unwrap();
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        text.emit_by_name::<()>("preedit-changed", &[&"日本語"]);
+        for key in [gdk::Key::Return, gdk::Key::KP_Enter, gdk::Key::Escape] {
+            assert!(!emit_native_entry_key(&keys, key), "IME owns {key:?}");
+            assert!(controls.find_bar.is_visible());
+        }
+        text.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Return));
+        assert!(emit_native_entry_key(&keys, gdk::Key::Escape));
+        assert!(!controls.find_bar.is_visible());
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_browser_omnibar_preedit_keeps_native_key_ownership() {
+        let (controls, window) = browser_controls_for_native_preedit_test();
+        controls.location.grab_focus();
+        controls.location.set_text("https://draft.example/path");
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        let keys = native_entry_capture_keys(&controls.location);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Down));
+        let text = controls
+            .location
+            .delegate()
+            .and_downcast::<gtk::Text>()
+            .unwrap();
+        text.emit_by_name::<()>("preedit-changed", &[&"日本語"]);
+        for key in [
+            gdk::Key::Return,
+            gdk::Key::KP_Enter,
+            gdk::Key::Escape,
+            gdk::Key::Up,
+            gdk::Key::Down,
+        ] {
+            assert!(!emit_native_entry_key(&keys, key), "IME owns {key:?}");
+            assert_eq!(
+                controls.location.text().as_str(),
+                "https://draft.example/path"
+            );
+        }
+        text.emit_by_name::<()>("preedit-changed", &[&""]);
+        assert!(emit_native_entry_key(&keys, gdk::Key::Escape));
+        assert_eq!(controls.location.text().as_str(), "");
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_browser_omnibar_preserves_native_draft_and_selection_on_refresh() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": "browser-omnibar-refresh-test",
+            "focused": true,
+            "browser": {"profile_id": "default", "url": "about:blank"}
+        }))
+        .unwrap();
+        let cache = Rc::new(RefCell::new(HashMap::new()));
+        let terminals = Rc::new(RefCell::new(HashMap::new()));
+        let controls =
+            ensure_browser_surface_controls(&state, None, &app_state, &cache, &terminals);
+        let window = gtk::Window::builder()
+            .default_width(700)
+            .child(&controls.root)
+            .build();
+        window.present();
+        assert!(controls.location.grab_focus());
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        assert!(widget_contains_focus(&controls.location));
+        controls.location.set_text("https://draft.example/path");
+        controls.location.select_region(8, 13);
+        ensure_browser_surface_controls(&state, None, &app_state, &cache, &terminals);
+        assert_eq!(
+            controls.location.text().as_str(),
+            "https://draft.example/path"
+        );
+        assert_eq!(controls.location.selection_bounds(), Some((8, 13)));
+        assert!(controls.browser_chrome_focused.get());
+        window.destroy();
+    }
+
+    #[gtk::test]
+    fn gtk_browser_forward_is_available_in_navigation_toolbar() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": "browser-forward-toolbar-test",
+            "browser": {"profile_id": "default", "url": "about:blank"}
+        }))
+        .unwrap();
+        let controls = ensure_browser_surface_controls(
+            &state,
+            None,
+            &app_state,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+        );
+        assert_eq!(
+            controls.forward.parent(),
+            Some(controls.root.clone().upcast())
+        );
+        assert_eq!(
+            controls.back.next_sibling(),
+            Some(controls.forward.clone().upcast())
+        );
+    }
+
+    #[gtk::test]
+    fn gtk_browser_omnibar_suggestions_keep_native_entry_focus() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let browser = call_app_value(
+            &app_state,
+            "surface.create",
+            json!({"type": "browser", "url": "about:blank"}),
+        )
+        .unwrap();
+        let state = ui::browser_navigation_state(&json!({
+            "kind": "browser",
+            "surface_id": browser["surface_id"],
+            "focused": true,
+            "browser": {"profile_id": "default", "url": "about:blank"}
+        }))
+        .unwrap();
+        let controls = ensure_browser_surface_controls(
+            &state,
+            None,
+            &app_state,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+        );
+        let window = gtk::Window::builder()
+            .default_width(700)
+            .child(&controls.root)
+            .build();
+        window.present();
+        controls.location.grab_focus();
+        controls.location.set_text("https://draft.example/path");
+        gtk_run_main_loop_for(Duration::from_millis(50));
+        let suggestions = widget_descendant_with_css_class(
+            controls.location.upcast_ref(),
+            "cmux-browser-suggestions",
+        )
+        .unwrap();
+        assert!(
+            suggestions.first_child().is_some(),
+            "show address suggestions"
+        );
+        let focused = gtk::prelude::GtkWindowExt::focus(&window).unwrap();
+        assert!(
+            focused.is::<gtk::Editable>(),
+            "keep text editing while showing suggestions"
+        );
+        assert!(controls.browser_chrome_focused.get());
+        window.destroy();
+    }
+
     #[test]
     fn gtk_browser_omnibar_suggestions_ignore_incomplete_records() {
         assert_eq!(
@@ -22243,5 +23993,83 @@ diff --git a/docs/two.md b/docs/two.md\n-before\n+after\n";
             browser_omnibar_display_text("https://example.test"),
             "https://example.test"
         );
+    }
+
+    #[gtk::test]
+    fn gtk_editable_keystrokes_never_reach_selected_terminal() {
+        let app_state = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let application = gtk::Application::new(
+            Some("ai.manaflow.cmux.tests.editable-routing"),
+            gio::ApplicationFlags::NON_UNIQUE,
+        );
+        application.register(None::<&gio::Cancellable>).unwrap();
+        let window = gtk::ApplicationWindow::new(&application);
+        let search = gtk::SearchEntry::new();
+        search.add_css_class("cmux-terminal-search");
+        window.set_child(Some(&search));
+        window.present();
+        search.grab_focus();
+        connect_terminal_keys(
+            &window,
+            &app_state,
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(Vec::new())),
+            "window-test",
+        );
+        let controllers = window.observe_controllers();
+        let capture = (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .filter_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .find(|controller| controller.propagation_phase() == gtk::PropagationPhase::Capture)
+            .expect("window capture controller");
+        for key in [gdk::Key::a, gdk::Key::BackSpace, gdk::Key::Left] {
+            assert!(
+                !capture.emit_by_name::<bool>(
+                    "key-pressed",
+                    &[&key, &38_u32, &gdk::ModifierType::empty()]
+                ),
+                "search field must receive {key:?} even while a terminal is selected"
+            );
+        }
+        window.destroy();
+    }
+}
+
+#[cfg(test)]
+mod daily_layout_tests {
+    use super::*;
+
+    #[gtk::test]
+    fn right_sidebar_does_not_take_spare_terminal_width() {
+        let app = Arc::new(Mutex::new(AppState::with_paths(None, None).unwrap()));
+        let snapshot =
+            json!({"right_sidebar": {"visible": true, "mode": "files"}, "sidebar": {"cwd": ""}});
+        let chrome = app_chrome_sidebar(&snapshot, &app, GtkUiMode::Next);
+        let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        main.set_hexpand(true);
+        let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        body.append(&main);
+        body.append(&chrome);
+        let window = gtk::Window::builder()
+            .default_width(1180)
+            .default_height(700)
+            .child(&body)
+            .build();
+        window.present();
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            while glib::MainContext::default().pending() {
+                glib::MainContext::default().iteration(false);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            chrome.width() <= metrics::RIGHT_SIDEBAR_WIDTH + 20,
+            "right sidebar must retain its requested width, got {}",
+            chrome.width()
+        );
+        window.destroy();
     }
 }

@@ -181,3 +181,17 @@
 .cmux-ui-next .cmux-palette-input:focus {
   border-color: @cmux_focus;
 }
+
+.cmux-ui-next button.cmux-palette-row {
+  border: 0;
+  background: transparent;
+  color: @cmux_text;
+  box-shadow: none;
+}
+
+.cmux-ui-next button.cmux-palette-row:hover,
+.cmux-ui-next button.cmux-palette-row:focus,
+.cmux-ui-next button.cmux-palette-selected {
+  background: @cmux_selection;
+  color: @cmux_text_inverse;
+}

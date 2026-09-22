@@ -4097,6 +4097,8 @@ mod tests {
     #[test]
     fn toggle_left_sidebar_action_hides_left_sidebar_without_hiding_right_sidebar() {
         let mut app = AppState::with_paths(None, None).expect("app state");
+        app.handle("sidebar.right", &json!({"action": "show"}))
+            .expect("show right sidebar");
 
         let initial = snapshot_value(&mut app, &json!({})).expect("initial snapshot");
         assert_eq!(initial["left_sidebar"]["visible"], true);
@@ -4123,6 +4125,8 @@ mod tests {
     #[test]
     fn renderer_snapshot_exposes_beta_gated_right_sidebar_modes_and_feed_data() {
         let mut app = AppState::with_paths(None, None).expect("app state");
+        app.handle("sidebar.right", &json!({"action": "show"}))
+            .expect("show right sidebar");
         app.set_beta_feature_settings_for_test(crate::config::BetaFeatureSettings::default());
         app.handle(
             "feed.push",

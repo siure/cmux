@@ -17,11 +17,20 @@ if [[ "${1:-}" == "--capture" ]]; then
   socket="$6"
   state_root="$7"
 
+  # A fixture must not inherit app state paths or pane IDs from the calling terminal.
+  for cmux_variable in "${!CMUX_@}"; do
+    unset "$cmux_variable"
+  done
   export HOME="$state_root/home"
   export XDG_CONFIG_HOME="$state_root/config"
   export XDG_STATE_HOME="$state_root/state"
+  export XDG_DATA_HOME="$state_root/data"
   export XDG_CACHE_HOME="$state_root/cache"
-  unset CMUX_LINUX_UI
+  export CMUX_BROWSER_WEBKIT_DATA_DIR="$state_root/data/cmux/browser-profiles"
+  export CMUX_BROWSER_WEBKIT_CACHE_DIR="$state_root/cache/cmux/browser-profiles"
+  export CMUX_SOCKET_PATH="$socket"
+  export CMUX_SHELL=/bin/bash
+  unset BASH_ENV ENV PROMPT_COMMAND ZDOTDIR
   export GDK_BACKEND=x11
   export GSK_RENDERER=cairo
   if [[ "$fixture" == "scale2" ]]; then
@@ -34,7 +43,8 @@ if [[ "${1:-}" == "--capture" ]]; then
   export NO_AT_BRIDGE=1
   export LC_ALL=C.UTF-8
   export TZ=UTC
-  mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
+  mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+  printf "PS1='cmux> '\n" >"$HOME/.bashrc"
 
   "$cmux" app --renderer gtk --socket "$socket" >"$state_root/app.log" 2>&1 &
   app_pid=$!
@@ -65,10 +75,24 @@ if [[ "${1:-}" == "--capture" ]]; then
     fi
   }
   cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
     "$cmux" --socket "$socket" rpc app.quit.request '{}' >/dev/null 2>&1 || true
     terminate_app
+    if [[ "$status" -ne 0 ]]; then
+      cp "$state_root/app.log" "${actual%.png}.log" 2>/dev/null || true
+      if [[ -f "$state_root/snapshot.json" ]]; then
+        cp "$state_root/snapshot.json" "${actual%.png}.json" || true
+      fi
+      echo "GTK fixture $fixture failed; state retained at $state_root" >&2
+      echo "Application log: ${actual%.png}.log" >&2
+      tail -n 40 "$state_root/app.log" >&2 || true
+    fi
+    exit "$status"
   }
-  trap cleanup EXIT INT TERM
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   for _ in $(seq 1 200); do
     if "$cmux" --socket "$socket" ping >/dev/null 2>&1; then
@@ -228,15 +252,16 @@ run_fixture() {
   local actual="$output_dir/gtk-next-$fixture-${width}x${height}.png"
   local golden="$golden_dir/gtk-next-$fixture-${width}x${height}.png"
 
-  dbus-run-session -- xvfb-run -a -s "-screen 0 ${width}x${height}x24" \
+  xvfb-run -a -s "-screen 0 ${width}x${height}x24" dbus-run-session -- \
     "$0" --capture "$fixture" "$width" "$height" "$actual" "$socket" "$state_root"
 
   if [[ "${CMUX_UPDATE_GOLDENS:-0}" == "1" ]]; then
     cp "$actual" "$golden"
-  elif [[ ! -f "$golden" ]]; then
-    echo "missing GTK visual golden: $golden" >&2
-    return 1
   elif [[ "${CMUX_VISUAL_SMOKE_ONLY:-0}" != "1" ]]; then
+    if [[ ! -f "$golden" ]]; then
+      echo "missing GTK visual golden: $golden" >&2
+      return 1
+    fi
     python3 - "$golden" "$actual" "$output_dir/gtk-next-$fixture-diff.png" <<'PY'
 from PIL import Image, ImageChops
 import sys, warnings

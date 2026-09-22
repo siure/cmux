@@ -123,7 +123,6 @@ const RTLD_NOW: i32 = 2;
 const GHOSTTY_TEXT_SYNC_INTERVAL: Duration = Duration::from_millis(250);
 const GHOSTTY_SCROLLBACK_SYNC_INTERVAL: Duration = Duration::from_secs(5);
 const GHOSTTY_SCROLLBACK_SYNC_MAX_BYTES: usize = 262_144;
-const GHOSTTY_RESIZE_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 const GHOSTTY_FOCUS_RETRY_ATTEMPTS: u8 = 8;
 const GHOSTTY_RENDERER_ACTIVE_STATUS: &str = "Ghostty renderer active";
 const GHOSTTY_SCROLL_MOD_PRECISION: c_int = 1;
@@ -148,6 +147,33 @@ pub(crate) fn take_ghostty_service_dispatched_surface_ids_for_test() -> Vec<Stri
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::mem::take(&mut *surface_ids)
+}
+
+pub(crate) fn inherited_terminal_options(
+    surface_id: &str,
+    split: bool,
+) -> Option<EmbeddedTerminalInheritedOptions> {
+    let host = GHOSTTY_SERVICE_HOSTS.with(|hosts| {
+        hosts
+            .borrow()
+            .values()
+            .find(|entry| entry.surface_id.as_deref() == Some(surface_id))
+            .and_then(|entry| entry.host.upgrade())
+    })?;
+    let host = host.try_borrow().ok()?;
+    let surface = host.surface.as_ref()?;
+    let context = if split {
+        GHOSTTY_SURFACE_CONTEXT_SPLIT
+    } else {
+        GHOSTTY_SURFACE_CONTEXT_TAB
+    };
+    let mut config = surface.inherited_config(context);
+    let options = EmbeddedTerminalInheritedOptions {
+        working_directory: config.working_directory(),
+        font_size: config.font_size(),
+    };
+    surface.free_inherited_config(&mut config);
+    Some(options)
 }
 
 pub(crate) fn request_ghostty_service(surface_id: &str) {
@@ -289,11 +315,16 @@ impl GhosttySurfaceWidget {
     }
 
     pub fn update_presentation(&self, focused: bool, occluded: bool) {
-        self.model_focused.set(focused);
+        let selection_changed = self.model_focused.replace(focused) != focused;
         if let Some(host) = self.host.as_ref() {
             host.borrow_mut().update_presentation(focused, occluded);
         }
-        if focused && !self.area.has_focus() {
+        // Selection is model state; an entry or sidebar can own GTK focus while
+        // that same terminal stays selected through metadata refreshes.
+        if focused
+            && !self.area.has_focus()
+            && (selection_changed || !ghostty_area_has_foreign_focus(&self.area))
+        {
             request_ghostty_area_focus(&self.area, &self.model_focused, &self.focus_retry_active);
         }
     }
@@ -370,6 +401,15 @@ impl GhosttySurfaceWidget {
     }
 }
 
+fn ghostty_area_has_foreign_focus(area: &gtk::GLArea) -> bool {
+    area.root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok())
+        .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
+        .is_some_and(|focused| {
+            focused != area.clone().upcast::<gtk::Widget>() && !focused.is::<gtk::GLArea>()
+        })
+}
+
 fn request_ghostty_area_focus(
     area: &gtk::GLArea,
     model_focused: &Rc<Cell<bool>>,
@@ -390,7 +430,10 @@ fn request_ghostty_area_focus(
     let idle_area = area.clone();
     let idle_focused = Rc::clone(model_focused);
     glib::idle_add_local_once(move || {
-        if idle_focused.get() && !idle_area.has_focus() {
+        if idle_focused.get()
+            && !idle_area.has_focus()
+            && !ghostty_area_has_foreign_focus(&idle_area)
+        {
             idle_area.grab_focus();
         }
     });
@@ -400,7 +443,7 @@ fn request_ghostty_area_focus(
     let retry_active = Rc::clone(retry_active);
     let attempts = Rc::new(Cell::new(0_u8));
     glib::timeout_add_local(Duration::from_millis(16), move || {
-        if !still_focused.get() || area.has_focus() {
+        if !still_focused.get() || area.has_focus() || ghostty_area_has_foreign_focus(&area) {
             retry_active.set(false);
             return glib::ControlFlow::Break;
         }
@@ -592,13 +635,13 @@ fn focus_embedded_terminal_surface(app_state: &Arc<Mutex<AppState>>, surface_id:
         return false;
     };
     if app
-        .handle("surface.focus", &json!({"surface_id": surface_id}))
+        .handle_ui("surface.focus", &json!({"surface_id": surface_id}))
         .is_err()
     {
         return false;
     }
     let _ = app.set_embedded_terminal_widget_focused(surface_id, true);
-    let _ = app.handle(
+    let _ = app.handle_ui(
         "terminal.textbox.set_focus",
         &json!({"surface_id": surface_id, "focus": "terminal"}),
     );
@@ -632,19 +675,19 @@ fn connect_ghostty_area(
 
     let resize_host = Rc::clone(&host);
     let resize_status = status.clone();
-    let resize_generation = Rc::new(Cell::new(0_u64));
+    let resize_pending = Rc::new(Cell::new(false));
     area.connect_resize(move |area, _, _| {
-        let generation = resize_generation.get().wrapping_add(1);
-        resize_generation.set(generation);
-
-        let pending_generation = Rc::clone(&resize_generation);
+        if resize_pending.replace(true) {
+            return;
+        }
+        let resize_pending = Rc::clone(&resize_pending);
         let resize_host = Rc::clone(&resize_host);
         let resize_status = resize_status.clone();
         let area = area.downgrade();
-        glib::timeout_add_local_once(GHOSTTY_RESIZE_SETTLE_INTERVAL, move || {
-            if pending_generation.get() != generation {
-                return;
-            }
+        // Coalesce one GTK layout turn, but keep updating during a continuous
+        // divider/window drag rather than waiting for the drag to stop.
+        glib::idle_add_local_once(move || {
+            resize_pending.set(false);
             let Some(area) = area.upgrade() else {
                 return;
             };
@@ -3371,7 +3414,7 @@ fn gtk_ghostty_close_surface_on_main(callbacks: usize, token: u64, process_alive
         );
         return;
     }
-    let _ = app.handle(
+    let _ = app.handle_ui(
         "surface.close",
         &json!({
             "surface_id": surface_id,
@@ -3770,7 +3813,7 @@ fn gtk_ghostty_inherited_options(
     unsafe {
         inherited_config_free(surface, &mut config);
     }
-    (options.working_directory.is_some() || options.font_size.is_some()).then_some(options)
+    Some(options)
 }
 
 unsafe extern "C" fn gtk_ghostty_action(
@@ -3852,7 +3895,7 @@ fn gtk_ghostty_action_on_main(callbacks: usize, token: u64, event: GtkGhosttyAct
                         app.update_embedded_terminal_close_confirmation(surface_id, needs_confirm);
                     let _ = app.record_embedded_terminal_app_action(surface_id, action);
                     let result = app
-                        .handle(
+                        .handle_ui(
                             "app.quit.request",
                             &json!({"source": "ghostty", "surface_id": surface_id}),
                         )
@@ -9507,5 +9550,41 @@ mod tests {
             GHOSTTY_MOUSE_PRESSURE_DEEP
         );
         assert_eq!(ghostty_pressure_stage(2.0), GHOSTTY_MOUSE_PRESSURE_DEEP);
+    }
+    #[gtk::test]
+    fn gtk_ghostty_refresh_preserves_foreign_focus_but_selection_change_focuses_terminal() {
+        let area = gtk::GLArea::new();
+        area.set_focusable(true);
+        let entry = gtk::Entry::new();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&entry);
+        root.append(&area);
+        let window = gtk::Window::builder().child(&root).build();
+        window.present();
+        entry.grab_focus();
+        let widget = GhosttySurfaceWidget {
+            root,
+            area: area.clone(),
+            scrollbar: gtk::Scrollbar::new(gtk::Orientation::Vertical, None::<&gtk::Adjustment>),
+            scrollbar_adjustment: gtk::Adjustment::new(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+            scrollbar_syncing: Rc::new(Cell::new(false)),
+            model_focused: Rc::new(Cell::new(true)),
+            focus_retry_active: Rc::new(Cell::new(false)),
+            host: None,
+        };
+        widget.update_presentation(true, false);
+        assert_ne!(
+            gtk::prelude::GtkWindowExt::focus(&window),
+            Some(area.clone().upcast()),
+            "metadata refresh must preserve editable focus"
+        );
+        widget.update_presentation(false, false);
+        widget.update_presentation(true, false);
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&window),
+            Some(area.clone().upcast()),
+            "a newly selected terminal must receive focus"
+        );
+        window.destroy();
     }
 }
