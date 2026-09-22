@@ -33596,6 +33596,59 @@ fn remote_tmux_live_control_stream_seeds_output_and_routes_input() {
     assert!(ssh_log.contains("control: new-window -t ops"));
     assert!(ssh_log.contains("control: rename-window -t @0 'renamed main'"));
     assert!(ssh_log.contains("control: kill-window -t @1"));
+
+    let history_before = rpc(&server.socket, "history.list", json!({}));
+    let closed = rpc(
+        &server.socket,
+        "surface.close",
+        json!({"surface_id": &surface_id}),
+    );
+    assert_eq!(closed["workspace_closed"], true);
+    assert_eq!(closed["routed_to_remote_tmux"], true);
+    let history = rpc(&server.socket, "history.list", json!({}));
+    assert_eq!(
+        history["entries"].as_array().unwrap().len(),
+        history_before["entries"].as_array().unwrap().len() + 1,
+        "closing the last remote pane must record its workspace"
+    );
+    let reopened = rpc(&server.socket, "history.reopen_closed", json!({}));
+    assert_eq!(reopened["handled"], true);
+    let restored = rpc(
+        &server.socket,
+        "surface.list",
+        json!({"workspace_id": reopened["workspace_id"]}),
+    );
+    assert_eq!(restored["surfaces"].as_array().unwrap().len(), 1);
+    let text = rpc(
+        &server.socket,
+        "surface.read_text",
+        json!({"surface_id": restored["surfaces"][0]["surface_id"], "raw": true}),
+    );
+    assert!(text["text"].as_str().unwrap().contains("seed-pane-0"));
+
+    let work_surfaces = rpc(
+        &server.socket,
+        "surface.list",
+        json!({"workspace_id": &work_workspace_id}),
+    );
+    for surface in work_surfaces["surfaces"].as_array().unwrap() {
+        if surface["surface_id"] != main_surface_id {
+            rpc(
+                &server.socket,
+                "surface.close",
+                json!({"surface_id": surface["surface_id"], "record_history": false}),
+            );
+        }
+    }
+    let closed = rpc(
+        &server.socket,
+        "surface.close",
+        json!({"surface_id": &main_surface_id, "record_history": false}),
+    );
+    assert_eq!(closed["workspace_closed"], true);
+    assert_eq!(closed["routed_to_remote_tmux"], true);
+    let history_after = rpc(&server.socket, "history.list", json!({}));
+    assert_eq!(history_after["entries"], history_before["entries"]);
 }
 
 #[test]
