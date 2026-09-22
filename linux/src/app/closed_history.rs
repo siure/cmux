@@ -1238,7 +1238,12 @@ mod tests {
     #[test]
     fn bulk_closed_workspaces_reopen_with_layout_scrollback_and_order() {
         for action in ["close_above", "close_below", "close_others"] {
-            for confirmed in [false, true] {
+            for (confirmed, record_history) in [
+                (false, None),
+                (true, None),
+                (false, Some(false)),
+                (true, Some(false)),
+            ] {
                 let mut app = AppState::with_paths_and_terminal_startup(
                     None,
                     None,
@@ -1283,15 +1288,14 @@ mod tests {
                     }
                 }
                 app.app_workspace_settings.warn_before_closing_tab = confirmed;
-                let request = app
-                    .handle(
-                        "workspace.action",
-                        &json!({
-                            "workspace_id": ids[4], "action": action,
-                            "source": if confirmed { "context_menu" } else { "api" }
-                        }),
-                    )
-                    .unwrap();
+                let mut params = json!({
+                    "workspace_id": ids[4], "action": action,
+                    "source": if confirmed { "context_menu" } else { "api" }
+                });
+                if let Some(record_history) = record_history {
+                    params["record_history"] = json!(record_history);
+                }
+                let request = app.handle("workspace.action", &params).unwrap();
                 let result = if confirmed {
                     assert_eq!(request["confirmation_required"], true);
                     assert!(app.recently_closed_items.is_empty());
@@ -1307,6 +1311,19 @@ mod tests {
                 assert!(app.workspaces.contains_key(&ids[1]));
                 assert!(app.workspaces.contains_key(&ids[0]));
                 let history = app.handle("history.list", &json!({})).unwrap();
+                if record_history == Some(false) {
+                    assert_eq!(
+                        history["entries"],
+                        json!([]),
+                        "{action}, confirmed={confirmed}"
+                    );
+                    assert_eq!(app.workspaces.len(), ids.len() - target_indices.len());
+                    assert_eq!(
+                        app.handle("history.reopen_closed", &json!({})).unwrap()["handled"],
+                        false
+                    );
+                    continue;
+                }
                 assert_eq!(
                     history["entries"].as_array().unwrap().len(),
                     target_indices.len(),
@@ -1337,6 +1354,90 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert_eq!(restored_titles, titles, "{action}, confirmed={confirmed}");
                 assert!(app.recently_closed_items.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_closes_preserve_history_policy_through_container_escalation() {
+        for kind in [
+            "surface",
+            "workspace",
+            "window",
+            "last_workspace",
+            "last_surface",
+        ] {
+            for record_history in [None, Some(false)] {
+                let mut app = AppState::with_paths_and_terminal_startup(
+                    None,
+                    None,
+                    TerminalStartupMode::RendererOwned,
+                )
+                .unwrap();
+                app.app_workspace_settings.warn_before_closing_tab_x_button = true;
+                let (method, mut params, expected_kind) = match kind {
+                    "surface" => {
+                        let created = app.handle("surface.create", &json!({})).unwrap();
+                        (
+                            "surface.close",
+                            json!({"surface_id": created["surface_id"], "source": "tab_button"}),
+                            "panel",
+                        )
+                    }
+                    "workspace" => {
+                        let created = app.handle("workspace.create", &json!({})).unwrap();
+                        (
+                            "workspace.close",
+                            json!({"workspace_id": created["workspace_id"], "source": "tab_button"}),
+                            "workspace",
+                        )
+                    }
+                    _ => {
+                        let created = app.handle("window.create", &json!({})).unwrap();
+                        match kind {
+                            "window" => (
+                                "debug.window.close_request",
+                                json!({"window_id": created["window_id"], "source": "shortcut"}),
+                                "window",
+                            ),
+                            "last_workspace" => (
+                                "workspace.close",
+                                json!({"workspace_id": app.current_workspace_id().unwrap(), "source": "tab_button"}),
+                                "window",
+                            ),
+                            _ => (
+                                "surface.close",
+                                json!({"surface_id": app.current_surface_id().unwrap(), "source": "tab_button"}),
+                                "window",
+                            ),
+                        }
+                    }
+                };
+                if let Some(record_history) = record_history {
+                    params["record_history"] = json!(record_history);
+                }
+                let request = app.handle(method, &params).unwrap();
+                assert_eq!(request["confirmation_required"], true, "{kind}");
+                assert!(app.recently_closed_items.is_empty());
+                app.handle(
+                    "app.close_confirmation.reply",
+                    &json!({"id": request["confirmation"]["id"], "confirmed": true}),
+                )
+                .unwrap();
+                assert_eq!(app.windows.len(), 1, "{kind}");
+                assert_eq!(app.workspaces.len(), 1, "{kind}");
+                assert_eq!(app.surfaces.len(), 1, "{kind}");
+                let history = app.handle("history.list", &json!({})).unwrap();
+                let entries = history["entries"].as_array().unwrap();
+                if record_history == Some(false) {
+                    assert!(
+                        entries.is_empty(),
+                        "{kind}: confirmed close ignored record_history=false"
+                    );
+                } else {
+                    assert_eq!(entries.len(), 1, "{kind}");
+                    assert_eq!(entries[0]["kind"], expected_kind, "{kind}");
+                }
             }
         }
     }
