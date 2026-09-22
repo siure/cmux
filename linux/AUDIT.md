@@ -253,8 +253,8 @@ Codex and Greptile identified additional reproducible issues:
 The sidebar and history regressions failed before their fixes. Review evidence and final suite logs are in
 `../../cmux-daily-audit-2026-09-20/pr5-review/`.
 
-After these corrections, the full display-free suite passes **882 tests** and
-GTK passes **1,100 tests**, each with five existing explicit ignores. The GTK
+After these corrections, the full display-free suite passes **883 tests** and
+GTK passes **1,101 tests**, each with five existing explicit ignores. The GTK
 build and formatting check pass. The child-environment test waits for the
 spawned shell's environment to become observable instead of racing its exec.
 
@@ -278,3 +278,10 @@ A review suggestion to recreate dissolved groups was rejected after checking
 the original. `Sources/TabManager.swift` deliberately dissolves an anchored group
 when its anchor closes and drops stale membership on reopen. An isolated Linux
 RPC check matches that behavior; reopening does not recreate the group.
+
+History suppression also needs to survive confirmation and close forwarding.
+Bulk workspace actions now honor `record_history: false` on direct and confirmed
+paths. Individual panel, workspace, and window confirmations preserve the same
+option, including last-panel and last-workspace escalation. Tests verify that
+the requested targets close without adding history, while default closes still
+produce the expected history entries.
