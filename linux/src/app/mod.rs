@@ -2970,14 +2970,17 @@ enum CloseConfirmationAction {
         workspace_id: String,
         action: String,
         targets: Vec<String>,
+        record_history: bool,
     },
     Workspace {
         workspace_id: String,
         source: String,
+        record_history: bool,
     },
     Surface {
         surface_id: String,
         source: SurfaceCloseSource,
+        record_history: bool,
     },
     SurfaceBatch {
         surface_id: String,
@@ -2986,6 +2989,7 @@ enum CloseConfirmationAction {
     Window {
         window_id: String,
         source: String,
+        record_history: bool,
     },
     Quit,
 }
@@ -4538,7 +4542,9 @@ impl AppState {
                 None,
                 Some(source.as_str()),
             ),
-            CloseConfirmationAction::Surface { surface_id, source } => (
+            CloseConfirmationAction::Surface {
+                surface_id, source, ..
+            } => (
                 "surface",
                 "Close tab?",
                 "This will close the current tab.",
@@ -4648,16 +4654,18 @@ impl AppState {
                 workspace_id,
                 action,
                 targets,
+                record_history,
             } => {
                 if !self.workspaces.contains_key(&workspace_id) {
                     json!({"handled": false, "reason": "workspace_not_found"})
                 } else {
-                    self.close_workspace_targets(&action, &workspace_id, targets)?
+                    self.close_workspace_targets(&action, &workspace_id, targets, record_history)?
                 }
             }
             CloseConfirmationAction::Workspace {
                 workspace_id,
                 source,
+                record_history,
             } => {
                 if !self.workspaces.contains_key(&workspace_id) {
                     json!({"handled": false, "reason": "workspace_not_found"})
@@ -4665,18 +4673,24 @@ impl AppState {
                     self.close_workspace(&json!({
                         "workspace_id": workspace_id,
                         "source": source,
-                        "confirmed": true
+                        "confirmed": true,
+                        "record_history": record_history
                     }))?
                 }
             }
-            CloseConfirmationAction::Surface { surface_id, source } => {
+            CloseConfirmationAction::Surface {
+                surface_id,
+                source,
+                record_history,
+            } => {
                 if !self.surfaces.contains_key(&surface_id) {
                     json!({"handled": false, "reason": "surface_not_found"})
                 } else {
                     self.surface_close(&json!({
                         "surface_id": surface_id,
                         "source": surface_close_source_name(source),
-                        "confirmed": true
+                        "confirmed": true,
+                        "record_history": record_history
                     }))?
                 }
             }
@@ -4690,14 +4704,19 @@ impl AppState {
                     }))?
                 }
             }
-            CloseConfirmationAction::Window { window_id, source } => {
+            CloseConfirmationAction::Window {
+                window_id,
+                source,
+                record_history,
+            } => {
                 if !self.windows.iter().any(|window| window.id == window_id) {
                     json!({"handled": false, "reason": "window_not_found"})
                 } else {
                     self.window_close_request(&json!({
                         "window_id": window_id,
                         "source": source,
-                        "confirmed": true
+                        "confirmed": true,
+                        "record_history": record_history
                     }))?
                 }
             }
@@ -14282,6 +14301,7 @@ impl AppState {
                 CloseConfirmationAction::Window {
                     window_id: id.clone(),
                     source: source.clone(),
+                    record_history: bool_param(params, "record_history").unwrap_or(true),
                 },
             );
             return Ok(json!({
@@ -14295,7 +14315,10 @@ impl AppState {
                 "confirmation": confirmation
             }));
         }
-        self.close_window(&json!({"window_id": id.clone()}))?;
+        self.close_window(&json!({
+            "window_id": id.clone(),
+            "record_history": bool_param(params, "record_history").unwrap_or(true)
+        }))?;
         Ok(json!({
             "closed": true,
             "quit": false,
@@ -14350,6 +14373,7 @@ impl AppState {
                 CloseConfirmationAction::Workspace {
                     workspace_id: id.clone(),
                     source,
+                    record_history: bool_param(params, "record_history").unwrap_or(true),
                 },
             );
             return Ok(json!({
@@ -14359,7 +14383,8 @@ impl AppState {
         }
         if window.workspaces.len() <= 1 && interactive {
             return self.window_close_request(&json!({
-                "window_id": window_id, "source": source, "confirmed": confirmed
+                "window_id": window_id, "source": source, "confirmed": confirmed,
+                "record_history": bool_param(params, "record_history").unwrap_or(true)
             }));
         }
         if window.workspaces.len() <= 1 {
@@ -17777,6 +17802,7 @@ impl AppState {
             _ => Vec::new(),
         };
 
+        let record_history = bool_param(params, "record_history").unwrap_or(true);
         let source = string_param(params, "source").unwrap_or_else(|| "api".to_string());
         let interactive = !matches!(source.as_str(), "api" | "socket" | "cli");
         let closable_targets = targets
@@ -17804,6 +17830,7 @@ impl AppState {
                     workspace_id: workspace_id.to_string(),
                     action: action.to_string(),
                     targets: closable_targets,
+                    record_history,
                 },
             );
             return Ok(json!({
@@ -17812,7 +17839,7 @@ impl AppState {
                 "confirmation": confirmation
             }));
         }
-        self.close_workspace_targets(action, workspace_id, targets)
+        self.close_workspace_targets(action, workspace_id, targets, record_history)
     }
 
     fn close_workspace_targets(
@@ -17820,6 +17847,7 @@ impl AppState {
         action: &str,
         workspace_id: &str,
         targets: Vec<String>,
+        record_history: bool,
     ) -> AppResult<Value> {
         let (window_id, _, _) = self.workspace_window_index_len(workspace_id)?;
         let selected_before = self
@@ -17856,8 +17884,10 @@ impl AppState {
                 break;
             }
             closed_workspace_refs.push(self.workspace_ref(&target_id));
-            let (_, index, _) = self.workspace_window_index_len(&target_id)?;
-            self.capture_closed_workspace(&target_id, index);
+            if record_history {
+                let (_, index, _) = self.workspace_window_index_len(&target_id)?;
+                self.capture_closed_workspace(&target_id, index);
+            }
             self.remove_workspace(&target_id);
             closed_workspace_ids.push(target_id);
         }
@@ -18354,6 +18384,7 @@ impl AppState {
                 CloseConfirmationAction::Surface {
                     surface_id: surface_id.clone(),
                     source: close_source,
+                    record_history: bool_param(params, "record_history").unwrap_or(true),
                 },
             );
             return Ok(json!({
