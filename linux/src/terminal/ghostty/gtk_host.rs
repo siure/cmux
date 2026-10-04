@@ -7240,7 +7240,7 @@ mod tests {
                 PathBuf::from("/tmp/quote's")
             ])
             .as_deref(),
-            Some("/tmp/plain\n/tmp/space\\ name\n/tmp/quote\\'s\n")
+            Some("/tmp/plain /tmp/space\\ name /tmp/quote\\'s")
         );
     }
 
@@ -7248,7 +7248,7 @@ mod tests {
     fn gtk_ghostty_drop_path_text_quotes_multiline_paths() {
         assert_eq!(
             ghostty_drop_path_text([PathBuf::from("/tmp/line\nbreak")]).as_deref(),
-            Some("'/tmp/line\nbreak'\n")
+            Some("'/tmp/line\nbreak'")
         );
     }
 
@@ -7264,8 +7264,35 @@ mod tests {
                 "# comment\r\nfile:///tmp/cmux%20drop/a.txt\r\nfile://localhost/tmp/two%20words\n"
             )
             .as_deref(),
-            Some("/tmp/cmux\\ drop/a.txt\n/tmp/two\\ words\n")
+            Some("/tmp/cmux\\ drop/a.txt /tmp/two\\ words")
         );
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_file_value_inserts_an_argument_without_submitting() {
+        let value = gio::File::for_path("/tmp/日本語 + notes.txt").to_value();
+        assert_eq!(
+            ghostty_drop_text(&value).as_deref(),
+            Some("/tmp/日本語\\ +\\ notes.txt")
+        );
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_uri_list_preserves_literal_plus_and_decodes_once() {
+        assert_eq!(
+            ghostty_drop_uri_list_text(
+                "file:///tmp/a+b%20%2520.txt\r\nfile://localhost/tmp/%E6%97%A5%E6%9C%AC%E8%AA%9E%23%3F.txt\r\n"
+            )
+            .as_deref(),
+            Some("/tmp/a+b\\ %20.txt /tmp/日本語\\#\\?.txt")
+        );
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_remote_file_uri_is_not_rewritten_as_a_local_path() {
+        let uri = "file://other-host/tmp/document.txt";
+        assert_eq!(ghostty_drop_uri_list_text(uri), None);
+        assert_eq!(ghostty_drop_string_text(uri).as_deref(), Some(uri));
     }
 
     #[test]

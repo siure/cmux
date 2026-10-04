@@ -67634,3 +67634,117 @@ mod native_inheritance_defaults_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod surface_order_atomicity_tests {
+    use super::{AppState, TerminalStartupMode};
+    use serde_json::{json, Value};
+
+    fn app() -> AppState {
+        AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned)
+            .unwrap()
+    }
+
+    fn topology(app: &AppState) -> Value {
+        let mut session = app.session_snapshot(false);
+        session.saved_at = 0.0;
+        json!({
+            "session": session,
+            "current_window": app.current_window,
+            "panes": app.panes.iter().map(|(id, pane)| (id.clone(), json!({
+                "workspace": pane.workspace_id,
+                "surfaces": pane.surfaces,
+                "selected_surface": pane.selected_surface,
+            }))).collect::<serde_json::Map<_, _>>(),
+            "surfaces": app.surfaces.iter().map(|(id, surface)|
+                (id.clone(), json!(surface.pane_id))
+            ).collect::<serde_json::Map<_, _>>(),
+        })
+    }
+
+    #[test]
+    fn rejected_surface_reorders_preserve_topology_and_focus() {
+        for target in [
+            "missing",
+            "unknown-before",
+            "unknown-after",
+            "other-before",
+            "other-after",
+        ] {
+            let mut app = app();
+            let surface = app.current_surface_id().unwrap();
+            let other = app
+                .handle("surface.split", &json!({"direction": "right"}))
+                .unwrap()["surface_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            app.handle("surface.focus", &json!({"surface_id": surface}))
+                .unwrap();
+            let mut params = json!({"surface_id": surface});
+            match target {
+                "unknown-before" => params["before_surface_id"] = json!("missing-surface"),
+                "unknown-after" => params["after_surface_id"] = json!("missing-surface"),
+                "other-before" => params["before_surface_id"] = json!(other),
+                "other-after" => params["after_surface_id"] = json!(other),
+                _ => {}
+            }
+            let before = topology(&app);
+            assert!(app.handle("surface.reorder", &params).is_err(), "{target}");
+            assert_eq!(topology(&app), before, "rejected reorder: {target}");
+        }
+    }
+
+    #[test]
+    fn rejected_surface_moves_preserve_topology_and_focus() {
+        for anchor in ["before_surface_id", "after_surface_id"] {
+            for unknown in [false, true] {
+                let mut app = app();
+                let surface = app.current_surface_id().unwrap();
+                let pane = app.surfaces[&surface].pane_id.clone();
+                let other = app
+                    .handle("surface.split", &json!({"direction": "right"}))
+                    .unwrap()["surface_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                app.handle("surface.focus", &json!({"surface_id": surface}))
+                    .unwrap();
+                let mut params = json!({"surface_id": surface, "pane_id": pane, "focus": true});
+                params[anchor] = json!(if unknown { "missing-surface" } else { &other });
+                let before = topology(&app);
+                assert!(
+                    app.handle("surface.move", &params).is_err(),
+                    "{anchor}, unknown={unknown}"
+                );
+                assert_eq!(
+                    topology(&app),
+                    before,
+                    "rejected move: {anchor}, unknown={unknown}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn surface_self_anchors_and_same_pane_move_preserve_sole_tab() {
+        let mut app = app();
+        let surface = app.current_surface_id().unwrap();
+        let pane = app.surfaces[&surface].pane_id.clone();
+        let before = topology(&app);
+        for method in ["surface.reorder", "surface.move"] {
+            for anchor in ["before_surface_id", "after_surface_id"] {
+                let mut params = json!({"surface_id": surface, "pane_id": pane});
+                params[anchor] = json!(surface);
+                app.handle(method, &params).unwrap();
+                assert_eq!(topology(&app), before, "{method} with {anchor}");
+            }
+        }
+        app.handle(
+            "surface.move",
+            &json!({"surface_id": surface, "pane_id": pane}),
+        )
+        .unwrap();
+        assert_eq!(topology(&app), before);
+    }
+}
