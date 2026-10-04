@@ -18709,24 +18709,34 @@ impl AppState {
             }));
         }
 
+        let destination = self
+            .panes
+            .get(&target_pane)
+            .ok_or_else(|| AppError::not_found("target pane not found"))?;
+        // Resolve anchors against the resulting order before detaching the tab.
+        let target_index = if let Some(index) = index {
+            index
+        } else if let Some(before_id) = before_id.as_ref() {
+            destination
+                .surfaces
+                .iter()
+                .filter(|id| *id != &surface_id)
+                .position(|id| id == before_id)
+                .ok_or_else(|| AppError::not_found("before surface not found"))?
+        } else if let Some(after_id) = after_id.as_ref() {
+            destination
+                .surfaces
+                .iter()
+                .filter(|id| *id != &surface_id)
+                .position(|id| id == after_id)
+                .ok_or_else(|| AppError::not_found("after surface not found"))?
+                + 1
+        } else {
+            destination.surfaces.len()
+        };
+
         self.detach_surface(&surface_id)?;
         if let Some(pane) = self.panes.get_mut(&target_pane) {
-            let target_index = if let Some(index) = index {
-                index
-            } else if let Some(before_id) = before_id.as_ref() {
-                pane.surfaces
-                    .iter()
-                    .position(|id| id == before_id)
-                    .ok_or_else(|| AppError::not_found("before surface not found"))?
-            } else if let Some(after_id) = after_id.as_ref() {
-                pane.surfaces
-                    .iter()
-                    .position(|id| id == after_id)
-                    .ok_or_else(|| AppError::not_found("after surface not found"))?
-                    + 1
-            } else {
-                pane.surfaces.len()
-            };
             pane.surfaces
                 .insert(target_index.min(pane.surfaces.len()), surface_id.clone());
             pane.selected_surface = Some(surface_id.clone());
@@ -18790,23 +18800,25 @@ impl AppState {
             .iter()
             .position(|id| id == &surface_id)
             .ok_or_else(|| AppError::not_found("surface not found"))?;
-        let item = pane.surfaces.remove(old);
         let target = if let Some(index) = index {
             index
         } else if let Some(before_id) = before_id {
             pane.surfaces
                 .iter()
+                .filter(|id| *id != &surface_id)
                 .position(|id| id == &before_id)
                 .ok_or_else(|| AppError::not_found("before surface not found"))?
         } else if let Some(after_id) = after_id {
             pane.surfaces
                 .iter()
+                .filter(|id| *id != &surface_id)
                 .position(|id| id == &after_id)
                 .ok_or_else(|| AppError::not_found("after surface not found"))?
                 + 1
         } else {
             return Err(AppError::invalid_params("reorder target required"));
         };
+        let item = pane.surfaces.remove(old);
         pane.surfaces.insert(target.min(pane.surfaces.len()), item);
         Ok(json!({"surface_id": surface_id, "surface_ref": self.surface_ref(&surface_id)}))
     }
@@ -67746,5 +67758,70 @@ mod surface_order_atomicity_tests {
         )
         .unwrap();
         assert_eq!(topology(&app), before);
+    }
+
+    #[test]
+    fn surface_order_changes_use_indices_after_removing_the_source() {
+        for method in ["surface.reorder", "surface.move"] {
+            let mut app = app();
+            let first = app.current_surface_id().unwrap();
+            let pane = app.surfaces[&first].pane_id.clone();
+            let mut create_tab = || {
+                app.handle(
+                    "surface.create",
+                    &json!({"pane_id": pane, "type": "terminal"}),
+                )
+                .unwrap()["surface_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            };
+            let second = create_tab();
+            let third = create_tab();
+            for (target, expected) in [
+                (
+                    json!({"after_surface_id": second}),
+                    [&second, &first, &third],
+                ),
+                (
+                    json!({"before_surface_id": second}),
+                    [&first, &second, &third],
+                ),
+                (json!({"index": 99}), [&second, &third, &first]),
+                (
+                    json!({"index": 0, "after_surface_id": third}),
+                    [&first, &second, &third],
+                ),
+            ] {
+                let mut params = target;
+                params["surface_id"] = json!(first);
+                params["pane_id"] = json!(pane);
+                app.handle(method, &params).unwrap();
+                assert_eq!(
+                    app.panes[&pane].surfaces,
+                    expected.map(Clone::clone),
+                    "{method}: {params}"
+                );
+            }
+
+            let split = app
+                .handle("surface.split", &json!({"direction": "right"}))
+                .unwrap();
+            let other = split["surface_id"].as_str().unwrap();
+            let other_pane = split["pane_id"].as_str().unwrap();
+            app.handle(
+                "surface.move",
+                &json!({"surface_id": first, "after_surface_id": other, "focus": true}),
+            )
+            .unwrap();
+            assert_eq!(app.panes[&pane].surfaces, [second, third]);
+            assert_eq!(
+                app.panes[other_pane].surfaces,
+                [other.to_string(), first.clone()]
+            );
+            assert_eq!(app.surfaces[&first].pane_id, other_pane);
+            assert_eq!(app.current_surface_id().unwrap(), first);
+            assert_eq!(app.current_pane_id().unwrap(), other_pane);
+        }
     }
 }

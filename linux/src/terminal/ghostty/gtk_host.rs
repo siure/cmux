@@ -5823,7 +5823,7 @@ fn ghostty_drop_uri_list_text(text: &str) -> Option<String> {
         if !line.starts_with("file://") {
             return None;
         }
-        paths.push(PathBuf::from(normalize_drop_file_path(line)));
+        paths.push(url::Url::parse(line).ok()?.to_file_path().ok()?);
     }
     ghostty_drop_path_text(paths)
 }
@@ -5835,9 +5835,11 @@ fn ghostty_drop_files_text(files: impl IntoIterator<Item = gio::File>) -> Option
 fn ghostty_drop_path_text(paths: impl IntoIterator<Item = PathBuf>) -> Option<String> {
     let mut text = String::new();
     for path in paths {
+        if !text.is_empty() {
+            text.push(' ');
+        }
         let path = path_to_terminal_string(&path);
         text.push_str(&shell_escape_drop_path(&path));
-        text.push('\n');
     }
     if text.is_empty() {
         None
@@ -5862,41 +5864,6 @@ fn shell_escape_drop_path(path: &str) -> String {
         out.push(ch);
     }
     out
-}
-
-fn normalize_drop_file_path(value: &str) -> String {
-    let trimmed = value.trim();
-    if let Some(path) = trimmed.strip_prefix("file://localhost/") {
-        return format!("/{}", percent_decode_drop_value(path));
-    }
-    if let Some(path) = trimmed.strip_prefix("file://") {
-        return percent_decode_drop_value(path);
-    }
-    trimmed.to_string()
-}
-
-fn percent_decode_drop_value(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                    index += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(if bytes[index] == b'+' {
-            b' '
-        } else {
-            bytes[index]
-        });
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
 }
 
 fn positive_u32(value: i32) -> u32 {
