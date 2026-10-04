@@ -25,7 +25,7 @@ def eventually(description, predicate, timeout=5):
         if result:
             return result
         time.sleep(0.05)
-    raise AssertionError(description)
+    raise AssertionError(description() if callable(description) else description)
 
 
 class X11:
@@ -158,6 +158,7 @@ def run(binary, screenshot):
             gamma = rpc("surface.create", pane_id=left, type="terminal", title="Gamma", focus=False)["surface_id"]
             split = rpc("surface.split", surface_id=alpha, direction="right", focus=False)
             delta, right = split["surface_id"], split["pane_id"]
+            names = dict(zip((alpha, beta, gamma, delta), ("Alpha", "Beta", "Gamma", "Delta")))
             rpc("surface.action", surface_id=delta, action="rename", title="Delta")
             rpc("sidebar.left", action="hide")
             rpc("sidebar.right", action="hide")
@@ -181,17 +182,23 @@ def run(binary, screenshot):
             x11.click(gamma_point)
             eventually("fixture pointer did not select Gamma; tab geometry changed",
                        lambda: rpc("system.identify")["focused"]["surface_id"] == gamma)
+            # Start with a different pane focused: focusing the source pane on
+            # pointer press must not cancel the tab's pending drag gesture.
             rpc("surface.focus", surface_id=alpha)
             rpc("surface.focus", surface_id=delta)
             time.sleep(0.3)
             x11.drag(gamma_point, first_tab)
-            eventually(f"native reorder failed: expected Gamma, Alpha, Beta; got {order(left)}",
+            eventually(lambda: "native reorder from inactive pane failed: expected "
+                       f"Gamma, Alpha, Beta; got {[names[s] for s in order(left)]}",
                        lambda: order(left) == [gamma, alpha, beta])
 
+            text_before_drop = rpc("surface.read_text", surface_id=delta)["text"]
             x11.drag(first_tab, (x + pane_width + 100, y + 200))
             time.sleep(0.3)
             assert order(left) == [gamma, alpha, beta], "terminal-body drop moved a tab"
             assert order(right) == [delta], "terminal-body drop changed the destination pane"
+            assert rpc("surface.read_text", surface_id=delta)["text"] == text_before_drop, \
+                "terminal received internal tab drag content"
             for surface in (alpha, beta, gamma, delta):
                 text = rpc("surface.read_text", surface_id=surface)["text"]
                 assert all(token not in text for token in (gamma, "CmuxPaneTabTransfer")), \
@@ -233,4 +240,7 @@ if __name__ == "__main__":
     parser.add_argument("binary", type=Path)
     parser.add_argument("--screenshot", type=Path)
     args = parser.parse_args()
-    run(args.binary.resolve(strict=True), args.screenshot)
+    try:
+        run(args.binary.resolve(strict=True), args.screenshot)
+    except (AssertionError, RuntimeError) as error:
+        raise SystemExit(f"FAIL: {error}") from None

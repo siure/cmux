@@ -20,6 +20,8 @@ pub(super) fn attach_tab(
     let source = gtk::DragSource::new();
     source.set_actions(gdk::DragAction::MOVE);
     source.set_button(gdk::BUTTON_PRIMARY);
+    // Observe the sequence before GtkButton claims it as a click.
+    source.set_propagation_phase(gtk::PropagationPhase::Capture);
     let payload = PaneTabTransfer {
         app: Arc::downgrade(app_state),
         pane_id: pane_id.to_string(),
@@ -34,22 +36,7 @@ pub(super) fn attach_tab(
     });
     // The close button is a sibling, so it cannot initiate this gesture.
     select.add_controller(source);
-    attach_drop_target(
-        container,
-        pane_id,
-        Some(surface_id),
-        app_state,
-        local_refresh,
-    );
-}
-
-pub(super) fn attach_strip(
-    scroller: &gtk::ScrolledWindow,
-    pane_id: &str,
-    app_state: &Arc<Mutex<AppState>>,
-    local_refresh: Option<&GtkLocalRefresh>,
-) {
-    attach_drop_target(scroller, pane_id, None, app_state, local_refresh);
+    attach_drop_target(container, pane_id, surface_id, app_state, local_refresh);
 }
 
 fn clear_marker(target: &gtk::DropTarget) {
@@ -59,12 +46,12 @@ fn clear_marker(target: &gtk::DropTarget) {
     }
 }
 
-fn show_marker(target: &gtk::DropTarget, x: f64, append: bool) -> gdk::DragAction {
+fn show_marker(target: &gtk::DropTarget, x: f64) -> gdk::DragAction {
     clear_marker(target);
     let Some(widget) = target.widget() else {
         return gdk::DragAction::empty();
     };
-    widget.add_css_class(if append || x >= f64::from(widget.width()) / 2.0 {
+    widget.add_css_class(if x >= f64::from(widget.width()) / 2.0 {
         "cmux-pane-tab-drop-after"
     } else {
         "cmux-pane-tab-drop-before"
@@ -75,17 +62,16 @@ fn show_marker(target: &gtk::DropTarget, x: f64, append: bool) -> gdk::DragActio
 fn attach_drop_target(
     widget: &impl IsA<gtk::Widget>,
     pane_id: &str,
-    anchor: Option<&str>,
+    anchor: &str,
     app_state: &Arc<Mutex<AppState>>,
     local_refresh: Option<&GtkLocalRefresh>,
 ) {
     let target = gtk::DropTarget::new(PaneTabTransfer::static_type(), gdk::DragAction::MOVE);
-    let append = anchor.is_none();
-    target.connect_enter(move |target, x, _| show_marker(target, x, append));
-    target.connect_motion(move |target, x, _| show_marker(target, x, append));
+    target.connect_enter(move |target, x, _| show_marker(target, x));
+    target.connect_motion(move |target, x, _| show_marker(target, x));
     target.connect_leave(clear_marker);
     let pane_id = pane_id.to_string();
-    let anchor = anchor.map(ToString::to_string);
+    let anchor = anchor.to_string();
     let app_state = Arc::clone(app_state);
     let local_refresh = local_refresh.cloned();
     target.connect_drop(move |target, value, x, _| {
@@ -124,17 +110,15 @@ fn attach_drop_target(
                 "pane_id": pane_id,
                 "focus": true
             });
-            if let Some(anchor) = anchor.as_ref() {
-                if anchor == &payload.surface_id && pane_id == payload.pane_id {
-                    return true;
-                }
-                let key = if x < f64::from(widget.width()) / 2.0 {
-                    "before_surface_id"
-                } else {
-                    "after_surface_id"
-                };
-                params[key] = json!(anchor);
+            if anchor == payload.surface_id && pane_id == payload.pane_id {
+                return true;
             }
+            let key = if x < f64::from(widget.width()) / 2.0 {
+                "before_surface_id"
+            } else {
+                "after_surface_id"
+            };
+            params[key] = json!(anchor);
             app.handle_ui("surface.move", &params).is_ok()
         };
         if accepted {

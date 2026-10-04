@@ -10495,17 +10495,80 @@ impl AppState {
         if !empty {
             return;
         }
-        self.panes.remove(pane_id);
+        let canvas_mode = self.canvas_state(workspace_id).mode;
+        let split_tracks = self.workspaces.get(workspace_id).map(|workspace| {
+            let column_boundaries = self.workspace_axis_boundaries(workspace, true);
+            let row_boundaries = self.workspace_axis_boundaries(workspace, false);
+            let column_sizes = self.workspace_axis_sizes(
+                workspace,
+                &column_boundaries[..column_boundaries.len().saturating_sub(1)],
+                true,
+            );
+            let row_sizes = self.workspace_axis_sizes(
+                workspace,
+                &row_boundaries[..row_boundaries.len().saturating_sub(1)],
+                false,
+            );
+            (column_boundaries, column_sizes, row_boundaries, row_sizes)
+        });
         self.resize_attachments.remove(pane_id);
-        if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
-            workspace.panes.retain(|id| id != pane_id);
-            workspace.debug_column_sizes.clear();
-            workspace.debug_row_sizes.clear();
-            if workspace.selected_pane.as_deref() == Some(pane_id) {
-                workspace.selected_pane = workspace.panes.first().cloned();
+        let (fallback_replacement_pane, was_selected_pane) = self
+            .workspaces
+            .get_mut(workspace_id)
+            .map(|workspace| {
+                let closed_pane_index = workspace
+                    .panes
+                    .iter()
+                    .position(|id| id == pane_id)
+                    .unwrap_or(0);
+                let was_selected_pane = workspace.selected_pane.as_deref() == Some(pane_id);
+                workspace.panes.retain(|id| id != pane_id);
+                if was_selected_pane {
+                    workspace.selected_pane = workspace
+                        .panes
+                        .get(closed_pane_index.min(workspace.panes.len().saturating_sub(1)))
+                        .cloned();
+                }
+                if workspace.zoomed_pane.as_deref() == Some(pane_id) {
+                    workspace.zoomed_pane = None;
+                }
+                (workspace.selected_pane.clone(), was_selected_pane)
+            })
+            .unwrap_or((None, false));
+        let split_replacement_pane = if let Some((
+            column_boundaries,
+            column_sizes,
+            row_boundaries,
+            row_sizes,
+        )) = split_tracks
+        {
+            self.expand_split_layout_after_close(
+                workspace_id,
+                pane_id,
+                &column_boundaries,
+                &column_sizes,
+                &row_boundaries,
+                &row_sizes,
+            )
+        } else {
+            None
+        };
+        let replacement_pane = if was_selected_pane && canvas_mode == CanvasMode::Splits {
+            split_replacement_pane.or(fallback_replacement_pane)
+        } else {
+            fallback_replacement_pane
+        };
+        if was_selected_pane {
+            if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
+                workspace.selected_pane = replacement_pane.clone();
             }
-            if workspace.zoomed_pane.as_deref() == Some(pane_id) {
-                workspace.zoomed_pane = None;
+        }
+        self.panes.remove(pane_id);
+        if let Some(replacement_pane) = replacement_pane {
+            if let Some(pane) = self.panes.get_mut(&replacement_pane) {
+                if pane.selected_surface.is_none() {
+                    pane.selected_surface = pane.surfaces.first().cloned();
+                }
             }
         }
     }
@@ -18489,7 +18552,6 @@ impl AppState {
         self.tab_ref_aliases
             .retain(|_, aliased_surface_id| aliased_surface_id != &surface_id);
         self.project_panels.remove(&surface_id);
-        let mut pane_is_empty = false;
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             let closed_index = pane
                 .surfaces
@@ -18507,83 +18569,8 @@ impl AppState {
                         .cloned()
                 };
             }
-            pane_is_empty = pane.surfaces.is_empty();
         }
-        if pane_is_empty {
-            let canvas_mode = self.canvas_state(&workspace_id).mode;
-            let split_tracks = self.workspaces.get(&workspace_id).map(|workspace| {
-                let column_boundaries = self.workspace_axis_boundaries(workspace, true);
-                let row_boundaries = self.workspace_axis_boundaries(workspace, false);
-                let column_sizes = self.workspace_axis_sizes(
-                    workspace,
-                    &column_boundaries[..column_boundaries.len().saturating_sub(1)],
-                    true,
-                );
-                let row_sizes = self.workspace_axis_sizes(
-                    workspace,
-                    &row_boundaries[..row_boundaries.len().saturating_sub(1)],
-                    false,
-                );
-                (column_boundaries, column_sizes, row_boundaries, row_sizes)
-            });
-            self.resize_attachments.remove(&pane_id);
-            let (fallback_replacement_pane, was_selected_pane) = self
-                .workspaces
-                .get_mut(&workspace_id)
-                .and_then(|workspace| {
-                    let closed_pane_index = workspace
-                        .panes
-                        .iter()
-                        .position(|id| id == &pane_id)
-                        .unwrap_or(0);
-                    let was_selected_pane = workspace.selected_pane.as_deref() == Some(&pane_id);
-                    workspace.panes.retain(|id| id != &pane_id);
-                    if was_selected_pane {
-                        workspace.selected_pane = workspace
-                            .panes
-                            .get(closed_pane_index.min(workspace.panes.len().saturating_sub(1)))
-                            .cloned();
-                    }
-                    if workspace.zoomed_pane.as_deref() == Some(&pane_id) {
-                        workspace.zoomed_pane = None;
-                    }
-                    Some((workspace.selected_pane.clone(), was_selected_pane))
-                })
-                .unwrap_or((None, false));
-            let split_replacement_pane =
-                if let Some((column_boundaries, column_sizes, row_boundaries, row_sizes)) =
-                    split_tracks
-                {
-                    self.expand_split_layout_after_close(
-                        &workspace_id,
-                        &pane_id,
-                        &column_boundaries,
-                        &column_sizes,
-                        &row_boundaries,
-                        &row_sizes,
-                    )
-                } else {
-                    None
-                };
-            let replacement_pane = if was_selected_pane && canvas_mode == CanvasMode::Splits {
-                split_replacement_pane.or(fallback_replacement_pane)
-            } else {
-                fallback_replacement_pane
-            };
-            if was_selected_pane {
-                if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
-                    workspace.selected_pane = replacement_pane.clone();
-                }
-            }
-            self.panes.remove(&pane_id);
-            if let Some(replacement_pane) = replacement_pane {
-                if let Some(pane) = self.panes.get_mut(&replacement_pane) {
-                    if pane.selected_surface.is_none() {
-                        pane.selected_surface = pane.surfaces.first().cloned();
-                    }
-                }
-            }
-        }
+        self.remove_pane_if_empty(&workspace_id, &pane_id);
         self.append_debug_log(&format!(
             "surface.lifecycle.deinit.end surface={debug_surface}"
         ));
@@ -18735,6 +18722,8 @@ impl AppState {
             destination.surfaces.len()
         };
 
+        let source_pane_id = self.surface_pane_id(&surface_id)?;
+        let source_workspace_id = self.surface_workspace_id(&surface_id)?;
         self.detach_surface(&surface_id)?;
         if let Some(pane) = self.panes.get_mut(&target_pane) {
             pane.surfaces
@@ -18743,6 +18732,17 @@ impl AppState {
             if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                 surface.pane_id = target_pane.clone();
             }
+        }
+        if source_pane_id != target_pane
+            && self
+                .workspaces
+                .get(&source_workspace_id)
+                .is_some_and(|workspace| workspace.panes.len() > 1)
+        {
+            self.remove_pane_if_empty(&source_workspace_id, &source_pane_id);
+        }
+        if source_workspace_id != target_workspace_id {
+            self.apply_workspace_terminal_sizes(&source_workspace_id)?;
         }
         self.apply_workspace_terminal_sizes(&target_workspace_id)?;
         if bool_param(params, "focus").unwrap_or(false) {

@@ -10331,8 +10331,6 @@ fn pane_tab_strip(
     root.set_height_request(metrics::PANE_TAB_HEIGHT);
     root.set_hexpand(true);
     root.set_widget_name(&pane_id);
-    let (scroller, _) = pane_tab_scroller(&root);
-    tab_drag::attach_strip(&scroller, &pane_id, app_state, local_refresh);
     populate_pane_tab_strip(&root, view, app_state, local_refresh);
     Some(root)
 }
@@ -15465,13 +15463,33 @@ fn surface_card(
     if let Some(target) = surface_id_or_ref(view) {
         let gesture = gtk::GestureClick::new();
         let app_state = Arc::clone(app_state);
-        gesture.connect_pressed(move |_, _, _, _| {
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            if gesture
+                .widget()
+                .is_some_and(|widget| pointer_is_in_pane_tabs(&widget, x, y))
+            {
+                return;
+            }
             call_app(&app_state, "surface.focus", json!({"surface_id": target}));
         });
         card.add_controller(gesture);
     }
     attach_surface_context_menu_for(&card, app_state, view, ghostty.as_ref());
     card
+}
+
+fn pointer_is_in_pane_tabs(widget: &gtk::Widget, x: f64, y: f64) -> bool {
+    let mut picked = widget.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(child) = picked {
+        if child.has_css_class("cmux-pane-tabs") {
+            return true;
+        }
+        if child == *widget {
+            break;
+        }
+        picked = child.parent();
+    }
+    false
 }
 
 fn attach_terminal_link_gesture(
@@ -19162,27 +19180,6 @@ mod tests {
         let c_target = controller::<gtk::DropTarget>(&c_tab).unwrap();
         let d_target = controller::<gtk::DropTarget>(&d_tab).unwrap();
         let payload = prepare(&c_tab, &a_target);
-        let (left_scroller, _) = pane_tab_scroller(&left);
-        let strip_target = controller::<gtk::DropTarget>(&left_scroller).unwrap();
-        let a_bounds = a_tab
-            .compute_bounds(&left_scroller)
-            .expect("mounted tab bounds");
-        let tab_x = f64::from(a_bounds.x() + a_bounds.width() / 2.0);
-        let tab_y = f64::from(a_bounds.y() + a_bounds.height() / 2.0);
-        assert_eq!(
-            strip_target.emit_by_name::<gdk::DragAction>("motion", &[&tab_x, &tab_y]),
-            gdk::DragAction::empty(),
-            "strip append target must yield to the tab under the pointer"
-        );
-        assert!(!left_scroller.has_css_class("cmux-pane-tab-drop-after"));
-        assert!(!strip_target.emit_by_name::<bool>(
-            "drop",
-            &[&glib::BoxedValue(payload.clone()), &tab_x, &tab_y],
-        ));
-        assert_eq!(
-            order(&app_state, &left_pane),
-            vec![a.clone(), b.clone(), c.clone()]
-        );
         assert!(drop_at(&a_target, &payload, false));
         assert_eq!(
             order(&app_state, &left_pane),
@@ -19210,10 +19207,8 @@ mod tests {
             !drop_at(&a_target, &browser_payload, false),
             "a payload from a tab's previous pane must be rejected"
         );
-        let (right_scroller, _) = pane_tab_scroller(&right);
-        let append_target = controller::<gtk::DropTarget>(&right_scroller)
-            .expect("blank tab strip must accept appending tabs");
-        assert!(drop_at(&append_target, &payload, true));
+        let append_payload = prepare(&c_tab, &d_target);
+        assert!(drop_at(&d_target, &append_payload, true));
         assert_eq!(order(&app_state, &left_pane), vec![a.clone()]);
         assert_eq!(
             order(&app_state, &right_pane),
@@ -19226,13 +19221,23 @@ mod tests {
             &gio::File::for_path("/tmp/example").to_value(),
             false
         ));
+        let snapshot =
+            snapshot_with_previews(&app_state, GtkRendererMode::Ghostty, window_id).unwrap();
+        let right_view = snapshot["surface_views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| pane_id_or_ref(view).as_deref() == Some(&right_pane))
+            .unwrap();
+        populate_pane_tab_strip(&right, right_view, &app_state, None);
+        let closed_payload = prepare(&tab(&right, &c), &d_target);
         assert!(call_app(
             &app_state,
             "surface.close",
             json!({"surface_id": c, "force": true})
         ));
         assert!(
-            !drop_at(&d_target, &payload, false),
+            !drop_at(&d_target, &closed_payload, false),
             "closed tab payload must be rejected"
         );
         assert_eq!(order(&app_state, &left_pane), vec![a]);
