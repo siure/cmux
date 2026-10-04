@@ -58,6 +58,14 @@
   font-size: 11px;
 }
 
+.cmux-ui-next .cmux-pane-tab-drop-before > :first-child {
+  box-shadow: inset 3px 0 @cmux_accent;
+}
+
+.cmux-ui-next .cmux-pane-tab-drop-after > :last-child {
+  box-shadow: inset -3px 0 @cmux_accent;
+}
+
 .cmux-ui-next .cmux-pane-tab {
   min-height: 27px;
   margin: 0;

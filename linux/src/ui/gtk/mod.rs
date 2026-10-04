@@ -31,6 +31,7 @@ mod mode;
 mod shell;
 mod strings;
 mod style;
+mod tab_drag;
 
 use mode::GtkUiMode;
 use shell::GtkSnapshotView;
@@ -10330,6 +10331,8 @@ fn pane_tab_strip(
     root.set_height_request(metrics::PANE_TAB_HEIGHT);
     root.set_hexpand(true);
     root.set_widget_name(&pane_id);
+    let (scroller, _) = pane_tab_scroller(&root);
+    tab_drag::attach_strip(&scroller, &pane_id, app_state, local_refresh);
     populate_pane_tab_strip(&root, view, app_state, local_refresh);
     Some(root)
 }
@@ -10513,6 +10516,14 @@ fn populate_pane_tab_strip(
                 }
             });
             tab_widget.append(&select);
+            tab_drag::attach_tab(
+                &tab_widget,
+                &select,
+                root.widget_name().as_str(),
+                &tab.surface_id,
+                app_state,
+                local_refresh,
+            );
             let middle_click = gtk::GestureClick::new();
             middle_click.set_button(gdk::BUTTON_MIDDLE);
             let surface_id = tab.surface_id.clone();
@@ -19173,6 +19184,20 @@ mod tests {
         assert_eq!(order(&app_state, &right_pane), vec![b.clone(), d.clone()]);
         let focused = call_app_value(&app_state, "system.identify", json!({})).unwrap();
         assert_eq!(focused["focused"]["surface_id"], b);
+
+        assert!(
+            !drop_at(&a_target, &browser_payload, false),
+            "a payload from a tab's previous pane must be rejected"
+        );
+        let (right_scroller, _) = pane_tab_scroller(&right);
+        let append_target = controller::<gtk::DropTarget>(&right_scroller)
+            .expect("blank tab strip must accept appending tabs");
+        assert!(drop_at(&append_target, &payload, true));
+        assert_eq!(order(&app_state, &left_pane), vec![a.clone()]);
+        assert_eq!(
+            order(&app_state, &right_pane),
+            vec![b.clone(), d.clone(), c.clone()]
+        );
 
         assert!(!drop_at(&d_target, &"external text".to_value(), false));
         assert!(!drop_at(
