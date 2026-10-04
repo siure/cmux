@@ -67824,4 +67824,120 @@ mod surface_order_atomicity_tests {
             assert_eq!(app.current_pane_id().unwrap(), other_pane);
         }
     }
+
+    #[test]
+    fn moving_last_tab_out_of_split_expands_destination_to_full_bounds() {
+        for direction in ["left", "right", "up", "down"] {
+            let mut app = app();
+            let workspace = app.current_workspace_id().unwrap();
+            let destination = app.current_pane_id().unwrap();
+            let original_frame = app.workspace_debug_frames(&workspace).unwrap()[&destination];
+            let split = app
+                .handle("surface.split", &json!({"direction": direction}))
+                .unwrap();
+            let source = split["pane_id"].as_str().unwrap();
+            let surface = split["surface_id"].as_str().unwrap();
+            app.handle(
+                "surface.move",
+                &json!({
+                    "surface_id": surface, "pane_id": destination, "focus": true
+                }),
+            )
+            .unwrap();
+
+            assert!(!app.panes.contains_key(source), "{direction}");
+            assert_eq!(app.workspaces[&workspace].panes, [destination.clone()]);
+            assert_eq!(
+                app.workspace_debug_frames(&workspace).unwrap()[&destination],
+                original_frame
+            );
+            assert_eq!(app.current_pane_id().unwrap(), destination);
+            assert_eq!(app.current_surface_id().unwrap(), surface);
+            assert!(app.surfaces.contains_key(surface));
+        }
+    }
+
+    #[test]
+    fn moving_last_tab_out_of_nested_split_preserves_sibling_geometry() {
+        let mut app = app();
+        let workspace = app.current_workspace_id().unwrap();
+        let surface = app.current_surface_id().unwrap();
+        let source = app.current_pane_id().unwrap();
+        let right = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "surface_id": surface, "direction": "right"
+                }),
+            )
+            .unwrap();
+        let right_pane = right["pane_id"].as_str().unwrap();
+        app.handle(
+            "debug.layout.resize_split",
+            &json!({
+                "workspace_id": workspace, "axis": "horizontal",
+                "start": 0, "end": 800, "divider": 400, "fraction": 0.65
+            }),
+        )
+        .unwrap();
+        let before = app.workspace_debug_frames(&workspace).unwrap();
+        let bottom = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "surface_id": surface, "direction": "down"
+                }),
+            )
+            .unwrap();
+        let bottom_pane = bottom["pane_id"].as_str().unwrap();
+        app.handle(
+            "surface.move",
+            &json!({
+                "surface_id": surface, "pane_id": right_pane, "focus": true
+            }),
+        )
+        .unwrap();
+
+        let after = app.workspace_debug_frames(&workspace).unwrap();
+        assert!(!after.contains_key(&source));
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[bottom_pane], before[&source]);
+        assert_eq!(after[right_pane], before[right_pane]);
+        assert_eq!(app.current_pane_id().unwrap(), right_pane);
+        assert_eq!(app.current_surface_id().unwrap(), surface);
+    }
+
+    #[test]
+    fn moving_final_workspace_tab_keeps_source_available_for_new_terminal() {
+        let mut app = app();
+        let workspace = app.current_workspace_id().unwrap();
+        let pane = app.current_pane_id().unwrap();
+        let surface = app.current_surface_id().unwrap();
+        let other = app
+            .handle("workspace.create", &json!({"title": "Destination"}))
+            .unwrap();
+        app.handle(
+            "surface.move",
+            &json!({
+                "surface_id": surface, "workspace_id": other["workspace_id"], "focus": true
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(app.workspaces[&workspace].panes, [pane.clone()]);
+        assert!(app.panes[&pane].surfaces.is_empty());
+        app.handle("workspace.select", &json!({"workspace_id": workspace}))
+            .unwrap();
+        let replacement = app
+            .handle(
+                "surface.create",
+                &json!({"type": "terminal", "focus": true}),
+            )
+            .unwrap();
+        let replacement_id = replacement["surface_id"].as_str().unwrap();
+        assert_eq!(app.surfaces[replacement_id].pane_id, pane);
+        assert_eq!(app.panes[&pane].surfaces.len(), 1);
+        assert_eq!(app.current_surface_id().unwrap(), replacement_id);
+        assert!(app.surfaces.contains_key(&surface));
+    }
 }

@@ -19162,6 +19162,27 @@ mod tests {
         let c_target = controller::<gtk::DropTarget>(&c_tab).unwrap();
         let d_target = controller::<gtk::DropTarget>(&d_tab).unwrap();
         let payload = prepare(&c_tab, &a_target);
+        let (left_scroller, _) = pane_tab_scroller(&left);
+        let strip_target = controller::<gtk::DropTarget>(&left_scroller).unwrap();
+        let a_bounds = a_tab
+            .compute_bounds(&left_scroller)
+            .expect("mounted tab bounds");
+        let tab_x = f64::from(a_bounds.x() + a_bounds.width() / 2.0);
+        let tab_y = f64::from(a_bounds.y() + a_bounds.height() / 2.0);
+        assert_eq!(
+            strip_target.emit_by_name::<gdk::DragAction>("motion", &[&tab_x, &tab_y]),
+            gdk::DragAction::empty(),
+            "strip append target must yield to the tab under the pointer"
+        );
+        assert!(!left_scroller.has_css_class("cmux-pane-tab-drop-after"));
+        assert!(!strip_target.emit_by_name::<bool>(
+            "drop",
+            &[&glib::BoxedValue(payload.clone()), &tab_x, &tab_y],
+        ));
+        assert_eq!(
+            order(&app_state, &left_pane),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
         assert!(drop_at(&a_target, &payload, false));
         assert_eq!(
             order(&app_state, &left_pane),
