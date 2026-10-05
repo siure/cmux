@@ -5803,8 +5803,9 @@ fn ghostty_drop_file_list_text(value: &glib::Value) -> Option<String> {
 }
 
 fn ghostty_drop_string_text(text: &str) -> Option<String> {
-    if let Some(paths) = ghostty_drop_uri_list_text(text) {
-        return Some(paths);
+    if let Some(paths) = ghostty_drop_uri_list_paths(text) {
+        // A rejected file drop must not fall back to sending the raw URI list.
+        return ghostty_drop_path_text(paths);
     }
     if text.is_empty() {
         None
@@ -5813,7 +5814,7 @@ fn ghostty_drop_string_text(text: &str) -> Option<String> {
     }
 }
 
-fn ghostty_drop_uri_list_text(text: &str) -> Option<String> {
+fn ghostty_drop_uri_list_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -5825,7 +5826,11 @@ fn ghostty_drop_uri_list_text(text: &str) -> Option<String> {
         }
         paths.push(url::Url::parse(line).ok()?.to_file_path().ok()?);
     }
-    ghostty_drop_path_text(paths)
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
 }
 
 fn ghostty_drop_files_text(files: impl IntoIterator<Item = gio::File>) -> Option<String> {
@@ -5835,10 +5840,15 @@ fn ghostty_drop_files_text(files: impl IntoIterator<Item = gio::File>) -> Option
 fn ghostty_drop_path_text(paths: impl IntoIterator<Item = PathBuf>) -> Option<String> {
     let mut text = String::new();
     for path in paths {
+        let path = path_to_terminal_string(&path);
+        // Shell quoting cannot stop terminal controls from acting as keystrokes
+        // when bracketed paste is disabled. Reject the whole drop before sending.
+        if path.bytes().any(|byte| byte.is_ascii_control()) {
+            return None;
+        }
         if !text.is_empty() {
             text.push(' ');
         }
-        let path = path_to_terminal_string(&path);
         text.push_str(&shell_escape_drop_path(&path));
     }
     if text.is_empty() {
@@ -5853,9 +5863,6 @@ fn path_to_terminal_string(path: &Path) -> String {
 }
 
 fn shell_escape_drop_path(path: &str) -> String {
-    if path.contains('\n') || path.contains('\r') {
-        return format!("'{}'", path.replace('\'', "'\\''"));
-    }
     let mut out = String::new();
     for ch in path.chars() {
         if "\\ ()[]{}<>\"'`!#$&;|*?\t".contains(ch) {
@@ -7268,7 +7275,7 @@ mod tests {
     #[test]
     fn gtk_ghostty_drop_uri_list_preserves_literal_plus_and_decodes_once() {
         assert_eq!(
-            ghostty_drop_uri_list_text(
+            ghostty_drop_string_text(
                 "file:///tmp/a+b%20%2520.txt\r\nfile://localhost/tmp/%E6%97%A5%E6%9C%AC%E8%AA%9E%23%3F.txt\r\n"
             )
             .as_deref(),
@@ -7279,7 +7286,7 @@ mod tests {
     #[test]
     fn gtk_ghostty_drop_remote_file_uri_is_not_rewritten_as_a_local_path() {
         let uri = "file://other-host/tmp/document.txt";
-        assert_eq!(ghostty_drop_uri_list_text(uri), None);
+        assert_eq!(ghostty_drop_uri_list_paths(uri), None);
         assert_eq!(ghostty_drop_string_text(uri).as_deref(), Some(uri));
     }
 
