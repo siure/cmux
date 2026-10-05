@@ -5803,8 +5803,9 @@ fn ghostty_drop_file_list_text(value: &glib::Value) -> Option<String> {
 }
 
 fn ghostty_drop_string_text(text: &str) -> Option<String> {
-    if let Some(paths) = ghostty_drop_uri_list_text(text) {
-        return Some(paths);
+    if let Some(paths) = ghostty_drop_uri_list_paths(text) {
+        // A rejected file drop must not fall back to sending the raw URI list.
+        return ghostty_drop_path_text(paths);
     }
     if text.is_empty() {
         None
@@ -5813,7 +5814,7 @@ fn ghostty_drop_string_text(text: &str) -> Option<String> {
     }
 }
 
-fn ghostty_drop_uri_list_text(text: &str) -> Option<String> {
+fn ghostty_drop_uri_list_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -5823,9 +5824,13 @@ fn ghostty_drop_uri_list_text(text: &str) -> Option<String> {
         if !line.starts_with("file://") {
             return None;
         }
-        paths.push(PathBuf::from(normalize_drop_file_path(line)));
+        paths.push(url::Url::parse(line).ok()?.to_file_path().ok()?);
     }
-    ghostty_drop_path_text(paths)
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
 }
 
 fn ghostty_drop_files_text(files: impl IntoIterator<Item = gio::File>) -> Option<String> {
@@ -5836,8 +5841,15 @@ fn ghostty_drop_path_text(paths: impl IntoIterator<Item = PathBuf>) -> Option<St
     let mut text = String::new();
     for path in paths {
         let path = path_to_terminal_string(&path);
+        // Shell quoting cannot stop terminal controls from acting as keystrokes
+        // when bracketed paste is disabled. Reject the whole drop before sending.
+        if path.bytes().any(|byte| byte.is_ascii_control()) {
+            return None;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
         text.push_str(&shell_escape_drop_path(&path));
-        text.push('\n');
     }
     if text.is_empty() {
         None
@@ -5851,9 +5863,6 @@ fn path_to_terminal_string(path: &Path) -> String {
 }
 
 fn shell_escape_drop_path(path: &str) -> String {
-    if path.contains('\n') || path.contains('\r') {
-        return format!("'{}'", path.replace('\'', "'\\''"));
-    }
     let mut out = String::new();
     for ch in path.chars() {
         if "\\ ()[]{}<>\"'`!#$&;|*?\t".contains(ch) {
@@ -5862,41 +5871,6 @@ fn shell_escape_drop_path(path: &str) -> String {
         out.push(ch);
     }
     out
-}
-
-fn normalize_drop_file_path(value: &str) -> String {
-    let trimmed = value.trim();
-    if let Some(path) = trimmed.strip_prefix("file://localhost/") {
-        return format!("/{}", percent_decode_drop_value(path));
-    }
-    if let Some(path) = trimmed.strip_prefix("file://") {
-        return percent_decode_drop_value(path);
-    }
-    trimmed.to_string()
-}
-
-fn percent_decode_drop_value(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                    index += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(if bytes[index] == b'+' {
-            b' '
-        } else {
-            bytes[index]
-        });
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
 }
 
 fn positive_u32(value: i32) -> u32 {
@@ -7240,16 +7214,37 @@ mod tests {
                 PathBuf::from("/tmp/quote's")
             ])
             .as_deref(),
-            Some("/tmp/plain\n/tmp/space\\ name\n/tmp/quote\\'s\n")
+            Some("/tmp/plain /tmp/space\\ name /tmp/quote\\'s")
         );
     }
 
     #[test]
-    fn gtk_ghostty_drop_path_text_quotes_multiline_paths() {
-        assert_eq!(
-            ghostty_drop_path_text([PathBuf::from("/tmp/line\nbreak")]).as_deref(),
-            Some("'/tmp/line\nbreak'\n")
-        );
+    fn gtk_ghostty_drop_file_values_reject_terminal_control_characters() {
+        for control in ['\n', '\r', '\t', '\u{1b}', '\u{7f}'] {
+            let path = format!("/tmp/before{control}after");
+            let value = gio::File::for_path(&path).to_value();
+            assert_eq!(ghostty_drop_text(&value), None, "path: {path:?}");
+            assert_eq!(
+                ghostty_drop_files_text([
+                    gio::File::for_path("/tmp/ordinary"),
+                    gio::File::for_path(&path),
+                ]),
+                None,
+                "must reject the entire file list: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_uri_values_reject_terminal_control_characters() {
+        for control in ["%0A", "%0D", "%09", "%1B", "%7F"] {
+            let uris = format!("file:///tmp/ordinary\r\nfile:///tmp/before{control}after\r\n");
+            assert_eq!(
+                ghostty_drop_text(&uris.to_value()),
+                None,
+                "must not fall back to inserting the URI list: {uris:?}"
+            );
+        }
     }
 
     #[test]
@@ -7264,8 +7259,35 @@ mod tests {
                 "# comment\r\nfile:///tmp/cmux%20drop/a.txt\r\nfile://localhost/tmp/two%20words\n"
             )
             .as_deref(),
-            Some("/tmp/cmux\\ drop/a.txt\n/tmp/two\\ words\n")
+            Some("/tmp/cmux\\ drop/a.txt /tmp/two\\ words")
         );
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_file_value_inserts_an_argument_without_submitting() {
+        let value = gio::File::for_path("/tmp/日本語 + notes.txt").to_value();
+        assert_eq!(
+            ghostty_drop_text(&value).as_deref(),
+            Some("/tmp/日本語\\ +\\ notes.txt")
+        );
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_uri_list_preserves_literal_plus_and_decodes_once() {
+        assert_eq!(
+            ghostty_drop_string_text(
+                "file:///tmp/a+b%20%2520.txt\r\nfile://localhost/tmp/%E6%97%A5%E6%9C%AC%E8%AA%9E%23%3F.txt\r\n"
+            )
+            .as_deref(),
+            Some("/tmp/a+b\\ %20.txt /tmp/日本語\\#\\?.txt")
+        );
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_remote_file_uri_is_not_rewritten_as_a_local_path() {
+        let uri = "file://other-host/tmp/document.txt";
+        assert_eq!(ghostty_drop_uri_list_paths(uri), None);
+        assert_eq!(ghostty_drop_string_text(uri).as_deref(), Some(uri));
     }
 
     #[test]

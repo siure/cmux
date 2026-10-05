@@ -31,6 +31,7 @@ mod mode;
 mod shell;
 mod strings;
 mod style;
+mod tab_drag;
 
 use mode::GtkUiMode;
 use shell::GtkSnapshotView;
@@ -10513,6 +10514,14 @@ fn populate_pane_tab_strip(
                 }
             });
             tab_widget.append(&select);
+            tab_drag::attach_tab(
+                &tab_widget,
+                &select,
+                root.widget_name().as_str(),
+                &tab.surface_id,
+                app_state,
+                local_refresh,
+            );
             let middle_click = gtk::GestureClick::new();
             middle_click.set_button(gdk::BUTTON_MIDDLE);
             let surface_id = tab.surface_id.clone();
@@ -15454,13 +15463,33 @@ fn surface_card(
     if let Some(target) = surface_id_or_ref(view) {
         let gesture = gtk::GestureClick::new();
         let app_state = Arc::clone(app_state);
-        gesture.connect_pressed(move |_, _, _, _| {
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            if gesture
+                .widget()
+                .is_some_and(|widget| pointer_is_in_pane_tabs(&widget, x, y))
+            {
+                return;
+            }
             call_app(&app_state, "surface.focus", json!({"surface_id": target}));
         });
         card.add_controller(gesture);
     }
     attach_surface_context_menu_for(&card, app_state, view, ghostty.as_ref());
     card
+}
+
+fn pointer_is_in_pane_tabs(widget: &gtk::Widget, x: f64, y: f64) -> bool {
+    let mut picked = widget.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(child) = picked {
+        if child.has_css_class("cmux-pane-tabs") {
+            return true;
+        }
+        if child == *widget {
+            break;
+        }
+        picked = child.parent();
+    }
+    false
 }
 
 fn attach_terminal_link_gesture(
@@ -19023,6 +19052,197 @@ mod tests {
             child = widget.next_sibling();
         }
         None
+    }
+
+    #[gtk::test]
+    fn gtk_tab_drag_moves_and_reorders_model_surfaces() {
+        fn controller<T: IsA<glib::Object> + glib::object::ObjectType>(
+            widget: &impl IsA<gtk::Widget>,
+        ) -> Option<T> {
+            let controllers = widget.observe_controllers();
+            (0..controllers.n_items())
+                .filter_map(|index| controllers.item(index))
+                .find_map(|object| object.downcast::<T>().ok())
+        }
+        fn tab(strip: &gtk::Box, id: &str) -> gtk::Widget {
+            let (_, row) = pane_tab_scroller(strip);
+            let mut child = row.first_child();
+            while let Some(widget) = child {
+                if widget.widget_name() == id {
+                    return widget;
+                }
+                child = widget.next_sibling();
+            }
+            panic!("tab {id} must be mounted");
+        }
+        fn prepare(tab: &gtk::Widget, target: &gtk::DropTarget) -> glib::Value {
+            let button = tab.first_child().expect("tab select button");
+            let source = controller::<gtk::DragSource>(&button)
+                .expect("native tab select button must provide dragging");
+            let content = source
+                .emit_by_name::<Option<gdk::ContentProvider>>("prepare", &[&4.0_f64, &4.0_f64])
+                .expect("live tab drag content");
+            assert!(
+                content.value(String::static_type()).is_err(),
+                "internal tabs must not offer terminal-pastable strings"
+            );
+            content.value(target.types()[0]).expect("typed tab payload")
+        }
+        fn drop_at(target: &gtk::DropTarget, payload: &glib::Value, after: bool) -> bool {
+            let width = target.widget().expect("drop widget").width();
+            target.emit_by_name::<bool>(
+                "drop",
+                &[
+                    &glib::BoxedValue(payload.clone()),
+                    &if after { f64::from(width) - 1.0 } else { 1.0 },
+                    &4.0_f64,
+                ],
+            )
+        }
+        fn order(app_state: &Arc<Mutex<AppState>>, pane: &str) -> Vec<String> {
+            call_app_value(app_state, "pane.surfaces", json!({"pane_id": pane}))
+                .expect("pane surfaces")["surfaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["surface_id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        let mut app = AppState::with_paths_and_terminal_startup(
+            None,
+            None,
+            TerminalStartupMode::RendererOwned,
+        )
+        .expect("renderer-owned app");
+        let initial = app.handle("surface.list", &json!({})).unwrap();
+        let a = initial["surfaces"][0]["surface_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let b = app
+            .handle(
+                "surface.create",
+                &json!({"type": "browser", "focus": false}),
+            )
+            .unwrap();
+        let b = b["surface_id"].as_str().unwrap().to_string();
+        let c = app
+            .handle(
+                "surface.create",
+                &json!({"type": "terminal", "focus": false}),
+            )
+            .unwrap();
+        let c = c["surface_id"].as_str().unwrap().to_string();
+        let split = app
+            .handle(
+                "surface.split",
+                &json!({"surface_id": a, "direction": "right", "focus": false}),
+            )
+            .unwrap();
+        let d = split["surface_id"].as_str().unwrap().to_string();
+        let right_pane = split["pane_id"].as_str().unwrap().to_string();
+        let app_state = Arc::new(Mutex::new(app));
+        let window_row = model_window_rows(&app_state).remove(0);
+        let window_id = model_window_id(&window_row).unwrap();
+        let snapshot =
+            snapshot_with_previews(&app_state, GtkRendererMode::Ghostty, window_id).unwrap();
+        let views = snapshot["surface_views"].as_array().unwrap();
+        let right_view = views
+            .iter()
+            .find(|view| pane_id_or_ref(view).as_deref() == Some(&right_pane))
+            .unwrap();
+        let left_view = views
+            .iter()
+            .find(|view| pane_id_or_ref(view).as_deref() != Some(&right_pane))
+            .unwrap();
+        let left_pane = pane_id_or_ref(left_view).unwrap();
+        let left = pane_tab_strip(left_view, &app_state, None).unwrap();
+        let right = pane_tab_strip(right_view, &app_state, None).unwrap();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&left);
+        row.append(&right);
+        let window = gtk::Window::builder()
+            .default_width(1000)
+            .default_height(100)
+            .child(&row)
+            .build();
+        window.present();
+        gtk_run_main_loop_for(Duration::from_millis(100));
+
+        let a_tab = tab(&left, &a);
+        let b_tab = tab(&left, &b);
+        let c_tab = tab(&left, &c);
+        let d_tab = tab(&right, &d);
+        let a_target =
+            controller::<gtk::DropTarget>(&a_tab).expect("tabs must accept native tab drops");
+        let b_target = controller::<gtk::DropTarget>(&b_tab).unwrap();
+        let c_target = controller::<gtk::DropTarget>(&c_tab).unwrap();
+        let d_target = controller::<gtk::DropTarget>(&d_tab).unwrap();
+        let payload = prepare(&c_tab, &a_target);
+        assert!(drop_at(&a_target, &payload, false));
+        assert_eq!(
+            order(&app_state, &left_pane),
+            vec![c.clone(), a.clone(), b.clone()]
+        );
+        assert!(drop_at(&c_target, &payload, false));
+        assert_eq!(
+            order(&app_state, &left_pane),
+            vec![c.clone(), a.clone(), b.clone()]
+        );
+        assert!(drop_at(&b_target, &payload, true));
+        assert_eq!(
+            order(&app_state, &left_pane),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
+
+        let browser_payload = prepare(&b_tab, &d_target);
+        assert!(drop_at(&d_target, &browser_payload, false));
+        assert_eq!(order(&app_state, &left_pane), vec![a.clone(), c.clone()]);
+        assert_eq!(order(&app_state, &right_pane), vec![b.clone(), d.clone()]);
+        let focused = call_app_value(&app_state, "system.identify", json!({})).unwrap();
+        assert_eq!(focused["focused"]["surface_id"], b);
+
+        assert!(
+            !drop_at(&a_target, &browser_payload, false),
+            "a payload from a tab's previous pane must be rejected"
+        );
+        let append_payload = prepare(&c_tab, &d_target);
+        assert!(drop_at(&d_target, &append_payload, true));
+        assert_eq!(order(&app_state, &left_pane), vec![a.clone()]);
+        assert_eq!(
+            order(&app_state, &right_pane),
+            vec![b.clone(), d.clone(), c.clone()]
+        );
+
+        assert!(!drop_at(&d_target, &"external text".to_value(), false));
+        assert!(!drop_at(
+            &d_target,
+            &gio::File::for_path("/tmp/example").to_value(),
+            false
+        ));
+        let snapshot =
+            snapshot_with_previews(&app_state, GtkRendererMode::Ghostty, window_id).unwrap();
+        let right_view = snapshot["surface_views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| pane_id_or_ref(view).as_deref() == Some(&right_pane))
+            .unwrap();
+        populate_pane_tab_strip(&right, right_view, &app_state, None);
+        let closed_payload = prepare(&tab(&right, &c), &d_target);
+        assert!(call_app(
+            &app_state,
+            "surface.close",
+            json!({"surface_id": c, "force": true})
+        ));
+        assert!(
+            !drop_at(&d_target, &closed_payload, false),
+            "closed tab payload must be rejected"
+        );
+        assert_eq!(order(&app_state, &left_pane), vec![a]);
+        assert_eq!(order(&app_state, &right_pane), vec![b, d]);
+        window.destroy();
     }
 
     #[gtk::test]

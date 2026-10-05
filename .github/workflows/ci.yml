@@ -276,7 +276,7 @@ jobs:
       - name: Install GTK development files
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libgtk-4-dev libwebkitgtk-6.0-dev pkg-config xauth xvfb dbus-x11 python3-pil
+          sudo apt-get install --no-install-recommends -y libgtk-4-dev libwebkitgtk-6.0-dev libxtst6 pkg-config xauth xvfb dbus-x11 python3-pil
 
       - name: Configure Rust
         run: |
@@ -302,6 +302,9 @@ jobs:
           export CMUX_BROWSER_WEBKIT_DATA_DIR="$test_root/data/cmux/browser-profiles"
           export CMUX_BROWSER_WEBKIT_CACHE_DIR="$test_root/cache/cmux/browser-profiles"
           xvfb-run -a dbus-run-session -- cargo test --locked --features gtk
+
+      - name: Test native GTK tab dragging
+        run: ./scripts/test-gtk-tab-drag.sh
 
       - name: Smoke native WebKit runtime
         run: |

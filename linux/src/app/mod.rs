@@ -10495,17 +10495,80 @@ impl AppState {
         if !empty {
             return;
         }
-        self.panes.remove(pane_id);
+        let canvas_mode = self.canvas_state(workspace_id).mode;
+        let split_tracks = self.workspaces.get(workspace_id).map(|workspace| {
+            let column_boundaries = self.workspace_axis_boundaries(workspace, true);
+            let row_boundaries = self.workspace_axis_boundaries(workspace, false);
+            let column_sizes = self.workspace_axis_sizes(
+                workspace,
+                &column_boundaries[..column_boundaries.len().saturating_sub(1)],
+                true,
+            );
+            let row_sizes = self.workspace_axis_sizes(
+                workspace,
+                &row_boundaries[..row_boundaries.len().saturating_sub(1)],
+                false,
+            );
+            (column_boundaries, column_sizes, row_boundaries, row_sizes)
+        });
         self.resize_attachments.remove(pane_id);
-        if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
-            workspace.panes.retain(|id| id != pane_id);
-            workspace.debug_column_sizes.clear();
-            workspace.debug_row_sizes.clear();
-            if workspace.selected_pane.as_deref() == Some(pane_id) {
-                workspace.selected_pane = workspace.panes.first().cloned();
+        let (fallback_replacement_pane, was_selected_pane) = self
+            .workspaces
+            .get_mut(workspace_id)
+            .map(|workspace| {
+                let closed_pane_index = workspace
+                    .panes
+                    .iter()
+                    .position(|id| id == pane_id)
+                    .unwrap_or(0);
+                let was_selected_pane = workspace.selected_pane.as_deref() == Some(pane_id);
+                workspace.panes.retain(|id| id != pane_id);
+                if was_selected_pane {
+                    workspace.selected_pane = workspace
+                        .panes
+                        .get(closed_pane_index.min(workspace.panes.len().saturating_sub(1)))
+                        .cloned();
+                }
+                if workspace.zoomed_pane.as_deref() == Some(pane_id) {
+                    workspace.zoomed_pane = None;
+                }
+                (workspace.selected_pane.clone(), was_selected_pane)
+            })
+            .unwrap_or((None, false));
+        let split_replacement_pane = if let Some((
+            column_boundaries,
+            column_sizes,
+            row_boundaries,
+            row_sizes,
+        )) = split_tracks
+        {
+            self.expand_split_layout_after_close(
+                workspace_id,
+                pane_id,
+                &column_boundaries,
+                &column_sizes,
+                &row_boundaries,
+                &row_sizes,
+            )
+        } else {
+            None
+        };
+        let replacement_pane = if was_selected_pane && canvas_mode == CanvasMode::Splits {
+            split_replacement_pane.or(fallback_replacement_pane)
+        } else {
+            fallback_replacement_pane
+        };
+        if was_selected_pane {
+            if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
+                workspace.selected_pane = replacement_pane.clone();
             }
-            if workspace.zoomed_pane.as_deref() == Some(pane_id) {
-                workspace.zoomed_pane = None;
+        }
+        self.panes.remove(pane_id);
+        if let Some(replacement_pane) = replacement_pane {
+            if let Some(pane) = self.panes.get_mut(&replacement_pane) {
+                if pane.selected_surface.is_none() {
+                    pane.selected_surface = pane.surfaces.first().cloned();
+                }
             }
         }
     }
@@ -18489,7 +18552,6 @@ impl AppState {
         self.tab_ref_aliases
             .retain(|_, aliased_surface_id| aliased_surface_id != &surface_id);
         self.project_panels.remove(&surface_id);
-        let mut pane_is_empty = false;
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             let closed_index = pane
                 .surfaces
@@ -18507,83 +18569,8 @@ impl AppState {
                         .cloned()
                 };
             }
-            pane_is_empty = pane.surfaces.is_empty();
         }
-        if pane_is_empty {
-            let canvas_mode = self.canvas_state(&workspace_id).mode;
-            let split_tracks = self.workspaces.get(&workspace_id).map(|workspace| {
-                let column_boundaries = self.workspace_axis_boundaries(workspace, true);
-                let row_boundaries = self.workspace_axis_boundaries(workspace, false);
-                let column_sizes = self.workspace_axis_sizes(
-                    workspace,
-                    &column_boundaries[..column_boundaries.len().saturating_sub(1)],
-                    true,
-                );
-                let row_sizes = self.workspace_axis_sizes(
-                    workspace,
-                    &row_boundaries[..row_boundaries.len().saturating_sub(1)],
-                    false,
-                );
-                (column_boundaries, column_sizes, row_boundaries, row_sizes)
-            });
-            self.resize_attachments.remove(&pane_id);
-            let (fallback_replacement_pane, was_selected_pane) = self
-                .workspaces
-                .get_mut(&workspace_id)
-                .and_then(|workspace| {
-                    let closed_pane_index = workspace
-                        .panes
-                        .iter()
-                        .position(|id| id == &pane_id)
-                        .unwrap_or(0);
-                    let was_selected_pane = workspace.selected_pane.as_deref() == Some(&pane_id);
-                    workspace.panes.retain(|id| id != &pane_id);
-                    if was_selected_pane {
-                        workspace.selected_pane = workspace
-                            .panes
-                            .get(closed_pane_index.min(workspace.panes.len().saturating_sub(1)))
-                            .cloned();
-                    }
-                    if workspace.zoomed_pane.as_deref() == Some(&pane_id) {
-                        workspace.zoomed_pane = None;
-                    }
-                    Some((workspace.selected_pane.clone(), was_selected_pane))
-                })
-                .unwrap_or((None, false));
-            let split_replacement_pane =
-                if let Some((column_boundaries, column_sizes, row_boundaries, row_sizes)) =
-                    split_tracks
-                {
-                    self.expand_split_layout_after_close(
-                        &workspace_id,
-                        &pane_id,
-                        &column_boundaries,
-                        &column_sizes,
-                        &row_boundaries,
-                        &row_sizes,
-                    )
-                } else {
-                    None
-                };
-            let replacement_pane = if was_selected_pane && canvas_mode == CanvasMode::Splits {
-                split_replacement_pane.or(fallback_replacement_pane)
-            } else {
-                fallback_replacement_pane
-            };
-            if was_selected_pane {
-                if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
-                    workspace.selected_pane = replacement_pane.clone();
-                }
-            }
-            self.panes.remove(&pane_id);
-            if let Some(replacement_pane) = replacement_pane {
-                if let Some(pane) = self.panes.get_mut(&replacement_pane) {
-                    if pane.selected_surface.is_none() {
-                        pane.selected_surface = pane.surfaces.first().cloned();
-                    }
-                }
-            }
-        }
+        self.remove_pane_if_empty(&workspace_id, &pane_id);
         self.append_debug_log(&format!(
             "surface.lifecycle.deinit.end surface={debug_surface}"
         ));
@@ -18709,30 +18696,53 @@ impl AppState {
             }));
         }
 
+        let destination = self
+            .panes
+            .get(&target_pane)
+            .ok_or_else(|| AppError::not_found("target pane not found"))?;
+        // Resolve anchors against the resulting order before detaching the tab.
+        let target_index = if let Some(index) = index {
+            index
+        } else if let Some(before_id) = before_id.as_ref() {
+            destination
+                .surfaces
+                .iter()
+                .filter(|id| *id != &surface_id)
+                .position(|id| id == before_id)
+                .ok_or_else(|| AppError::not_found("before surface not found"))?
+        } else if let Some(after_id) = after_id.as_ref() {
+            destination
+                .surfaces
+                .iter()
+                .filter(|id| *id != &surface_id)
+                .position(|id| id == after_id)
+                .ok_or_else(|| AppError::not_found("after surface not found"))?
+                + 1
+        } else {
+            destination.surfaces.len()
+        };
+
+        let source_pane_id = self.surface_pane_id(&surface_id)?;
+        let source_workspace_id = self.surface_workspace_id(&surface_id)?;
         self.detach_surface(&surface_id)?;
         if let Some(pane) = self.panes.get_mut(&target_pane) {
-            let target_index = if let Some(index) = index {
-                index
-            } else if let Some(before_id) = before_id.as_ref() {
-                pane.surfaces
-                    .iter()
-                    .position(|id| id == before_id)
-                    .ok_or_else(|| AppError::not_found("before surface not found"))?
-            } else if let Some(after_id) = after_id.as_ref() {
-                pane.surfaces
-                    .iter()
-                    .position(|id| id == after_id)
-                    .ok_or_else(|| AppError::not_found("after surface not found"))?
-                    + 1
-            } else {
-                pane.surfaces.len()
-            };
             pane.surfaces
                 .insert(target_index.min(pane.surfaces.len()), surface_id.clone());
             pane.selected_surface = Some(surface_id.clone());
             if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                 surface.pane_id = target_pane.clone();
             }
+        }
+        if source_pane_id != target_pane
+            && self
+                .workspaces
+                .get(&source_workspace_id)
+                .is_some_and(|workspace| workspace.panes.len() > 1)
+        {
+            self.remove_pane_if_empty(&source_workspace_id, &source_pane_id);
+        }
+        if source_workspace_id != target_workspace_id {
+            self.apply_workspace_terminal_sizes(&source_workspace_id)?;
         }
         self.apply_workspace_terminal_sizes(&target_workspace_id)?;
         if bool_param(params, "focus").unwrap_or(false) {
@@ -18790,23 +18800,25 @@ impl AppState {
             .iter()
             .position(|id| id == &surface_id)
             .ok_or_else(|| AppError::not_found("surface not found"))?;
-        let item = pane.surfaces.remove(old);
         let target = if let Some(index) = index {
             index
         } else if let Some(before_id) = before_id {
             pane.surfaces
                 .iter()
+                .filter(|id| *id != &surface_id)
                 .position(|id| id == &before_id)
                 .ok_or_else(|| AppError::not_found("before surface not found"))?
         } else if let Some(after_id) = after_id {
             pane.surfaces
                 .iter()
+                .filter(|id| *id != &surface_id)
                 .position(|id| id == &after_id)
                 .ok_or_else(|| AppError::not_found("after surface not found"))?
                 + 1
         } else {
             return Err(AppError::invalid_params("reorder target required"));
         };
+        let item = pane.surfaces.remove(old);
         pane.surfaces.insert(target.min(pane.surfaces.len()), item);
         Ok(json!({"surface_id": surface_id, "surface_ref": self.surface_ref(&surface_id)}))
     }
@@ -67632,5 +67644,300 @@ mod native_inheritance_defaults_tests {
                 "{method}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod surface_order_atomicity_tests {
+    use super::{AppState, TerminalStartupMode};
+    use serde_json::{json, Value};
+
+    fn app() -> AppState {
+        AppState::with_paths_and_terminal_startup(None, None, TerminalStartupMode::RendererOwned)
+            .unwrap()
+    }
+
+    fn topology(app: &AppState) -> Value {
+        let mut session = app.session_snapshot(false);
+        session.saved_at = 0.0;
+        json!({
+            "session": session,
+            "current_window": app.current_window,
+            "panes": app.panes.iter().map(|(id, pane)| (id.clone(), json!({
+                "workspace": pane.workspace_id,
+                "surfaces": pane.surfaces,
+                "selected_surface": pane.selected_surface,
+            }))).collect::<serde_json::Map<_, _>>(),
+            "surfaces": app.surfaces.iter().map(|(id, surface)|
+                (id.clone(), json!(surface.pane_id))
+            ).collect::<serde_json::Map<_, _>>(),
+        })
+    }
+
+    #[test]
+    fn rejected_surface_reorders_preserve_topology_and_focus() {
+        for target in [
+            "missing",
+            "unknown-before",
+            "unknown-after",
+            "other-before",
+            "other-after",
+        ] {
+            let mut app = app();
+            let surface = app.current_surface_id().unwrap();
+            let other = app
+                .handle("surface.split", &json!({"direction": "right"}))
+                .unwrap()["surface_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            app.handle("surface.focus", &json!({"surface_id": surface}))
+                .unwrap();
+            let mut params = json!({"surface_id": surface});
+            match target {
+                "unknown-before" => params["before_surface_id"] = json!("missing-surface"),
+                "unknown-after" => params["after_surface_id"] = json!("missing-surface"),
+                "other-before" => params["before_surface_id"] = json!(other),
+                "other-after" => params["after_surface_id"] = json!(other),
+                _ => {}
+            }
+            let before = topology(&app);
+            assert!(app.handle("surface.reorder", &params).is_err(), "{target}");
+            assert_eq!(topology(&app), before, "rejected reorder: {target}");
+        }
+    }
+
+    #[test]
+    fn rejected_surface_moves_preserve_topology_and_focus() {
+        for anchor in ["before_surface_id", "after_surface_id"] {
+            for unknown in [false, true] {
+                let mut app = app();
+                let surface = app.current_surface_id().unwrap();
+                let pane = app.surfaces[&surface].pane_id.clone();
+                let other = app
+                    .handle("surface.split", &json!({"direction": "right"}))
+                    .unwrap()["surface_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                app.handle("surface.focus", &json!({"surface_id": surface}))
+                    .unwrap();
+                let mut params = json!({"surface_id": surface, "pane_id": pane, "focus": true});
+                params[anchor] = json!(if unknown { "missing-surface" } else { &other });
+                let before = topology(&app);
+                assert!(
+                    app.handle("surface.move", &params).is_err(),
+                    "{anchor}, unknown={unknown}"
+                );
+                assert_eq!(
+                    topology(&app),
+                    before,
+                    "rejected move: {anchor}, unknown={unknown}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn surface_self_anchors_and_same_pane_move_preserve_sole_tab() {
+        let mut app = app();
+        let surface = app.current_surface_id().unwrap();
+        let pane = app.surfaces[&surface].pane_id.clone();
+        let before = topology(&app);
+        for method in ["surface.reorder", "surface.move"] {
+            for anchor in ["before_surface_id", "after_surface_id"] {
+                let mut params = json!({"surface_id": surface, "pane_id": pane});
+                params[anchor] = json!(surface);
+                app.handle(method, &params).unwrap();
+                assert_eq!(topology(&app), before, "{method} with {anchor}");
+            }
+        }
+        app.handle(
+            "surface.move",
+            &json!({"surface_id": surface, "pane_id": pane}),
+        )
+        .unwrap();
+        assert_eq!(topology(&app), before);
+    }
+
+    #[test]
+    fn surface_order_changes_use_indices_after_removing_the_source() {
+        for method in ["surface.reorder", "surface.move"] {
+            let mut app = app();
+            let first = app.current_surface_id().unwrap();
+            let pane = app.surfaces[&first].pane_id.clone();
+            let mut create_tab = || {
+                app.handle(
+                    "surface.create",
+                    &json!({"pane_id": pane, "type": "terminal"}),
+                )
+                .unwrap()["surface_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            };
+            let second = create_tab();
+            let third = create_tab();
+            for (target, expected) in [
+                (
+                    json!({"after_surface_id": second}),
+                    [&second, &first, &third],
+                ),
+                (
+                    json!({"before_surface_id": second}),
+                    [&first, &second, &third],
+                ),
+                (json!({"index": 99}), [&second, &third, &first]),
+                (
+                    json!({"index": 0, "after_surface_id": third}),
+                    [&first, &second, &third],
+                ),
+            ] {
+                let mut params = target;
+                params["surface_id"] = json!(first);
+                params["pane_id"] = json!(pane);
+                app.handle(method, &params).unwrap();
+                assert_eq!(
+                    app.panes[&pane].surfaces,
+                    expected.map(Clone::clone),
+                    "{method}: {params}"
+                );
+            }
+
+            let split = app
+                .handle("surface.split", &json!({"direction": "right"}))
+                .unwrap();
+            let other = split["surface_id"].as_str().unwrap();
+            let other_pane = split["pane_id"].as_str().unwrap();
+            app.handle(
+                "surface.move",
+                &json!({"surface_id": first, "after_surface_id": other, "focus": true}),
+            )
+            .unwrap();
+            assert_eq!(app.panes[&pane].surfaces, [second, third]);
+            assert_eq!(
+                app.panes[other_pane].surfaces,
+                [other.to_string(), first.clone()]
+            );
+            assert_eq!(app.surfaces[&first].pane_id, other_pane);
+            assert_eq!(app.current_surface_id().unwrap(), first);
+            assert_eq!(app.current_pane_id().unwrap(), other_pane);
+        }
+    }
+
+    #[test]
+    fn moving_last_tab_out_of_split_expands_destination_to_full_bounds() {
+        for direction in ["left", "right", "up", "down"] {
+            let mut app = app();
+            let workspace = app.current_workspace_id().unwrap();
+            let destination = app.current_pane_id().unwrap();
+            let original_frame = app.workspace_debug_frames(&workspace).unwrap()[&destination];
+            let split = app
+                .handle("surface.split", &json!({"direction": direction}))
+                .unwrap();
+            let source = split["pane_id"].as_str().unwrap();
+            let surface = split["surface_id"].as_str().unwrap();
+            app.handle(
+                "surface.move",
+                &json!({
+                    "surface_id": surface, "pane_id": destination, "focus": true
+                }),
+            )
+            .unwrap();
+
+            assert!(!app.panes.contains_key(source), "{direction}");
+            assert_eq!(app.workspaces[&workspace].panes, [destination.clone()]);
+            assert_eq!(
+                app.workspace_debug_frames(&workspace).unwrap()[&destination],
+                original_frame
+            );
+            assert_eq!(app.current_pane_id().unwrap(), destination);
+            assert_eq!(app.current_surface_id().unwrap(), surface);
+            assert!(app.surfaces.contains_key(surface));
+        }
+    }
+
+    #[test]
+    fn moving_last_tab_out_of_nested_split_preserves_sibling_geometry() {
+        let mut app = app();
+        let workspace = app.current_workspace_id().unwrap();
+        let surface = app.current_surface_id().unwrap();
+        let source = app.current_pane_id().unwrap();
+        let right = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "surface_id": surface, "direction": "right"
+                }),
+            )
+            .unwrap();
+        let right_pane = right["pane_id"].as_str().unwrap();
+        app.handle(
+            "debug.layout.resize_split",
+            &json!({
+                "workspace_id": workspace, "axis": "horizontal",
+                "start": 0, "end": 800, "divider": 400, "fraction": 0.65
+            }),
+        )
+        .unwrap();
+        let before = app.workspace_debug_frames(&workspace).unwrap();
+        let bottom = app
+            .handle(
+                "surface.split",
+                &json!({
+                    "surface_id": surface, "direction": "down"
+                }),
+            )
+            .unwrap();
+        let bottom_pane = bottom["pane_id"].as_str().unwrap();
+        app.handle(
+            "surface.move",
+            &json!({
+                "surface_id": surface, "pane_id": right_pane, "focus": true
+            }),
+        )
+        .unwrap();
+
+        let after = app.workspace_debug_frames(&workspace).unwrap();
+        assert!(!after.contains_key(&source));
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[bottom_pane], before[&source]);
+        assert_eq!(after[right_pane], before[right_pane]);
+        assert_eq!(app.current_pane_id().unwrap(), right_pane);
+        assert_eq!(app.current_surface_id().unwrap(), surface);
+    }
+
+    #[test]
+    fn moving_final_workspace_tab_keeps_source_available_for_new_terminal() {
+        let mut app = app();
+        let workspace = app.current_workspace_id().unwrap();
+        let pane = app.current_pane_id().unwrap();
+        let surface = app.current_surface_id().unwrap();
+        let other = app
+            .handle("workspace.create", &json!({"title": "Destination"}))
+            .unwrap();
+        app.handle(
+            "surface.move",
+            &json!({
+                "surface_id": surface, "workspace_id": other["workspace_id"], "focus": true
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(app.workspaces[&workspace].panes, [pane.clone()]);
+        assert!(app.panes[&pane].surfaces.is_empty());
+        app.handle("workspace.select", &json!({"workspace_id": workspace}))
+            .unwrap();
+        let replacement = app
+            .handle(
+                "surface.create",
+                &json!({"type": "terminal", "focus": true}),
+            )
+            .unwrap();
+        let replacement_id = replacement["surface_id"].as_str().unwrap();
+        assert_eq!(app.surfaces[replacement_id].pane_id, pane);
+        assert_eq!(app.panes[&pane].surfaces.len(), 1);
+        assert_eq!(app.current_surface_id().unwrap(), replacement_id);
+        assert!(app.surfaces.contains_key(&surface));
     }
 }
