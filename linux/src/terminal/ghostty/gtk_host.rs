@@ -7212,11 +7212,32 @@ mod tests {
     }
 
     #[test]
-    fn gtk_ghostty_drop_path_text_quotes_multiline_paths() {
-        assert_eq!(
-            ghostty_drop_path_text([PathBuf::from("/tmp/line\nbreak")]).as_deref(),
-            Some("'/tmp/line\nbreak'")
-        );
+    fn gtk_ghostty_drop_file_values_reject_terminal_control_characters() {
+        for control in ['\n', '\r', '\t', '\u{1b}', '\u{7f}'] {
+            let path = format!("/tmp/before{control}after");
+            let value = gio::File::for_path(&path).to_value();
+            assert_eq!(ghostty_drop_text(&value), None, "path: {path:?}");
+            assert_eq!(
+                ghostty_drop_files_text([
+                    gio::File::for_path("/tmp/ordinary"),
+                    gio::File::for_path(&path),
+                ]),
+                None,
+                "must reject the entire file list: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gtk_ghostty_drop_uri_values_reject_terminal_control_characters() {
+        for control in ["%0A", "%0D", "%09", "%1B", "%7F"] {
+            let uris = format!("file:///tmp/ordinary\r\nfile:///tmp/before{control}after\r\n");
+            assert_eq!(
+                ghostty_drop_text(&uris.to_value()),
+                None,
+                "must not fall back to inserting the URI list: {uris:?}"
+            );
+        }
     }
 
     #[test]
